@@ -45,7 +45,7 @@ Vertical stack of controls; collapse state is persisted per browser.
 
 | ID    | Control                | Behaviour                                                                                                                                                                                                                                                                  |
 | ----- | ---------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| FR-3a | **Name filter**        | Label `name filter:` + text input. Case-insensitive match on lowercased basename (`filename_lc`): trimmed query **length &lt; 3** → **prefix** match (`LIKE 'q%'`); **length ≥ 3** → **substring** match (`LIKE '%q%'`). Debounced (250 ms). (*Updated due to runtime implementation / QA feedback* — previously stated substring-only.)                                                                                                                                                                   |
+| FR-3a | **Name filter**        | Label `name filter:` + text input. Case-insensitive **literal substring** on lowercased basename (`filename_lc`): non-empty trimmed query → SQL ``instr(filename_lc, needle) > 0`` (so ``_`` and ``%`` in the query are **not** ``LIKE`` wildcards). Applies to **all** lengths (1+). Debounced (250 ms). (*Updated 2026-04-25* — substring semantics; *Updated 2026-04-25b* — ``instr`` for literal ``_`` / ``%``.)                                                                                                                                                                   |
 | FR-3b | **Positive prompt**    | Label `positive prompt filter:` + text input. Comma-separated tokens; matches images whose positive prompt contains **all** tokens (AND semantics). While typing the **current** token, show top-20 autocomplete suggestions sourced from the indexed prompt vocabulary. Click a suggestion to complete the current token. |
 | FR-3c | **Tag filter**         | Same UX as FR-3b but matches against the gallery-managed `tags` field. Suggestions sourced from the tag vocabulary.                                                                                                                                                        |
 | FR-3d | **Favorite filter**    | Label `favorite filter:` + dropdown: `all` / `favorite` / `not favorite`.                                                                                                                                                                                                  |
@@ -970,9 +970,7 @@ The exact same construction is used for prompt tokens against
 expressed as additional `EXISTS` clauses against the second table —
 SQLite's planner happily reuses the same driving row.
 
-* Name filter on `filename_lc` (*Updated due to runtime implementation / QA feedback* — earlier text inverted the length rule vs `repo._build_filter` and assumed FTS5 on the MVP path):
-  * trimmed length **< 3** → **prefix** `LIKE 'needle%'` (B-tree friendly on `filename_lc`),
-  * trimmed length **≥ 3** → **substring** `LIKE '%needle%'` (MVP; **T28** may move this to FTS5 / `image_fts`).
+* Name filter on `filename_lc` — **literal substring** via ``instr(lower(basename), needle)`` (implemented as ``instr(filename_lc, ?)``; **T28** may move long needles to FTS5 / `image_fts`).
 * Sorting + pagination is **cursor-based** on `(sort_key, id)` — never
   `OFFSET` — so deep scrolling stays O(log N).
 * Counts: server returns an **estimate** for very large result sets

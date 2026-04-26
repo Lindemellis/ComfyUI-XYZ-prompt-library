@@ -306,12 +306,25 @@ def test_filters(db_path: Path, ref: dict) -> None:
         db_path=db_path, filter=repo.FilterSpec(model="sdxl"), limit=50)
     assert all(r.model == "sdxl" for r in sdxl.items)
 
-    # name filter < 3 chars (prefix) vs >= 3 chars (substring).
-    prefix_hit = repo.list_images(
+    # name filter: substring on ``filename_lc`` for all lengths (1+).
+    short_sub = repo.list_images(
         db_path=db_path, filter=repo.FilterSpec(name="fl"), limit=50)
-    assert {r.filename for r in prefix_hit.items} == {
+    assert {r.filename for r in short_sub.items} == {
         "flat_a.png", "flat_b.png", "fluffy.png"
-    }, "<3 chars prefix filter mismatch"
+    }, "2-char substring filter mismatch"
+
+    mid_sub = repo.list_images(
+        db_path=db_path, filter=repo.FilterSpec(name="ep"), limit=50)
+    assert {r.filename for r in mid_sub.items} == {
+        "deep_0.png", "deep_1.png", "deep_2.png"
+    }, "2-char interior substring (not prefix) mismatch"
+
+    # ``_`` must be literal, not a LIKE single-char wildcard (common 2-char query).
+    u0 = repo.list_images(
+        db_path=db_path, filter=repo.FilterSpec(name="_0"), limit=50)
+    assert {r.filename for r in u0.items} == {
+        "deep_0.png", "img_0.png",
+    }, "needle with underscore must match literal substring only"
 
     substr_hit = repo.list_images(
         db_path=db_path, filter=repo.FilterSpec(name="deep"), limit=50)

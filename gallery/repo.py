@@ -1780,17 +1780,11 @@ def _build_filter(
     if flt.name:
         needle = flt.name.strip().lower()
         if needle:
-            # SPEC §8.4: < 3 chars prefer prefix LIKE (index-friendly);
-            # ≥ 3 chars would ideally hit FTS5 but that is T28 — retreat
-            # to substring LIKE (full scan on filename_lc only, < 100 B
-            # per row, acceptable for MVP).
-            if len(needle) < 3:
-                where.append("image.filename_lc LIKE ?")
-                params.append(needle + "%")
-            else:
-                # TODO T28: replace with image_fts MATCH ':needle*'.
-                where.append("image.filename_lc LIKE ?")
-                params.append("%" + needle + "%")
+            # Literal substring (not ``LIKE``): ``_`` / ``%`` in the needle must
+            # not act as wildcards — two-character queries like ``_0`` are common
+            # in filenames. ``filename_lc`` is already lowercased at index time.
+            where.append("instr(image.filename_lc, ?) > 0")
+            params.append(needle)
 
     if flt.favorite == "yes":
         where.append("image.favorite = 1")

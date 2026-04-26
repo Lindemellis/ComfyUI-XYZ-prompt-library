@@ -117,9 +117,21 @@ function _readPendingRestore() {
     sessionStorage.removeItem(MAIN_SCROLL_KEY);
     const obj = JSON.parse(raw);
     if (!obj || typeof obj !== 'object') return null;
-    const scrollTop = Number(obj.scrollTop);
-    if (!Number.isFinite(scrollTop) || scrollTop < 0) return null;
-    return { scrollTop, lastId: obj.lastId ?? null };
+    let scrollTop = Number(obj.scrollTop);
+    if (!Number.isFinite(scrollTop) || scrollTop < 0) scrollTop = null;
+    let folderTreeScrollTop = Number(obj.folderTreeScrollTop);
+    if (!Number.isFinite(folderTreeScrollTop) || folderTreeScrollTop < 0) {
+      folderTreeScrollTop = null;
+    }
+    const lastId = obj.lastId != null ? obj.lastId : null;
+    if (scrollTop == null && folderTreeScrollTop == null && lastId == null) {
+      return null;
+    }
+    return {
+      scrollTop,
+      lastId,
+      folderTreeScrollTop,
+    };
   } catch {
     return null;
   }
@@ -175,13 +187,19 @@ export const MainView = defineComponent({
     // Monotonic token so a late-returning abort doesn't resurrect an
     // obsolete page (e.g. user changes sort while page-1 is mid-flight).
     let fetchToken = 0;
-    // T14: one-shot scroll restoration target read on mount. Cleared
-    // after the first non-empty fetch completes so a later refetch
-    // (filter change) won't suddenly scroll back.
-    let pendingScrollRestore = _readPendingRestore();
+    // T14: one-shot restore from sessionStorage (grid + folder tree scroll).
+    // Grid target cleared after first non-empty /images fetch; folder tree
+    // applies when ``.mv-folders-scroll`` exists (may lag folders GET).
+    const _pr = _readPendingRestore();
+    let pendingGridScrollRestore = _pr && _pr.scrollTop != null
+      ? { scrollTop: _pr.scrollTop, lastId: _pr.lastId ?? null }
+      : null;
+    let pendingFolderTreeScrollRestore = _pr && _pr.folderTreeScrollTop != null
+      ? _pr.folderTreeScrollTop
+      : null;
     // Highlight hint for the card we came back from (FR-19 "selection"
     // restore). T23 bulk checkbox overlay.
-    const lastOpenedId = ref(pendingScrollRestore ? pendingScrollRestore.lastId : null);
+    const lastOpenedId = ref(_pr != null ? (_pr.lastId ?? null) : null);
     const bulkMode = ref(false);
     const movePickerSelectionHint = computed(() => {
       const s = movePickerSel.value;
@@ -862,36 +880,65 @@ export const MainView = defineComponent({
 
     function onOpenImage(id) {
       if (typeof id !== 'number' && !(typeof id === 'string' && id.length)) return;
-      // T14: stash the grid's scrollTop + the id the user clicked so
-      // Back can restore both. We query .vg directly rather than
-      // passing a ref through VirtualGrid — VirtualGrid is T13-stable
-      // and its scroller element is unambiguous in the DOM.
+      // T14: stash grid scroll + folder-tree scroll + opened id so Back
+      // restores the same viewport. Grid: .vg / .lv-scroller; tree:
+      // ``folderTreeScrollEl`` (``.mv-folders-scroll``).
       try {
+        const payload = { lastId: id };
         const vg = document.querySelector('.lv-scroller') || document.querySelector('.vg');
-        if (vg) {
-          sessionStorage.setItem(MAIN_SCROLL_KEY, JSON.stringify({
-            scrollTop: vg.scrollTop,
-            lastId: id,
-          }));
-        }
+        if (vg) payload.scrollTop = vg.scrollTop;
+        const ft = folderTreeScrollEl.value;
+        if (ft) payload.folderTreeScrollTop = ft.scrollTop;
+        sessionStorage.setItem(MAIN_SCROLL_KEY, JSON.stringify(payload));
       } catch { /* sessionStorage unavailable — navigation still works */ }
       window.location.hash = `#/image/${id}`;
     }
 
-    // Restore scroll once the first post-mount fetch lands. We run in
+    function _tryRestoreFolderTreeScroll() {
+      if (pendingFolderTreeScrollRestore == null) return;
+      const el = folderTreeScrollEl.value;
+      if (!el) return;
+      el.scrollTop = pendingFolderTreeScrollRestore;
+      pendingFolderTreeScrollRestore = null;
+    }
+
+    // Restore grid scroll once the first post-mount fetch lands. We run in
     // nextTick so VirtualGrid’s listGen watcher (which resets
     // scrollTop=0 on a new first page) has already flushed.
     function _tryRestoreScroll() {
-      if (!pendingScrollRestore) return;
+      if (!pendingGridScrollRestore) {
+        if (pendingFolderTreeScrollRestore != null) {
+          nextTick(() => {
+            requestAnimationFrame(() => {
+              _tryRestoreFolderTreeScroll();
+            });
+          });
+        }
+        return;
+      }
       if (!images.value.length) return;
-      const target = pendingScrollRestore.scrollTop;
-      pendingScrollRestore = null;
+      const target = pendingGridScrollRestore.scrollTop;
+      pendingGridScrollRestore = null;
       nextTick(() => {
         const vg = document.querySelector('.lv-scroller') || document.querySelector('.vg');
         if (vg) vg.scrollTop = target;
+        requestAnimationFrame(() => {
+          _tryRestoreFolderTreeScroll();
+        });
       });
     }
     watch(() => images.value.length, _tryRestoreScroll);
+    watch(
+      () => [foldersLoading.value, folders.value.length],
+      () => {
+        if (pendingFolderTreeScrollRestore == null) return;
+        nextTick(() => {
+          requestAnimationFrame(() => {
+            _tryRestoreFolderTreeScroll();
+          });
+        });
+      },
+    );
 
     async function onToggleFavorite(id) {
       if (typeof id !== 'number') return;
