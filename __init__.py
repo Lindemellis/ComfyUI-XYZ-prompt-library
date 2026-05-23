@@ -1,5 +1,6 @@
 from .node import *
 from .prompt_library_node import PromptLibraryNode
+from .prompt_library_v2 import PromptLibraryV2PositiveNode, PromptLibraryV2NegativeNode
 
 import os
 import json
@@ -13,6 +14,8 @@ NODE_CLASS_MAPPINGS = {
     "XYZ Multi Text Replace": MutiTextReplace,
     "XYZ Random String Picker": RandomStringPicker,
     "XYZ Prompt Library": PromptLibraryNode,
+    "XYZ Prompt Library V2 Positive": PromptLibraryV2PositiveNode,
+    "XYZ Prompt Library V2 Negative": PromptLibraryV2NegativeNode,
 }
 
 WEB_DIRECTORY = "./js"
@@ -253,4 +256,10 @@ try:
     _xyz_gallery.setup(PromptServer.instance.app)
 except Exception as _xyz_gallery_err:
     print(f"[XYZ Gallery] setup failed, continuing without gallery: {_xyz_gallery_err!r}")
+
+try:
+    from .prompt_library_v2 import setup as _plv2_setup
+    _plv2_setup()
+except Exception as _plv2_err:
+    print(f"[PLv2] setup failed, continuing without PLv2: {_plv2_err!r}")
 

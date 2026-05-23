@@ -2,8 +2,19 @@ __pycache__/
 *.pyc
 .vscode/
 
+# Claude AI (project-level AI assistance config — not part of the node)
+.claude/
+CLAUDE.md
+skills-lock.json
+
 # Local gallery index (SQLite WAL, thumbs, config with folder roots — do not publish)
 gallery_data/
+
+# Prompt Library V2 local database (SQLite WAL — personal, do not publish)
+prompt_library_v2_data/
+
+# Prompt Library V2 design/working notes (kept local)
+prompt_library_v2_requirements.md
 
 # Secrets / local env (if you add API keys later)
 .env
