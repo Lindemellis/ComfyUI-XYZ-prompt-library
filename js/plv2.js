@@ -24,8 +24,7 @@
  */
 
 import { app } from '../../../scripts/app.js';
-import { ComfyButton }      from '../../../scripts/ui/components/button.js';
-import { ComfyButtonGroup } from '../../../scripts/ui/components/buttonGroup.js';
+import { makeMenuButton, makeButtonGroup } from './xyz_topbar.js';
 
 // ─── API client ───────────────────────────────────────────────────────────────
 
@@ -485,7 +484,7 @@ function _makeResizeHandle(getTarget, onDone) {
 
 // ─── Floating window factory ──────────────────────────────────────────────────
 
-function _makeWindow({ key, title, defs, minW, buildBody, openOtherLabel, openOtherTitle, showSettings, topbarExtra, snappable = true }) {
+function _makeWindow({ key, title, defs, minW, buildBody, openOtherLabel, openOtherTitle, showSettings, snappable = true }) {
   const win = {
     key, title, snappable, el: null, body: null, dragHandle: null,
     _built: false, _show: [], _hide: [],
@@ -545,7 +544,6 @@ function _makeWindow({ key, title, defs, minW, buildBody, openOtherLabel, openOt
       bar.append(_iconBtn(openOtherLabel, openOtherTitle || 'Open the other window (snapped)', () => _openOther(win), { fontSize: '13px', padding: '1px 4px' }));
     }
     bar.append(titleEl);
-    if (topbarExtra) topbarExtra(bar, win);
     if (showSettings) {
       const gear = _iconBtn('⚙', 'Settings', () => _openSettings(), { fontSize: '14px', padding: '1px 4px' });
       bar.append(gear);
@@ -1068,37 +1066,6 @@ function _showApplyReport(report) {
   document.body.appendChild(box);
 }
 
-// ─── Node dropdown (shared, used by plv2_editor.js) ──────────────────────────
-
-function populateNodeDropdown(sel) {
-  if (!sel) return;
-  const typeStr = state.activeTab === 'pos'
-    ? 'XYZ Prompt Library V2 Positive'
-    : 'XYZ Prompt Library V2 Negative';
-  const graphNodes = (app.graph?.nodes ?? []).filter(n => n.comfyClass === typeStr);
-  const prevId = state.activeNode?.id;
-
-  sel.innerHTML = '';
-  const blank = document.createElement('option');
-  blank.value = '';
-  blank.textContent = graphNodes.length ? '— select node —' : '(no nodes in workflow)';
-  sel.appendChild(blank);
-
-  let found = false;
-  for (const n of graphNodes) {
-    const o = document.createElement('option');
-    o.value = String(n.id);
-    o.textContent = `[${n.id}] ${n.title || (state.activeTab === 'pos' ? 'Positive' : 'Negative')}`;
-    if (n.id === prevId) { o.selected = true; found = true; }
-    sel.appendChild(o);
-  }
-  if (!found) state.activeNode = null;
-  if (!found && graphNodes.length === 1) {
-    sel.value = String(graphNodes[0].id);
-    state.activeNode = graphNodes[0];
-  }
-}
-
 // ─── Active node helper ───────────────────────────────────────────────────────
 
 function _applyNode(litegraphNode) {
@@ -1107,17 +1074,12 @@ function _applyNode(litegraphNode) {
   state.activeNode = litegraphNode;
 }
 
-// ─── Tab-change listeners (editor pos/neg) ────────────────────────────────────
-
-const _tabChangeCbs = [];
-
 // ─── Public surface ───────────────────────────────────────────────────────────
 
 window.plv2 = {
   api,
   state,
   showContextMenu,
-  populateNodeDropdown,
   inlinePrompt,
   insert: { plan: _planInsert, assemble: _assembleInsert },
   settings: _settings,
@@ -1131,14 +1093,8 @@ window.plv2 = {
     preview: previewWin,
   },
 
-  // Back-compat surface consumed by the render modules.
+  // Back-compat surface consumed by the render modules (containers + dialog anchor).
   panel: {
-    fireTabChange: (t) => {
-      state.activeTab = t;
-      state.activeNode = null;
-      _tabChangeCbs.forEach(fn => _safe(() => fn(t)));
-    },
-    onTabChange: fn => _tabChangeCbs.push(fn),
     get el()        { return libraryWin.el; },           // dialogs center on the library window
     get editorCol() { return editorWin.body; },
     get tree()      { return _treePanel; },
@@ -1183,21 +1139,21 @@ function _attachTopBarButtons(attempt = 0) {
     return;
   }
 
-  const edBtn = new ComfyButton({
-    icon: 'note-edit-outline', tooltip: 'Open Prompt Library V2 — Text Editor', app, enabled: true,
+  const edBtn = makeMenuButton({
+    icon: 'note-edit-outline', tooltip: 'Open Prompt Library V2 — Text Editor',
     classList: 'comfyui-button comfyui-menu-mobile-collapse primary',
   });
   edBtn.element.title = 'PLv2 Text Editor';
   edBtn.element.addEventListener('click', () => editorWin.show(null));
 
-  const libBtn = new ComfyButton({
-    icon: 'book-open-variant', tooltip: 'Open Prompt Library V2 — Library', app, enabled: true,
+  const libBtn = makeMenuButton({
+    icon: 'book-open-variant', tooltip: 'Open Prompt Library V2 — Library',
     classList: 'comfyui-button comfyui-menu-mobile-collapse primary',
   });
   libBtn.element.title = 'PLv2 Library';
   libBtn.element.addEventListener('click', () => libraryWin.show());
 
-  const group = new ComfyButtonGroup(edBtn, libBtn);
+  const group = makeButtonGroup(edBtn, libBtn);
   group.element.classList.add(PLV2_BTN_CLASS);
   settingsGroup.element.before(group.element);
 }

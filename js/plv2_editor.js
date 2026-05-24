@@ -870,7 +870,6 @@ app.registerExtension({
 
     window.plv2.windows.editor.onShow(_refresh);
     window.plv2.windows.editor.onHide(_stopPoll);
-    window.plv2.panel.onTabChange(() => { /* handled per-pane now */ });
 
     document.addEventListener('plv2:insert', e => {
       const d = e.detail || {};

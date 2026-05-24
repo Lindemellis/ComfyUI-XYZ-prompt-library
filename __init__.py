@@ -263,3 +263,9 @@ try:
 except Exception as _plv2_err:
     print(f"[PLv2] setup failed, continuing without PLv2: {_plv2_err!r}")
 
+try:
+    from .tagdb import setup as _tagdb_setup
+    _tagdb_setup(PromptServer.instance)
+except Exception as _tagdb_err:
+    print(f"[TagDB] setup failed, continuing without TagDB: {_tagdb_err!r}")
+

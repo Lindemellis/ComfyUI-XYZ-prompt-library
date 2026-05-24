@@ -1,5 +1,8 @@
 # Grouped prompt node
 
+> **Legacy (V1) draft.** Early design notes for the original JSON-file prompt
+> library. Superseded by **Prompt Library V2** — see `README_Prompt_Library_V2.md`.
+
 prompt_library is a custom node for Comfyui, the purpose is to allow users to create/edit/save danbooru prompts as entries in a library. The prompt_library node should also provide a textbox, in which the user can cite existing entries by name or by entry tags.
 
 The prompt library entries should be saved in and loaded from a local folder \ComfyUI_windows_portable\ComfyUI\custom_nodes\ComfyUI-XYZNodes\prompt_library as json files.

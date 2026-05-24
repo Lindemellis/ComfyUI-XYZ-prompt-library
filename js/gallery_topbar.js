@@ -1,6 +1,5 @@
 import { app } from '../../../scripts/app.js';
-import { ComfyButtonGroup } from '../../../scripts/ui/components/buttonGroup.js';
-import { ComfyButton } from '../../../scripts/ui/components/button.js';
+import { makeMenuButton, makeButtonGroup } from './xyz_topbar.js';
 
 const BUTTON_GROUP_CLASS = 'xyz-gallery-top-menu-group';
 const GALLERY_URL = '/xyz/gallery';
@@ -17,11 +16,9 @@ function getGalleryIcon() {
 }
 
 function createGalleryButton() {
-  const button = new ComfyButton({
+  const button = makeMenuButton({
     icon: 'image-multiple',
     tooltip: 'Open XYZ Gallery',
-    app,
-    enabled: true,
     classList: 'comfyui-button comfyui-menu-mobile-collapse primary',
   });
 
@@ -61,7 +58,7 @@ function attachTopMenuButton(attempt = 0) {
     return;
   }
 
-  const buttonGroup = new ComfyButtonGroup(createGalleryButton());
+  const buttonGroup = makeButtonGroup(createGalleryButton());
   buttonGroup.element.classList.add(BUTTON_GROUP_CLASS);
   settingsGroup.element.before(buttonGroup.element);
 }

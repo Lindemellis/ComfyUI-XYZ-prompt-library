@@ -1,0 +1,19 @@
+{
+  "_comment": "Author-maintained pointer to prebuilt TagDB datasets on GitHub Releases. After running `python -m tagdb.build_dataset --full --zip`, paste the printed entry into 'datasets' and set 'latest' to its version, then create a GitHub Release (tag tagdb-<version>) and upload the .zip as an asset. The .zip lives on the Release, NOT in git.",
+  "latest": "2026-05-24",
+  "datasets": [
+    {
+      "version": "2026-05-24",
+      "min_post_count": 10,
+      "tag_count": 306144,
+      "alias_count": 38949,
+      "schema_version": 2,
+      "structure_synced_through": 1779602230,
+      "full_count_synced_at": 1779602230,
+      "url": "https://github.com/zhupeter010903/ComfyUI-XYZ-prompt-library/releases/download/tagdb-2026-05-24/danbooru_2026-05-24.sqlite.zip",
+      "sha256": "4936b88c1990e15ea12e1bd3421288e2dbb5e1a711e4f79e019f684480035468",
+      "size_bytes": 32141241,
+      "compression": "zip"
+    }
+  ]
+}

@@ -23,3 +23,9 @@ prompt_library_v2_requirements.md
 # User prompt library presets (personal — keep locally only)
 prompt_library/*
 !prompt_library/.gitkeep
+
+# Tag DB snapshot data (large SQLite files + settings — do not publish)
+tagdb_data/
+
+# Author-side dataset build output (uploaded to a GitHub Release, not committed)
+dist/

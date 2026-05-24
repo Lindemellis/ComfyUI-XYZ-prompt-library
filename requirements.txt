@@ -1,0 +1,3 @@
+# TagDB scraper: impersonates a browser TLS/HTTP2 fingerprint so danbooru's
+# Cloudflare challenge ("Just a moment...") is passed without a proxy.
+curl_cffi>=0.7.0

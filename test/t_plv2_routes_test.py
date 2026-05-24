@@ -178,6 +178,30 @@ async def run_tests(db_path):
     resp = await _delete_trigger(MockRequest(path_id=auto_t["id"]))
     check("cannot delete auto 403", resp.status, 403)
 
+    # ── Validation: names, trigger uniqueness, shadow pruning (#1/#2/#4) ───
+    print("\n=== Validation ===")
+    # #2 — delimiter chars rejected in names
+    for bad in ["a,b", "a|b", "a/b", "a\\b"]:
+        resp = await _post_nodes(MockRequest({"name": bad, "parent_id": char_id}))
+        check(f"reject name {bad!r}", resp.status, 400)
+
+    # #1 — trigger may not equal a node path or an entry's default name
+    resp = await _post_trigger(MockRequest({"trigger_text": "character"}, path_id=toki_id))
+    check("trigger == path 409", resp.status, 409)
+    resp = await _post_trigger(MockRequest({"trigger_text": "toki"}, path_id=toki_id))
+    check("trigger == default name 409", resp.status, 409)
+
+    # #4 — a rename whose new path shadows a custom trigger removes + reports it
+    resp = await _post_trigger(MockRequest({"trigger_text": "zzz"}, path_id=toki_id))
+    check("add zzz trigger", resp.status, 201)
+    resp = await _post_nodes(MockRequest({"name": "qqq", "has_prompts": True}))
+    qqq_id = jbody(resp)["node"]["id"]
+    resp = await _patch_node(MockRequest({"name": "zzz"}, path_id=qqq_id))   # full_path -> "zzz"
+    removed = jbody(resp).get("removed_triggers", [])
+    check("shadowed trigger reported", any(r["trigger_text"] == "zzz" for r in removed), True)
+    check("shadowed trigger removed", any(t["trigger_text"] == "zzz" for t in repo.get_triggers(toki_id)), False)
+    await _delete_node(MockRequest(path_id=qqq_id))
+
     # ── Common ───────────────────────────────────────────────────────────
     print("\n=== Common ===")
     resp = await _get_common_delimiters(MockRequest())

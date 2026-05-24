@@ -1,5 +1,9 @@
 # ComfyUI-XYZNodes Prompt Library System
 
+> **Legacy (V1).** This describes the original JSON-file prompt library
+> (`prompt_library_node.py` / `prompt_library_window.js`). Superseded by
+> **Prompt Library V2** — see `README_Prompt_Library_V2.md`.
+
 ## Overview
 
 The Prompt Library System is a comprehensive prompt management solution for ComfyUI that provides hierarchical organization, advanced random selection algorithms, and real-time synchronization between the frontend interface and backend processing nodes.

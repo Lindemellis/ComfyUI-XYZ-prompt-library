@@ -1,5 +1,8 @@
 # Prompt Library Custom Node - Technical Requirements Specification
 
+> **Legacy (V1) spec.** Describes the original JSON-file prompt library.
+> Superseded by **Prompt Library V2** — see `README_Prompt_Library_V2.md`.
+
 ## 1. Overview
 
 The Prompt Library is a custom node for ComfyUI that enables users to create, edit, save, and manage Danbooru-style prompts as organized library entries. The node provides a textbox interface where users can reference existing entries by name or tags, with a comprehensive backend algorithm for prompt generation and a feature-rich frontend for library management.

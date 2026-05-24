@@ -1,7 +1,6 @@
 import { api } from '../../../scripts/api.js';
 import { app } from '../../../scripts/app.js';
-import { ComfyButtonGroup } from '../../../scripts/ui/components/buttonGroup.js';
-import { ComfyButton } from '../../../scripts/ui/components/button.js';
+import { makeMenuButton, makeButtonGroup } from './xyz_topbar.js';
 import { TagToolkitWindow } from './tag_toolkit_window.js';
 
 const PROMPT_LIBRARY_WINDOW_DEBUG = '[XYZ Prompt Library Window]';
@@ -1261,11 +1260,9 @@ app.registerExtension({
   },
 
   createTopMenuButton() {
-    const button = new ComfyButton({
+    const button = makeMenuButton({
       icon: 'promptlibrary',
       tooltip: 'Launch Prompt Library Manager',
-      app,
-      enabled: true,
       classList: 'comfyui-button comfyui-menu-mobile-collapse primary',
     });
 
@@ -1305,7 +1302,7 @@ app.registerExtension({
     }
 
     const promptLibraryButton = this.createTopMenuButton();
-    const buttonGroup = new ComfyButtonGroup(promptLibraryButton);
+    const buttonGroup = makeButtonGroup(promptLibraryButton);
     buttonGroup.element.classList.add(BUTTON_GROUP_CLASS);
 
     settingsGroup.element.before(buttonGroup.element);
