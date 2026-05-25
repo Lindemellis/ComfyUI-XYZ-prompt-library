@@ -384,15 +384,41 @@ def fetch_artist_posts(
     data = _get_json(session, url, timeout=timeout)
     out: List[Dict[str, Any]] = []
     for p in data if isinstance(data, list) else []:
-        preview = p.get("preview_file_url")
+        preview = p.get("preview_file_url") or p.get("large_file_url") or p.get("file_url")
         if not preview:
             continue
+        # Use 360x360 variant (not padded, preserves aspect ratio)
+        preview = preview.replace("/180x180/", "/360x360/")
         out.append({
             "id": p.get("id"),
             "preview_url": preview,
             "large_url": p.get("large_file_url") or p.get("file_url"),
             "rating": p.get("rating"),
         })
+    # If we didn't get enough valid posts, fetch more (some posts lack image URLs)
+    if len(out) < limit:
+        fetch_more = min(limit * 3, 30)
+        url2 = (
+            f"{DANBOORU_BASE}/posts.json?tags={q}&limit={fetch_more}"
+            f"{_build_auth_params(login, api_key)}"
+        )
+        more = _get_json(session, url2, timeout=timeout)
+        seen = {r["id"] for r in out}
+        for p in more if isinstance(more, list) else []:
+            if len(out) >= limit:
+                break
+            if p.get("id") in seen:
+                continue
+            preview = p.get("preview_file_url") or p.get("large_file_url") or p.get("file_url")
+            if not preview:
+                continue
+            preview = preview.replace("/180x180/", "/360x360/")
+            out.append({
+                "id": p.get("id"),
+                "preview_url": preview,
+                "large_url": p.get("large_file_url") or p.get("file_url"),
+                "rating": p.get("rating"),
+            })
     return out
 
 

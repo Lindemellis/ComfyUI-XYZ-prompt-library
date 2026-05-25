@@ -110,6 +110,7 @@ const NAV = [
   ['insertion',    '✎',  'Insertion'],
   ['library',      '📚', 'Library'],
   ['related',      '🔗', 'Related'],
+  ['preview',      '🖼', 'Preview'],
   ['dataset',      '🗄', 'Tag dataset'],
   ['about',        'ⓘ',  'About'],
 ];
@@ -219,6 +220,18 @@ class SettingsPage {
         row('Cache freshness (days)', 'Reuse cached related results for this many days.',
             numberCtrl(() => S.relatedMaxAgeDays ?? 30, (v) => { S.relatedMaxAgeDays = v || 30; save(); }, { min: 1, max: 365 })),
       );
+    } else if (key === 'preview') {
+      wrap.append(
+        sectionTitle('Preview images', 'Control preview images shown on hover in autocomplete and related tags.'),
+        row('Show artist preview', 'Show recent works popup when hovering the 🖼 icon on artist tags (category 1).',
+            toggle(() => S.showArtistPreview, (v) => { S.showArtistPreview = v; save(); })),
+        row('Show all tag preview', 'Show a preview image for any danbooru tag when hovering its preview icon.',
+            toggle(() => S.showTagPreview, (v) => { S.showTagPreview = v; save(); })),
+        row('Preview image count', 'How many preview thumbnails to show (1–10).',
+            numberCtrl(() => S.previewCount ?? 1, (v) => { S.previewCount = Math.max(1, Math.min(v || 1, 10)); save(); }, { min: 1, max: 10, step: 1, width: '60px' })),
+        el('div', { style: { color: C.sub, fontSize: '12px', marginTop: '10px' } },
+           'Preview images are fetched on-demand from danbooru. Cached in memory (no local files).'),
+      );
     } else if (key === 'dataset') {
       wrap.append(
         sectionTitle('Tag dataset', 'Danbooru credentials, the prebuilt dataset, updates and snapshots.'),
@@ -255,6 +268,7 @@ class SettingsPage {
 }
 
 const page = new SettingsPage();
+window.xyzSettingsPage = page;
 
 app.registerExtension({
   id: EXT_ID,

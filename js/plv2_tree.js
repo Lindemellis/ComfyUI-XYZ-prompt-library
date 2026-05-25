@@ -233,7 +233,7 @@ function _renderTree(container, treeMap, parentId, depth, filteredIds) {
     const toggle = el('span', {
       width: '15px', textAlign: 'center', color: '#6c7086',
       fontSize: '11px', flexShrink: '0',
-      cursor: hasKids ? 'pointer' : 'default',
+      cursor: hasKids && !isFolder ? 'pointer' : 'default',   // entry triangle clickable; folder triangle is decorative
     }, hasKids ? (isExp ? '▼' : '▶') : '');
 
     const icon = el('span', { flexShrink: '0', fontSize: '15px' },
@@ -250,22 +250,37 @@ function _renderTree(container, treeMap, parentId, depth, filteredIds) {
     row.addEventListener('mouseenter', () => { if (!isSel) row.style.background = hoverBg; });
     row.addEventListener('mouseleave', () => { if (!isSel) row.style.background = baseBg; });
 
-    // Toggle icon: expand/collapse children (works for both folders & entries with kids)
-    toggle.addEventListener('click', e => {
-      e.stopPropagation();
-      e.preventDefault();
-      if (hasKids) {
-        _expanded.has(node.id) ? _expanded.delete(node.id) : _expanded.add(node.id);
+    if (isFolder) {
+      // Issue 5: Click folder row anywhere to expand/collapse
+      row.addEventListener('click', () => {
+        if (hasKids) {
+          _expanded.has(node.id) ? _expanded.delete(node.id) : _expanded.add(node.id);
+        }
         _rerender();
+      });
+    } else {
+      // Issue 6: Entry triangle toggles sub-entry expand/collapse
+      if (hasKids) {
+        toggle.addEventListener('click', e => {
+          e.stopPropagation();
+          e.preventDefault();
+          _expanded.has(node.id) ? _expanded.delete(node.id) : _expanded.add(node.id);
+          _rerender();
+        });
       }
-    });
-
-    // Row click (outside toggle): select for detail view
-    row.addEventListener('click', () => {
-      if (isFolder) _fireSelectFolder(node);
-      else          _fireSelectEntry(node);
-      _rerender();
-    });
+      // Issue 6b: Click entry row
+      row.addEventListener('click', () => {
+        if (isSel && hasKids) {
+          // Already selected: toggle expand/collapse
+          _expanded.has(node.id) ? _expanded.delete(node.id) : _expanded.add(node.id);
+        } else {
+          // Not selected: select + expand sub-entries
+          if (hasKids) _expanded.add(node.id);
+          _fireSelectEntry(node);
+        }
+        _rerender();
+      });
+    }
 
     // Right click: context menu
     row.addEventListener('contextmenu', e => {
@@ -387,7 +402,47 @@ async function _deleteNode(node) {
 async function _load() {
   const res = await window.plv2.api.getNodes();
   _nodes = res?.nodes ?? [];
+  // Auto-select first entry on initial load
+  if (!_initialLoadDone) {
+    _initialLoadDone = true;
+    _initExpandEntries();
+    _autoSelectEntry();
+  }
   _refreshInUse();   // recomputes the in-use set (if active) then re-renders
+}
+
+let _initialLoadDone = false;
+
+// Default: all entries with sub-entries start expanded (issue 6c).
+function _initExpandEntries() {
+  for (const n of _nodes) {
+    if (n.has_prompts) {
+      const hasSubs = _nodes.some(c => c.parent_id === n.id && c.has_prompts);
+      if (hasSubs) _expanded.add(n.id);
+    }
+  }
+}
+
+// Auto-select: last opened entry, or fall back to first entry (issue 4).
+function _autoSelectEntry() {
+  if (window.plv2.state.selectedLibNodeId) return;   // already selected via other path
+  let entry = null;
+  try {
+    const lastId = window.plv2Entry?.getLastEntryId?.();
+    if (lastId) entry = _nodes.find(n => n.id === lastId && n.has_prompts);
+  } catch {}
+  if (!entry) {
+    // Default: first entry by current sort order
+    const sorted = [..._nodes].filter(n => n.has_prompts).sort((a, b) => {
+      const cmp = _sortBy === 'name' ? a.name.localeCompare(b.name) : (a.id - b.id);
+      return _sortAsc ? cmp : -cmp;
+    });
+    entry = sorted[0] || null;
+  }
+  if (entry) {
+    window.plv2.state.selectedLibNodeId = entry.id;
+    _fireSelectEntry(entry);
+  }
 }
 
 function _rerender() {

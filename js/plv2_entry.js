@@ -44,13 +44,21 @@ const _api = () => window.plv2.api;
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
+const LAST_ENTRY_KEY = 'plv2_last_entry_v1';
+
 async function showEntry(node, pushHistory = true) {
   if (!node || !node.has_prompts) return;
   _detail = window.plv2.panel.detail;
   if (pushHistory && _node && _node.id !== node.id) _history.push(_node);
   _node = node;
+  // Remember last opened entry
+  try { localStorage.setItem(LAST_ENTRY_KEY, String(node.id)); } catch {}
   await _loadData();
   _render();
+}
+
+function getLastEntryId() {
+  try { return parseInt(localStorage.getItem(LAST_ENTRY_KEY) || '', 10); } catch { return null; }
 }
 
 function closeDetail() {
@@ -361,8 +369,8 @@ function _render() {
   });
   _promptTextarea.setAttribute('spellcheck', 'false');
   _promptTextarea.placeholder = 'Active prompts joined by delimiter…';
-  // Entry text view = related-capable (req #1).
-  window.xyzTagAC?.attach(_promptTextarea, { related: true });
+  // Entry text view = related-capable (req #1), uses entry's own delimiter.
+  window.xyzTagAC?.attach(_promptTextarea, { related: true, getDelimiter: () => _delim() });
   _promptTextarea.addEventListener('blur', _syncTextToList);
   textSection.appendChild(_promptTextarea);
 
@@ -961,7 +969,10 @@ app.registerExtension({
     // Open an entry's detail from elsewhere (e.g. editor right-click → "open in entry detail").
     document.addEventListener('plv2:open-entry', e => {
       const node = e.detail?.node;
-      if (node && node.has_prompts) showEntry(node);
+      if (!node || !node.has_prompts) return;
+      // Ensure the library window is open so the detail is visible
+      try { window.plv2?.windows?.library?.show(); } catch {}
+      showEntry(node);
     });
 
     // An entry's prompts changed elsewhere (e.g. editor "add to entry") — refresh if open.
@@ -970,6 +981,6 @@ app.registerExtension({
     });
 
     // Expose for programmatic opening.
-    window.plv2Entry = { showEntry };
+    window.plv2Entry = { showEntry, getLastEntryId };
   },
 });

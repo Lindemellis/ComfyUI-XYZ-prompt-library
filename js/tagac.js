@@ -35,6 +35,9 @@ const CATEGORY_NAMES = {
   0: 'general', 1: 'artist', 3: 'copyright', 4: 'character', 5: 'meta',
 };
 
+// Default delimiter used when the textarea has no custom one.
+const DEFAULT_DELIM = ', ';
+
 // ─── Settings ─────────────────────────────────────────────────────────────────
 
 const settings = {
@@ -46,6 +49,9 @@ const settings = {
   enableRelated: false,
   minPostCount: 0,         // client-side: hide suggestions below this post count
   relatedMaxAgeDays: 30,   // related cache freshness window
+  showArtistPreview: false, // show 🖼 artist works popup on hover
+  showTagPreview: false,    // show preview image for any tag on hover
+  previewCount: 1,          // how many preview images to show (1–10)
   halfwidth: false,        // full-width （） → half-width on insert
   // Prompt Library sources
   useLibrary: true,        // suggest prompts from the Prompt Library (tag mode)
@@ -90,6 +96,32 @@ async function searchTags(q, limit) {
   }
 }
 
+// Cache tag preview metadata in memory: {tag: {posts, fetched_at}}
+const _previewCache = new Map();
+const _PREVIEW_CACHE_MAX = 200;
+
+async function fetchTagPreview(name, limit) {
+  const cached = _previewCache.get(name);
+  if (cached && cached.posts.length >= limit) {
+    return cached.posts.slice(0, limit);
+  }
+  const url = `/xyz/tagdb/tag_preview?name=${encodeURIComponent(name)}&limit=${limit}`;
+  try {
+    const r = await fetch(url);
+    if (!r.ok) return [];
+    const data = await r.json();
+    const posts = data.posts || [];
+    if (posts.length) {
+      if (_previewCache.size >= _PREVIEW_CACHE_MAX) {
+        const oldest = _previewCache.keys().next().value;
+        _previewCache.delete(oldest);
+      }
+      _previewCache.set(name, { posts, fetched_at: Date.now() });
+    }
+    return posts.slice(0, limit);
+  } catch { return []; }
+}
+
 async function fetchRelated(tag, limit) {
   try {
     const r = await fetch(`/xyz/tagdb/related?q=${encodeURIComponent(tag)}&limit=${limit}&max_age_days=${settings.relatedMaxAgeDays}`);
@@ -109,26 +141,89 @@ function _applyMinCount(results) {
 }
 
 // Library prompts matching q → candidates {kind:'library', name, entry}.
+// Pure [ref] entries (e.g. "[toki.official_custome]") are filtered out —
+// ref autocomplete is only shown after typing "[" or "/".
 async function fetchLibraryPrompts(q, limit) {
   try {
     const r = await fetch(`/xyz/plv2/ac/prompts?q=${encodeURIComponent(q)}&limit=${limit}`);
     if (!r.ok) return [];
     const data = await r.json();
-    return (data.prompts || []).map((p) => ({
-      kind: 'library', name: p.content, entry: p.entry_name || p.full_path || '',
-    }));
+    const pureRef = /^\[[^\]]+\]$/;
+    return (data.prompts || [])
+      .filter((p) => !pureRef.test((p.content || '').trim()))
+      .map((p) => ({
+        kind: 'library', name: p.content, entry: p.entry_name || p.full_path || '',
+      }));
   } catch { return []; }
 }
 
-// Entry/trigger refs matching q → candidates {kind:'ref', name, refKind, entryKind, definition}.
+// Entry/trigger refs matching q.
+// Entry names and their alias triggers are merged into one option per entry.
+// Each merged candidate has {kind:'ref', refKind, names:[...], selIdx, definition}.
 async function fetchRefs(q, limit, refKind) {
   try {
     const r = await fetch(`/xyz/plv2/ac/refs?q=${encodeURIComponent(q)}&limit=${limit}`);
     if (!r.ok) return [];
     const data = await r.json();
-    return (data.refs || []).map((x) => ({
-      kind: 'ref', name: x.name, refKind, entryKind: x.kind, definition: x.definition || '',
-    }));
+    const raw = (data.refs || []);
+
+    // Group triggers by their owning entry's full_path
+    const triggersByEntry = new Map();
+    const entries = [];
+
+    // Track node ID and auto_trigger per full_path
+    const idByPath = new Map();
+    const autoByPath = new Map();
+
+    for (const x of raw) {
+      if (x.kind === 'entry') {
+        entries.push({ name: x.name, definition: x.definition, id: x.id, auto_trigger: x.auto_trigger });
+        if (x.id != null) idByPath.set(x.name, x.id);
+        if (x.auto_trigger) autoByPath.set(x.name, x.auto_trigger);
+      } else {
+        const fp = x.definition;
+        if (!triggersByEntry.has(fp)) triggersByEntry.set(fp, []);
+        triggersByEntry.get(fp).push(x.name);
+        if (x.id != null && !idByPath.has(fp)) idByPath.set(fp, x.id);
+      }
+    }
+
+    // Merge: each entry + its triggers into one row.
+    const merged = [];
+    const seenPaths = new Set();
+
+    for (const e of entries) {
+      const fp = e.name;
+      if (seenPaths.has(fp)) continue;
+      seenPaths.add(fp);
+      const trigs = triggersByEntry.get(fp) || [];
+      const allNames = [fp];
+      for (const t of trigs) { if (!allNames.includes(t)) allNames.push(t); }
+      const auto = e.auto_trigger || autoByPath.get(fp) || null;
+      merged.push({
+        kind: 'ref', refKind,
+        names: allNames,
+        definition: e.definition,
+        auto_trigger: auto,
+        id: e.id || idByPath.get(fp) || null,
+      });
+    }
+
+    // Orphan triggers (entry not in results)
+    for (const [fp, trigs] of triggersByEntry) {
+      if (!seenPaths.has(fp) && trigs.length) {
+        seenPaths.add(fp);
+        merged.push({
+          kind: 'ref', refKind,
+          names: trigs,
+          definition: fp,
+          auto_trigger: autoByPath.get(fp) || null,
+          id: idByPath.get(fp) || null,
+        });
+      }
+    }
+
+    return merged.slice(0, limit);
   } catch { return []; }
 }
 
@@ -145,11 +240,79 @@ async function resolveShallow(ref) {
   } catch { return null; }
 }
 
+// Entries whose prompts contain q → {id, name, full_path, pos_neg, delimiter, auto_trigger}.
+async function fetchEntriesByPrompt(q, limit) {
+  try {
+    const r = await fetch(`/xyz/plv2/ac/entries_by_prompt?q=${encodeURIComponent(q)}&limit=${limit}`);
+    if (!r.ok) return [];
+    const data = await r.json();
+    return (data.entries || []).map((e) => ({
+      kind: 'plv2_entry',
+      id: e.id,
+      name: e.name,
+      full_path: e.full_path,
+      pos_neg: e.pos_neg,
+      delimiter: e.delimiter,
+      auto_trigger: e.auto_trigger,
+      has_prompts: true,
+    }));
+  } catch { return []; }
+}
+
+// Fetch an entry's prompt text for preview.
+async function fetchEntryPreview(nodeId) {
+  try {
+    const r = await fetch(`/xyz/plv2/nodes/${nodeId}/preview`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ seed: 0 }),
+    });
+    if (!r.ok) return null;
+    const d = await r.json();
+    return d.text || '';
+  } catch { return null; }
+}
+
+// Resolve a ref and return the entry node.
+async function resolveRefEntry(refInner) {
+  try {
+    const r = await fetch('/xyz/plv2/resolve_ref', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ref: refInner }),
+    });
+    if (!r.ok) return null;
+    const d = await r.json();
+    return d.node || null;
+  } catch { return null; }
+}
+
+// Extract the inner text of a [ref] at caret position.
+function _refAtCaret(text, pos) {
+  const re = /\[([^\[\]\n]*)\]/g;
+  let m;
+  while ((m = re.exec(text)) !== null) {
+    if (pos >= m.index && pos <= m.index + m[0].length) return m[1];
+  }
+  return null;
+}
+
+// Normalise a prompt/tag name to canonical underscore form for dedup comparison.
+// Strips backslash escapes and weight parens, then spaces → underscores.
+function _canonicalName(name) {
+  return (name || '')
+    .replace(/\\([()])/g, '$1')       // unescape \( → (, \) → )
+    .replace(/^\s*[\(\<]+/, '').replace(/[\)\>]+\s*$/, '')  // strip weight wrappers
+    .trim()
+    .replace(/\s+/g, '_')
+    .toLowerCase();
+}
+
 // Merge tag + library candidates for tag mode: library first, drop a library prompt
-// whose text exactly equals a danbooru tag name (req 2a: "not part of the dataset").
+// whose text matches a danbooru tag (canonical underscore form comparison).
 function _mergeTagSources(tags, library) {
-  const tagNames = new Set(tags.map((t) => t.name));
-  const lib = library.filter((p) => !tagNames.has(p.name)).slice(0, settings.maxLibrary);
+  const tagNames = new Set(tags.map((t) => _canonicalName(t.name)));
+  const lib = library
+    .filter((p) => !tagNames.has(_canonicalName(p.name)))
+    .slice(0, settings.maxLibrary);
   return [...lib, ...tags];
 }
 
@@ -210,6 +373,114 @@ async function showArtistWorks(name) {
   win.appendChild(grid);
 }
 
+// ─── Shared tag preview popup ──────────────────────────────────────────────────
+
+let _tagPvPop = null;
+let _tagPvTimer = null;
+let _tagPvTag = null;       // which tag the popup was built for
+let _tagPvIsGrid = false;
+
+async function _showTagPreviewPopup(anchor, tagName, limit) {
+  // If already showing for this tag, just reposition
+  if (_tagPvPop && _tagPvTag === tagName) {
+    clearTimeout(_tagPvTimer);
+    _tagPvPop.style.display = _tagPvIsGrid ? 'flex' : 'block';
+    _positionPvPop(anchor);
+    return;
+  }
+  // Clear any pending hide
+  clearTimeout(_tagPvTimer);
+
+  // Remove old popup if switching to a different tag
+  if (_tagPvPop) { _tagPvPop.remove(); _tagPvPop = null; }
+
+  // Create popup immediately with loading state
+  _tagPvPop = document.createElement('div');
+  _tagPvPop.className = 'xyz-tagac-preview-pop';
+  Object.assign(_tagPvPop.style, {
+    position: 'fixed', zIndex: '100020', background: '#1e1e2e',
+    border: '1px solid #45475a', borderRadius: '6px',
+    boxShadow: '0 4px 16px rgba(0,0,0,.6)',
+    padding: '8px 12px', fontSize: '12px', color: '#fff',
+    minWidth: '80px', minHeight: '24px', display: 'block',
+  });
+  _tagPvPop.textContent = 'Loading…';
+  _tagPvIsGrid = false;
+  _tagPvTag = tagName;
+  document.body.appendChild(_tagPvPop);
+  _tagPvPop.addEventListener('mouseenter', () => clearTimeout(_tagPvTimer));
+  _tagPvPop.addEventListener('mouseleave', () => _hideTagPreviewPopup());
+  _positionPvPop(anchor);
+  // Fetch and update
+  const posts = await fetchTagPreview(tagName, limit);
+  if (_tagPvTag !== tagName) return;
+  _tagPvPop.innerHTML = '';
+  if (!posts.length) {
+    Object.assign(_tagPvPop.style, {
+      maxWidth: '', padding: '8px 12px', display: 'block',
+      fontSize: '12px', color: '#888', minWidth: '80px', minHeight: '24px',
+    });
+    _tagPvPop.textContent = 'No preview available';
+    _tagPvIsGrid = false;
+  } else {
+    Object.assign(_tagPvPop.style, {
+      width: 'fit-content', maxWidth: '90vw', maxHeight: '70vh',
+      padding: '4px', display: 'flex', gap: '4px',
+      alignItems: 'flex-start', minWidth: '', minHeight: '',
+      overflowY: 'auto', scrollbarWidth: 'thin', scrollbarColor: '#45475a transparent',
+    });
+    _tagPvIsGrid = true;
+    for (const p of posts) {
+      const a = document.createElement('a');
+      a.href = `https://danbooru.donmai.us/posts/${p.id}`;
+      a.target = '_blank';
+      a.rel = 'noopener';
+      a.title = `Post #${p.id} (rating: ${p.rating || '?'})`;
+      Object.assign(a.style, { display: 'block', cursor: 'pointer' });
+      a.addEventListener('mousedown', (e) => { e.stopPropagation(); });
+      const img = document.createElement('img');
+      img.src = `/xyz/tagdb/preview_image?url=${encodeURIComponent(p.preview_url)}`;
+      img.loading = 'lazy';
+      Object.assign(img.style, {
+        height: '180px', borderRadius: '4px', display: 'block',
+      });
+      a.appendChild(img);
+      _tagPvPop.appendChild(a);
+    }
+    // Reposition after first image loads
+    const firstImg = _tagPvPop.querySelector('img');
+    if (firstImg) firstImg.addEventListener('load', () => _positionPvPop(anchor), { once: true });
+  }
+  _positionPvPop(anchor);
+}
+
+function _positionPvPop(anchor) {
+  if (!_tagPvPop) return;
+  const r = anchor.getBoundingClientRect();
+  const gap = 6;
+  // Prefer right side; fall back to left
+  let left = r.right + gap;
+  if (left + 200 > window.innerWidth - 10) left = r.left - 200 - gap;
+  if (left < 4) left = 4;
+  // Available width and height
+  const availW = Math.min(window.innerWidth - left - 10, window.innerWidth - 10);
+  const availH = window.innerHeight - r.top - 20;
+  // Column layout if narrow space; row + wrap otherwise
+  const useColumn = availW < 350;
+  _tagPvPop.style.flexDirection = useColumn ? 'column' : 'row';
+  _tagPvPop.style.flexWrap = useColumn ? 'nowrap' : 'wrap';
+  _tagPvPop.style.maxWidth = availW + 'px';
+  _tagPvPop.style.maxHeight = Math.min(availH, window.innerHeight * 0.7) + 'px';
+  _tagPvPop.style.top = Math.max(4, r.top) + 'px';
+  _tagPvPop.style.left = left + 'px';
+}
+
+function _hideTagPreviewPopup() {
+  _tagPvTimer = setTimeout(() => {
+    if (_tagPvPop) { _tagPvPop.style.display = 'none'; }
+  }, 250);
+}
+
 // ─── Caret position helper ────────────────────────────────────────────────────
 // Based on https://github.com/component/textarea-caret-position (MIT)
 
@@ -263,6 +534,14 @@ function _tokenStart(text, pos) {
   return start;
 }
 
+function _tokenEnd(text, pos) {
+  let end = text.length;
+  for (const idx of [text.indexOf(',', pos), text.indexOf('\n', pos), text.indexOf('. ', pos)]) {
+    if (idx !== -1) end = Math.min(end, idx);
+  }
+  return end;
+}
+
 function getPartialTag(el) {
   const text = el.value;
   const pos  = el.selectionStart;
@@ -301,19 +580,40 @@ function getTagRangeStart(el) {
 
 // Full tag token surrounding the caret (both directions), canonical underscore
 // form — used for "click a prompt → related tags".
+// Unescapes \( → ( and \) → ) before canonicalising.
+// Only strips paired wrapping parens, not parens that are part of the tag name.
 function getTokenAtCaret(el) {
   const text = el.value;
   const pos  = el.selectionStart;
   const start = _tokenStart(text, pos);
-  let end = text.length;
-  for (const idx of [text.indexOf(',', pos), text.indexOf('\n', pos), text.indexOf('. ', pos)]) {
-    if (idx !== -1) end = Math.min(end, idx);
+  const end = _tokenEnd(text, pos);
+  let tok = text.substring(start, end).trim();
+
+  // Drop trailing :weight first
+  const ci = tok.indexOf(':');
+  if (ci !== -1) {
+    const after = tok.substring(ci + 1);
+    if (/^\d*\.?\d+$/.test(after.replace(/[\)\>]+$/, '').trim())) {
+      tok = tok.substring(0, ci);
+    }
   }
-  let tok = text.substring(start, end).trim()
-    .replace(/^[\(\<\s]+/, '').replace(/[\)\>\s]+$/, '');
-  const ci = tok.indexOf(':');           // drop a trailing :weight
-  if (ci !== -1) tok = tok.substring(0, ci);
-  return tok.trim().replace(/\s+/g, '_');
+
+  // Only strip wrapping parens/brackets when they are paired (both sides present)
+  if (/^[\(\<]/.test(tok) && /[\)\>]$/.test(tok)) {
+    tok = tok.replace(/^[\(\<]/, '').replace(/[\)\>]$/, '');
+  }
+  tok = tok.trim();
+
+  // Unescape backslash-escaped parens before canonicalising to underscore form
+  tok = tok.replace(/\\([()])/g, '$1');
+  return tok.replace(/\s+/g, '_');
+}
+
+// Token end position (for insertion after a clicked tag).
+function getTokenEnd(el) {
+  const text = el.value;
+  const pos  = el.selectionStart;
+  return _tokenEnd(text, pos);
 }
 
 // ─── Token mode analysis ────────────────────────────────────────────────────
@@ -364,6 +664,16 @@ function _spliceInsert(el, start, end, toInsert) {
   }
 }
 
+// ─── Highlight match ─────────────────────────────────────────────────────────
+
+function _highlightMatch(text, query) {
+  if (!query) return text.replace(/&/g, '&amp;').replace(/</g, '&lt;');
+  const re = new RegExp(`(${query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')})`, 'gi');
+  return text
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(re, '<b style="color:#f9e2af">$1</b>');
+}
+
 // ─── Autocomplete UI ──────────────────────────────────────────────────────────
 
 class TagAutocompleteUI {
@@ -393,6 +703,9 @@ class TagAutocompleteUI {
     this._selIndex   = -1;
 
     this._rangeStart = 0;
+    this._isRelated  = false;  // true when showing related tags
+    this._isInfo     = false;  // true = info panel (side), false = autocomplete (below)
+    this._lastQuery  = '';     // for highlight matching in refs
 
     // Click-to-insert
     this._root.addEventListener('mousedown', (e) => {
@@ -413,6 +726,9 @@ class TagAutocompleteUI {
 
   // Tag mode: danbooru/gelbooru tags + library prompts (library first, deduped).
   async showTags(el, info) {
+    this._isRelated = false;
+    this._isInfo    = false;
+    this._lastQuery = info.query || '';
     const [tagsRaw, libRaw] = await Promise.all([
       searchTags(info.query, settings.maxSuggestions),
       settings.useLibrary ? fetchLibraryPrompts(info.query, settings.maxLibrary) : [],
@@ -425,6 +741,9 @@ class TagAutocompleteUI {
 
   // Ref mode: entry names + trigger names (after "[" or "/").
   async showRefs(el, info) {
+    this._isRelated = false;
+    this._isInfo    = false;
+    this._lastQuery = info.query || '';
     const results = await fetchRefs(info.query, settings.maxRefs, info.refKind);
     if (!results.length) { this.hide(); return; }
     this._open(el, results, info.rangeStart);
@@ -442,6 +761,11 @@ class TagAutocompleteUI {
   }
 
   hide() {
+    // Remove all popups (they'll be recreated on next render)
+    document.querySelectorAll('.xyz-tagac-preview-pop').forEach(p => p.remove());
+    _tagPvPop = null;
+    _tagPvTag = null;
+    clearTimeout(_tagPvTimer);
     this._root.style.display = 'none';
     this._candidates = [];
     this._selIndex   = -1;
@@ -462,30 +786,68 @@ class TagAutocompleteUI {
     return false;
   }
 
-  // Insert a candidate by kind: tag/library → normalized text + comma; ref/bracket
+  // Get the delimiter for the target element. If the element has a custom
+  // getDelimiter function (set via attachTo opts), use it; otherwise DEFAULT_DELIM.
+  _getDelimiter() {
+    try {
+      if (typeof this._target?._xyzGetDelimiter === 'function') {
+        return this._target._xyzGetDelimiter() || DEFAULT_DELIM;
+      }
+    } catch {}
+    return DEFAULT_DELIM;
+  }
+
+  // Insert a candidate by kind: tag/library → normalized text + delim; ref/bracket
   // → [name]; ref/slash → the entry's resolved-shallow text.
   async _insert(el, cand) {
     const text = el.value;
-    const start = this._rangeStart;
-    const pos = el.selectionStart;
+    const delim = this._getDelimiter();
     let core;
+
     if (cand.kind === 'ref' && cand.refKind === 'slash') {
-      const resolved = await resolveShallow(cand.name);
+      const refName = (cand.names && cand.names[0]) || cand.definition || cand.name;
+      const resolved = await resolveShallow(refName);
       if (resolved == null) { this.hide(); return; }
       core = resolved;
     } else if (cand.kind === 'ref') {
-      core = `[${cand.name}]`;
+      const refName = (cand.names && cand.names[0]) || cand.definition || cand.name;
+      core = `[${refName}]`;
     } else if (cand.kind === 'library') {
-      core = cand.name;                       // prompt text, inserted as-is
+      core = cand.name;
+    } else if (cand.kind === 'plv2_entry') {
+      const ref = cand.auto_trigger || cand.full_path || cand.name;
+      core = `[${ref}]`;
     } else {
-      core = _normalizeTagInsert(cand.name);  // danbooru tag
+      core = _normalizeTagInsert(cand.name);
     }
-    const afterCursor = text[pos];
-    const wantComma = settings.autoInsertComma && cand.refKind !== 'bracket'
-                      && afterCursor !== ',' && afterCursor !== ':';
-    let toInsert = core + (wantComma ? ', ' : '');
-    if (text[start - 1] === ',') toInsert = ' ' + toInsert;
-    _spliceInsert(el, start, pos, toInsert);
+
+    if (this._isRelated && cand.kind === 'tag' && !cand._isSelf) {
+      // Related-tag insertion: insert AFTER the original clicked token.
+      const end = this._rangeStart;
+      const after = text.substring(end, end + delim.length);
+      const before = text.substring(Math.max(0, end - delim.length), end);
+      const needLeading  = before !== delim && end > 0 && before[before.length - 1] !== ',';
+      const needTrailing = after !== delim && end < text.length && after[0] !== ',' && after[0] !== '\n';
+      const toInsert = (needLeading ? delim : '') + core + (needTrailing ? delim : '');
+      _spliceInsert(el, end, end, toInsert);
+    } else {
+      const start = this._rangeStart;
+      const pos = el.selectionStart;
+      const afterCursor = text[pos];
+      const beforeStart = text[start - 1];
+      let toInsert;
+      if (cand.kind === 'ref' && cand.refKind === 'bracket') {
+        toInsert = core;
+      } else if (cand.kind === 'ref' && cand.refKind === 'slash') {
+        toInsert = core + (settings.autoInsertComma && afterCursor !== ',' ? delim : '');
+      } else {
+        const wantComma = settings.autoInsertComma && afterCursor !== ',' && afterCursor !== ':';
+        toInsert = core + (wantComma ? delim : '');
+      }
+      // If the char just before start is already a delimiter, prepend a space
+      if (beforeStart === ',') toInsert = ' ' + toInsert;
+      _spliceInsert(el, start, pos, toInsert);
+    }
     this.hide();
   }
 
@@ -502,6 +864,7 @@ class TagAutocompleteUI {
       });
       if (cand.kind === 'ref') this._fillRefRow(row, cand);
       else if (cand.kind === 'library') this._fillLibraryRow(row, cand);
+      else if (cand.kind === 'plv2_entry') this._fillEntryRow(row, cand);
       else this._fillTagRow(row, cand);
       frag.appendChild(row);
     }
@@ -529,6 +892,12 @@ class TagAutocompleteUI {
   }
 
   _fillTagRow(row, tag) {
+    if (tag._isSelf) {
+      // Header row for the source tag in the related list — full info, distinct background.
+      row.style.background = '#252542';
+      row.style.borderBottom = '2px solid #444';
+      row.style.padding = '6px 8px';
+    }
     const dot = document.createElement('span');
     Object.assign(dot.style, {
       width: '7px', height: '7px', borderRadius: '50%',
@@ -538,50 +907,64 @@ class TagAutocompleteUI {
     row.appendChild(dot);
     row.appendChild(this._nameSpan(settings.replaceUnderscore ? tag.name.replace(/_/g, ' ') : tag.name));
 
-    const aliasSpan = document.createElement('span');
-    Object.assign(aliasSpan.style, {
-      color: '#888', fontSize: '13px', flexShrink: '0', maxWidth: '120px',
-      overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-    });
-    if (tag.aliases && tag.aliases.length) {
-      aliasSpan.textContent = tag.aliases[0]; aliasSpan.title = tag.aliases.join(', ');
-    } else if (tag.translations && tag.translations.length) {
-      aliasSpan.textContent = tag.translations[0]; aliasSpan.title = tag.translations.join(', ');
-      aliasSpan.style.color = '#caa';
+    if (tag._isSelf) {
+      // Show category + post count inline
+      const infoSpan = document.createElement('span');
+      Object.assign(infoSpan.style, { color: '#aaa', fontSize: '12px', flexShrink: '0' });
+      infoSpan.textContent = `${CATEGORY_NAMES[tag.category] || 'general'} · ${_fmtCount(tag.post_count)}`;
+      row.appendChild(infoSpan);
+    } else {
+      const aliasSpan = document.createElement('span');
+      Object.assign(aliasSpan.style, {
+        color: '#888', fontSize: '13px', flexShrink: '0', maxWidth: '120px',
+        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+      });
+      if (tag.aliases && tag.aliases.length) {
+        aliasSpan.textContent = tag.aliases[0]; aliasSpan.title = tag.aliases.join(', ');
+      } else if (tag.translations && tag.translations.length) {
+        aliasSpan.textContent = tag.translations[0]; aliasSpan.title = tag.translations.join(', ');
+        aliasSpan.style.color = '#caa';
+      }
+      row.appendChild(aliasSpan);
     }
-    row.appendChild(aliasSpan);
 
     const countSpan = document.createElement('span');
     Object.assign(countSpan.style, { color: '#666', fontSize: '13px', flexShrink: '0' });
     countSpan.textContent = _fmtCount(tag.post_count);
     row.appendChild(countSpan);
 
-    const jump = document.createElement('span');
-    jump.textContent = '↗'; jump.title = 'Open danbooru wiki';
-    Object.assign(jump.style, { color: '#7af', fontSize: '13px', flexShrink: '0', cursor: 'pointer', padding: '0 2px' });
-    jump.addEventListener('mousedown', (e) => {
-      e.preventDefault(); e.stopPropagation();
-      window.open(`https://danbooru.donmai.us/wiki_pages/${encodeURIComponent(tag.name)}`, '_blank');
-    });
-    row.appendChild(jump);
+    if (!tag._isSelf) {
+      const jump = document.createElement('span');
+      jump.textContent = '↗'; jump.title = 'Open danbooru wiki';
+      Object.assign(jump.style, { color: '#7af', fontSize: '13px', flexShrink: '0', cursor: 'pointer', padding: '0 2px' });
+      jump.addEventListener('mousedown', (e) => {
+        e.preventDefault(); e.stopPropagation();
+        window.open(`https://danbooru.donmai.us/wiki_pages/${encodeURIComponent(tag.name)}`, '_blank');
+      });
+      row.appendChild(jump);
 
-    if (tag.category === 1) {
-      const works = document.createElement('span');
-      works.textContent = '🖼'; works.title = 'Show recent works';
-      Object.assign(works.style, { fontSize: '13px', flexShrink: '0', cursor: 'pointer', padding: '0 2px' });
-      works.addEventListener('mousedown', (e) => {
-        e.preventDefault(); e.stopPropagation(); showArtistWorks(tag.name);
-      });
-      row.appendChild(works);
-    }
-    if (settings.enableRelated) {
-      const rel = document.createElement('span');
-      rel.textContent = '⋯rel'; rel.title = 'Show related tags';
-      Object.assign(rel.style, { color: '#7af', fontSize: '13px', flexShrink: '0', cursor: 'pointer', padding: '0 2px' });
-      rel.addEventListener('mousedown', (e) => {
-        e.preventDefault(); e.stopPropagation(); this._showRelated(tag.name);
-      });
-      row.appendChild(rel);
+      // Preview icon: showArtistPreview → artist tags only; showTagPreview → all tags
+      const wantTagPv = settings.showTagPreview;
+      const wantArtistPv = !wantTagPv && settings.showArtistPreview && tag.category === 1;
+      if (wantTagPv || wantArtistPv) {
+        const pvIcon = document.createElement('span');
+        pvIcon.textContent = '🖼';
+        pvIcon.title = wantArtistPv ? 'Show recent works' : 'Preview';
+        Object.assign(pvIcon.style, { fontSize: '13px', flexShrink: '0', cursor: 'help', padding: '0 2px', color: '#89b4fa' });
+        const limit = Math.max(1, Math.min(settings.previewCount || 1, 10));
+        pvIcon.addEventListener('mouseenter', () => {
+          _showTagPreviewPopup(pvIcon, tag.name, limit);
+        });
+        pvIcon.addEventListener('mouseleave', () => {
+          _hideTagPreviewPopup();
+        });
+        if (wantArtistPv) {
+          pvIcon.addEventListener('mousedown', (e) => {
+            e.preventDefault(); e.stopPropagation(); showArtistWorks(tag.name);
+          });
+        }
+        row.appendChild(pvIcon);
+      }
     }
   }
 
@@ -598,33 +981,251 @@ class TagAutocompleteUI {
   }
 
   _fillRefRow(row, cand) {
-    const isTrigger = cand.entryKind === 'trigger';
-    row.appendChild(this._badge(isTrigger ? 'trigger' : 'entry', isTrigger ? '#aaffaa' : '#aaddff'));
-    row.appendChild(this._nameSpan((cand.refKind === 'bracket' ? '[' : '/') + cand.name +
-                                   (cand.refKind === 'bracket' ? ']' : '')));
-    if (cand.definition) {
-      const def = document.createElement('span');
-      Object.assign(def.style, { color: '#888', fontSize: '12px', flexShrink: '0', maxWidth: '180px',
-        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' });
-      def.textContent = cand.definition; def.title = cand.definition;
-      row.appendChild(def);
+    const names = cand.names || [cand.name || ''];
+    const def = cand.definition || names[0] || '';
+    const auto = cand.auto_trigger || def;
+    const q = this._lastQuery || '';
+    const ql = q.toLowerCase();
+
+    row.appendChild(this._badge('entry', '#ffd479'));
+
+    // Primary name: default trigger name (auto_trigger), fallback to definition
+    const nameEl = document.createElement('span');
+    nameEl.style.cssText = 'flex:1;color:#e0e0e0;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+    nameEl.innerHTML = _highlightMatch(auto, q);
+    nameEl.title = `[${auto}] — ${names.join(', ')}`;
+    row.appendChild(nameEl);
+
+    // Show alias if: query matched the definition but we're showing auto_trigger, OR matched a custom trigger
+    const autoMatched = auto.toLowerCase().includes(ql);
+    if (!autoMatched) {
+      const matched = names.find(n => n !== auto && n.toLowerCase().includes(ql));
+      if (matched) {
+        const aliasSpan = document.createElement('span');
+        aliasSpan.style.cssText = 'color:#888;font-size:13px;flex-shrink:0;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+        aliasSpan.textContent = matched;
+        aliasSpan.title = names.join(', ');
+        row.appendChild(aliasSpan);
+      }
+    }
+
+    // ℹ info icon — hover to preview prompt text
+    const info = document.createElement('span');
+    info.textContent = 'ℹ';
+    info.style.cssText = 'color:#89b4fa;font-size:14px;cursor:help;flex-shrink:0;padding:0 2px;';
+    let _previewPop = null;
+    let _previewTimer = null;
+    const nodeId = cand.id;
+    info.addEventListener('mouseenter', async () => {
+      if (!nodeId) return;
+      if (_previewPop && _previewPop.isConnected) { _previewPop.style.display = 'block'; return; }
+      if (_previewPop) _previewPop = null;  // was removed from DOM
+      _previewPop = document.createElement('div');
+      _previewPop.className = 'xyz-tagac-preview-pop';
+      Object.assign(_previewPop.style, {
+        position: 'fixed', zIndex: '100020', maxWidth: '420px', maxHeight: '200px',
+        overflowY: 'auto', background: '#1e1e2e', border: '1px solid #45475a',
+        borderRadius: '6px', boxShadow: '0 4px 16px rgba(0,0,0,.6)',
+        padding: '8px 10px', fontSize: '12px', color: '#cdd6f4',
+        fontFamily: '"Fira Code",Consolas,monospace', whiteSpace: 'pre-wrap',
+        wordBreak: 'break-word', lineHeight: '1.5', scrollbarWidth: 'thin',
+        scrollbarColor: '#45475a transparent',
+      });
+      _previewPop.textContent = 'Loading…';
+      document.body.appendChild(_previewPop);
+      const text = await fetchEntryPreview(nodeId);
+      _previewPop.textContent = (text || '').trim() || '(empty)';
+      const r = info.getBoundingClientRect();
+      _previewPop.style.top = Math.max(4, r.top) + 'px';
+      _previewPop.style.left = Math.min(r.right + 6, window.innerWidth - 434) + 'px';
+    });
+    info.addEventListener('mouseleave', () => {
+      clearTimeout(_previewTimer);
+      _previewTimer = setTimeout(() => { if (_previewPop && _previewPop.isConnected) { _previewPop.style.display = 'none'; } }, 150);
+    });
+    row.appendChild(info);
+
+    // 📂 open in entry detail button
+    if (nodeId) {
+      const openBtn = document.createElement('span');
+      openBtn.textContent = '📂';
+      openBtn.style.cssText = 'color:#a6e3a1;font-size:14px;cursor:pointer;flex-shrink:0;padding:0 2px;';
+      openBtn.title = 'Open in entry detail';
+      openBtn.addEventListener('mousedown', (e) => {
+        e.preventDefault(); e.stopPropagation();
+        const node = { id: nodeId, name: def, full_path: names[0] || def, has_prompts: true };
+        document.dispatchEvent(new CustomEvent('plv2:open-entry', { detail: { node } }));
+        this.hide();
+      });
+      row.appendChild(openBtn);
     }
   }
 
+  _fillEntryRow(row, cand) {
+    // Badge
+    row.appendChild(this._badge('entry', '#ffd479'));
+
+    // Entry definition name (full_path) — click to insert [ref]
+    const nameEl = document.createElement('span');
+    nameEl.style.cssText = 'flex:1;color:#e0e0e0;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+    const q = this._lastQuery || '';
+    nameEl.innerHTML = _highlightMatch(cand.full_path || cand.name, q);
+    nameEl.title = cand.full_path || cand.name;
+    row.appendChild(nameEl);
+
+    // ℹ info icon — hover to preview prompt text
+    const info = document.createElement('span');
+    info.textContent = 'ℹ';
+    info.style.cssText = 'color:#89b4fa;font-size:14px;cursor:help;flex-shrink:0;padding:0 2px;';
+    let _previewPop = null;
+    let _previewTimer = null;
+    info.addEventListener('mouseenter', async () => {
+      if (_previewPop && _previewPop.isConnected) { _previewPop.style.display = 'block'; return; }
+      if (_previewPop) _previewPop = null;  // was removed from DOM
+      _previewPop = document.createElement('div');
+      _previewPop.className = 'xyz-tagac-preview-pop';
+      Object.assign(_previewPop.style, {
+        position: 'fixed', zIndex: '100020', maxWidth: '420px', maxHeight: '200px',
+        overflowY: 'auto', background: '#1e1e2e', border: '1px solid #45475a',
+        borderRadius: '6px', boxShadow: '0 4px 16px rgba(0,0,0,.6)',
+        padding: '8px 10px', fontSize: '12px', color: '#cdd6f4',
+        fontFamily: '"Fira Code",Consolas,monospace', whiteSpace: 'pre-wrap',
+        wordBreak: 'break-word', lineHeight: '1.5', scrollbarWidth: 'thin',
+        scrollbarColor: '#45475a transparent',
+      });
+      _previewPop.textContent = 'Loading…';
+      document.body.appendChild(_previewPop);
+      const text = await fetchEntryPreview(cand.id);
+      _previewPop.textContent = (text || '').trim() || '(empty)';
+      const r = info.getBoundingClientRect();
+      _previewPop.style.top = Math.max(4, r.top) + 'px';
+      _previewPop.style.left = Math.min(r.right + 6, window.innerWidth - 434) + 'px';
+    });
+    info.addEventListener('mouseleave', () => {
+      clearTimeout(_previewTimer);
+      _previewTimer = setTimeout(() => { if (_previewPop && _previewPop.isConnected) { _previewPop.style.display = 'none'; } }, 150);
+    });
+    row.appendChild(info);
+
+    // 📂 open in entry detail button
+    const openBtn = document.createElement('span');
+    openBtn.textContent = '📂';
+    openBtn.style.cssText = 'color:#a6e3a1;font-size:14px;cursor:pointer;flex-shrink:0;padding:0 2px;';
+    openBtn.title = 'Open in entry detail';
+    openBtn.addEventListener('mousedown', (e) => {
+      e.preventDefault(); e.stopPropagation();
+      // Ensure the candidate has has_prompts so the event listener accepts it
+      const node = { ...cand, has_prompts: true };
+      document.dispatchEvent(new CustomEvent('plv2:open-entry', { detail: { node } }));
+      this.hide();
+    });
+    row.appendChild(openBtn);
+  }
+
   async _showRelated(name) {
-    const results = await fetchRelated(name, settings.maxSuggestions);
+    this._isRelated = true;
+    // Show self-tag info immediately from cache / fast API.
+    const selfResults = searchTags(name, 1);
+    // Kick off the related fetch in parallel.
+    const relatedPromise = fetchRelated(name, settings.maxSuggestions);
+
+    const selfTag = (await selfResults).find(t => t.name === name);
+    const results = [];
+    if (selfTag) results.push({ ...selfTag, kind: 'tag', _isSelf: true });
+
+    // Show what we have immediately
+    if (results.length) {
+      this._open(this._target, [...results], this._rangeStart);
+    }
+
+    // Then wait for related results and update
+    const relatedResults = await relatedPromise;
+    for (const r of relatedResults) results.push(r);
     if (!results.length || !this._target) return;
-    this._candidates = results;
-    this._selIndex = 0;
-    this._render();
-    this._highlight();
+    // Only update if we're still the same target
+    if (this.isVisible()) {
+      this._candidates = results;
+      this._selIndex = 0;
+      this._render();
+      this._highlight();
+    }
+  }
+
+  // Show the resolved entry for a clicked [ref].
+  async showEntryForRef(el, refInner) {
+    const node = await resolveRefEntry(refInner);
+    if (!node) { this.hide(); return; }
+    const candidate = {
+      kind: 'plv2_entry',
+      id: node.id,
+      name: node.name,
+      full_path: node.full_path,
+      pos_neg: node.pos_neg,
+      delimiter: node.delimiter,
+      has_prompts: true,
+    };
+    this._isRelated = false;
+    this._isInfo    = true;
+    this._lastQuery = refInner;
+    this._open(el, [candidate], el.selectionStart);
+  }
+
+  // Show entries whose prompts contain the clicked token text.
+  // If the token is also a danbooru tag, prefer related tags over library entries.
+  async showEntriesByPrompt(el, name) {
+    // Check if this token exists in the tag dataset — if so, go to related tags.
+    if (settings.enableRelated) {
+      const tagResults = await searchTags(name, 1);
+      if (tagResults.some(t => t.name === name)) {
+        this.showRelatedFor(el, name);
+        return;
+      }
+    }
+    const entries = await fetchEntriesByPrompt(name, settings.maxSuggestions);
+    if (!entries.length) {
+      // Fallback: try related tags if enabled
+      if (settings.enableRelated) {
+        this.showRelatedFor(el, name);
+      } else {
+        this.hide();
+      }
+      return;
+    }
+    this._isRelated = false;
+    this._isInfo    = true;
+    this._lastQuery = name;
+    this._open(el, entries, el.selectionStart);
   }
 
   // Open the dropdown showing related tags for a clicked token in the textarea.
   async showRelatedFor(el, name) {
-    const results = await fetchRelated(name, settings.maxSuggestions);
+    this._isRelated = true;
+    this._isInfo    = true;
+    // Compute the token's end position so insertion appends after it.
+    const tokEnd = getTokenEnd(el);
+    this._rangeStart = tokEnd;
+
+    // Show self-tag info immediately from cache / fast API.
+    const selfResults = searchTags(name, 1);
+    const relatedPromise = fetchRelated(name, settings.maxSuggestions);
+
+    const selfTag = (await selfResults).find(t => t.name === name);
+    const results = [];
+    if (selfTag) results.push({ ...selfTag, kind: 'tag', _isSelf: true });
+
+    // Show immediately with what we have
+    if (results.length) {
+      this._open(el, [...results], tokEnd);
+    }
+
+    // Then wait for related and update
+    const relatedResults = await relatedPromise;
+    for (const r of relatedResults) results.push(r);
     if (!results.length) { this.hide(); return; }
-    this._open(el, results, el.selectionStart);  // selecting one inserts at caret
+    this._candidates = results;
+    this._selIndex = 0;
+    this._render();
+    this._highlight();
   }
 
   _highlight() {
@@ -639,22 +1240,35 @@ class TagAutocompleteUI {
     });
   }
 
+  // Position the dropdown.
+  // Autocomplete mode: below the textarea (near where the user is typing).
+  // Info mode (related/entries/ref): to the right/left of the textarea.
   _position(el) {
-    const { top, left, lineHeight } = getCaretCoordinates(el);
-    const scale = window.app?.canvas?.ds?.scale ?? 1.0;
-
-    let t = top + lineHeight * scale;
-    let l = left;
-
+    const rect = el.getBoundingClientRect();
     const rootH = this._root.offsetHeight || 200;
     const rootW = this._root.offsetWidth  || 240;
     const vH = window.innerHeight;
     const vW = window.innerWidth;
+    const gap = 4;
+    let t, l;
 
-    if (t + rootH > vH - 8) t = top - rootH;
-    if (t < 4) t = 4;
-    if (l + rootW > vW - 8) l = vW - rootW - 8;
-    if (l < 4) l = 4;
+    if (this._isInfo) {
+      // Info panel: to the right (or left) of the textarea
+      l = rect.right + gap;
+      if (l + rootW > vW - 8) l = rect.left - rootW - gap;
+      if (l < 4) l = 4;
+      t = rect.top;
+      if (t + rootH > vH - 8) t = Math.max(4, vH - rootH - 8);
+    } else {
+      // Autocomplete: below the text cursor (caret), aligned to caret horizontal
+      const { top, left, lineHeight } = getCaretCoordinates(el);
+      t = top + lineHeight + gap;
+      l = left;
+      if (t + rootH > vH - 8) t = top - rootH - gap;
+      if (t < 4) t = 4;
+      if (l + rootW > vW - 8) l = vW - rootW - 8;
+      if (l < 4) l = 4;
+    }
 
     this._root.style.top  = `${t}px`;
     this._root.style.left = `${l}px`;
@@ -698,13 +1312,30 @@ class TagACHandler {
     this._debounce(e.target);
   }
 
-  // Click a token in the textarea → show its related tags. Gated to textareas
-  // flagged related-capable (the rich editor + entry text view only).
+  // Click a token in the textarea.
+  // Priority: [ref] → show entry info → entries by prompt → related tags.
+  // Clicking empty space / non-triggering position dismisses any open info panel.
   handleClick(e) {
-    if (!settings.enabled || !settings.enableRelated || !e.target._xyzRelated) return;
+    if (!settings.enabled) return;
+    // 1) Check for [ref] at click position
+    const refInner = _refAtCaret(e.target.value, e.target.selectionStart);
+    if (refInner) {
+      this.ui.showEntryForRef(e.target, refInner);
+      return;
+    }
+    // 2) Check for token
     const name = getTokenAtCaret(e.target);
-    if (name && name.length >= 2) this.ui.showRelatedFor(e.target, name);
-    else this.ui.hide();
+    if (!name || name.length < 2) {
+      // Clicked empty area / non-triggering position — dismiss info panel
+      if (this.ui.isVisible() && this.ui._isInfo) this.ui.hide();
+      return;
+    }
+    // 3) Entries by prompt (library) → related tags (danbooru)
+    if (settings.useLibrary) {
+      this.ui.showEntriesByPrompt(e.target, name);
+    } else if (settings.enableRelated) {
+      this.ui.showRelatedFor(e.target, name);
+    }
   }
 
   handleKeyDown(e) {
@@ -769,10 +1400,11 @@ class TagACHandler {
 
 const handler = new TagACHandler();
 
-// opts.related = this textarea supports click-a-token → related tags (the PLv2
-// rich editor + entry text view set this; node/general boxes do not).
+// opts.related  — this textarea supports click-a-token → related tags
+// opts.getDelimiter — function returning the delimiter to use for insertions
 function attachTo(el, opts = {}) {
-  if (opts.related) el._xyzRelated = true;   // allow upgrading an already-hooked box
+  if (opts.related) el._xyzRelated = true;
+  if (typeof opts.getDelimiter === 'function') el._xyzGetDelimiter = opts.getDelimiter;
   if (el._xyzTagACHooked) return;
   el._xyzTagACHooked = true;
 
@@ -819,6 +1451,4 @@ app.registerExtension({
     // Attach to any already-existing textareas
     document.querySelectorAll('.comfy-multiline-input').forEach(attachTo);
   },
-  // All options now live in the unified "XYZ Prompt Tools" settings page
-  // (xyz_settings.js), which edits window.xyzAcSettings. No native settings here.
 });

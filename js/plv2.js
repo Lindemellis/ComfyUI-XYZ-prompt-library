@@ -24,7 +24,6 @@
  */
 
 import { app } from '../../../scripts/app.js';
-import { makeMenuButton, makeButtonGroup } from './xyz_topbar.js';
 
 // ─── API client ───────────────────────────────────────────────────────────────
 
@@ -545,7 +544,9 @@ function _makeWindow({ key, title, defs, minW, buildBody, openOtherLabel, openOt
     }
     bar.append(titleEl);
     if (showSettings) {
-      const gear = _iconBtn('⚙', 'Settings', () => _openSettings(), { fontSize: '14px', padding: '1px 4px' });
+      const gear = _iconBtn('⚙', 'Open XYZ Prompt Tools settings', () => {
+        try { window.xyzSettingsPage?.show(); } catch {}
+      }, { fontSize: '14px', padding: '1px 4px' });
       bar.append(gear);
     }
     bar.append(closeBtn);
@@ -963,108 +964,6 @@ function cleanPrompt(content) {
   return _stripTrailingDelim(normalizePrompt(content));
 }
 
-// ─── Settings panel + "apply to existing library" ───────────────────────────
-
-function _openSettings() {
-  const old = document.getElementById('plv2-settings');
-  if (old) { old.remove(); return; }
-
-  const box = _div('position:fixed;z-index:100050;left:50%;top:50%;transform:translate(-50%,-50%);background:#1e1e2e;border:1px solid #45475a;border-radius:8px;padding:16px 18px;box-shadow:0 8px 32px rgba(0,0,0,.7);display:flex;flex-direction:column;gap:10px;min-width:420px;max-width:520px;font-family:ui-sans-serif,system-ui,sans-serif;color:#cdd6f4;');
-  box.id = 'plv2-settings';
-
-  const head = _div('display:flex;align-items:center;');
-  head.append(_span('Prompt Normalisation', 'flex:1;font-weight:600;font-size:14px;color:#cba6f7;'));
-  const x = _iconBtn('×', 'Close', () => box.remove(), { fontSize: '18px', color: '#6c7086' });
-  head.append(x);
-  box.append(head);
-
-  const opt = (key, label, desc) => {
-    const row = _div('display:flex;gap:10px;align-items:flex-start;padding:6px 4px;border-top:1px solid #313244;cursor:pointer;');
-    const cb = document.createElement('input');
-    cb.type = 'checkbox'; cb.checked = !!_settings[key];
-    cb.style.cssText = 'margin-top:2px;accent-color:#cba6f7;cursor:pointer;flex-shrink:0;';
-    const txt = _div('display:flex;flex-direction:column;gap:2px;');
-    txt.append(_span(label, 'font-size:12px;font-weight:600;'), _span(desc, 'font-size:11px;color:#6c7086;'));
-    row.append(cb, txt);
-    const toggle = () => { _settings[key] = cb.checked; _saveSettings(); };
-    cb.addEventListener('change', toggle);
-    row.addEventListener('click', e => { if (e.target !== cb) { cb.checked = !cb.checked; toggle(); } });
-    return row;
-  };
-  box.append(
-    opt('escape',     'Escape brackets / backslashes', 'Non-weight "()" → "\\(\\)", and lone "\\" → "\\\\".'),
-    opt('halfwidth',  'Full-width → half-width punctuation', 'Convert ，。（）《》［］ "" ；：！？ etc. to ASCII.'),
-    opt('underscore', 'Underscores → spaces', 'Replace every "_" with a space.'),
-  );
-
-  const note = _span('Applies to new input / inserts everywhere. Use the button below to rewrite the existing library.',
-    'font-size:11px;color:#6c7086;border-top:1px solid #313244;padding-top:8px;');
-  box.append(note);
-
-  const applyBtn = document.createElement('button');
-  applyBtn.textContent = 'Apply to existing library';
-  applyBtn.style.cssText = 'background:#7c3aed;border:none;border-radius:4px;color:#fff;font-size:12px;padding:7px 10px;cursor:pointer;';
-  applyBtn.addEventListener('mouseenter', () => applyBtn.style.background = '#6d28d9');
-  applyBtn.addEventListener('mouseleave', () => applyBtn.style.background = '#7c3aed');
-  applyBtn.addEventListener('click', async () => {
-    if (!_settings.escape && !_settings.halfwidth && !_settings.underscore) { _settingsToast('Enable at least one transform first.'); return; }
-    applyBtn.disabled = true; applyBtn.textContent = 'Processing…';
-    try { const report = await _applyToExistingLibrary(); _showApplyReport(report); }
-    finally { applyBtn.disabled = false; applyBtn.textContent = 'Apply to existing library'; }
-  });
-  box.append(applyBtn);
-
-  document.body.appendChild(box);
-}
-
-function _settingsToast(msg) {
-  try { app.extensionManager.toast.add({ severity: 'warn', summary: 'Prompt Library V2', detail: msg, life: 3000 }); }
-  catch { console.warn('[PLv2]', msg); }
-}
-
-async function _applyToExistingLibrary() {
-  const nodes = (await api.getNodes())?.nodes ?? [];
-  const entries = nodes.filter(n => n.has_prompts);
-  const report = [];
-  for (const e of entries) {
-    let prompts = [];
-    try { prompts = (await api.getPrompts(e.id))?.prompts ?? []; } catch { continue; }
-    for (const p of prompts) {
-      const nc = cleanPrompt(p.content);
-      if (nc !== p.content && nc.trim()) {
-        try { await api.updatePrompt(p.id, { content: nc }); report.push({ path: e.full_path, before: p.content, after: nc }); }
-        catch (err) { console.error('[PLv2] apply failed', err); }
-      }
-    }
-  }
-  return report;
-}
-
-function _showApplyReport(report) {
-  const old = document.getElementById('plv2-apply-report');
-  if (old) old.remove();
-  const box = _div('position:fixed;z-index:100051;left:50%;top:50%;transform:translate(-50%,-50%);background:#1e1e2e;border:1px solid #45475a;border-radius:8px;padding:14px 16px;box-shadow:0 8px 32px rgba(0,0,0,.7);display:flex;flex-direction:column;gap:8px;width:560px;max-width:90vw;max-height:70vh;font-family:ui-sans-serif,system-ui,sans-serif;color:#cdd6f4;');
-  box.id = 'plv2-apply-report';
-  const head = _div('display:flex;align-items:center;');
-  head.append(_span(`Normalised ${report.length} prompt${report.length === 1 ? '' : 's'}`, 'flex:1;font-weight:600;font-size:13px;color:#cba6f7;'));
-  head.append(_iconBtn('×', 'Close', () => box.remove(), { fontSize: '18px', color: '#6c7086' }));
-  box.append(head);
-
-  const list = _div('flex:1;overflow:auto;display:flex;flex-direction:column;gap:6px;border-top:1px solid #313244;padding-top:8px;scrollbar-width:thin;scrollbar-color:#45475a transparent;');
-  if (!report.length) {
-    list.append(_span('No prompts needed changes.', 'color:#6c7086;font-size:12px;padding:12px;text-align:center;'));
-  }
-  for (const r of report) {
-    const row = _div('display:flex;flex-direction:column;gap:2px;font-size:11px;border-bottom:1px solid #25253a;padding-bottom:5px;');
-    row.append(_span(r.path, 'color:#6c7086;'));
-    const before = _span(r.before, 'color:#f38ba8;white-space:pre-wrap;word-break:break-word;');
-    const after  = _span(r.after,  'color:#a6e3a1;white-space:pre-wrap;word-break:break-word;');
-    row.append(before, _span('↓', 'color:#6c7086;'), after);
-    list.append(row);
-  }
-  box.append(list);
-  document.body.appendChild(box);
-}
 
 // ─── Active node helper ───────────────────────────────────────────────────────
 
@@ -1086,7 +985,8 @@ window.plv2 = {
   saveSettings: _saveSettings,   // persist normalize flags (used by unified settings page)
   normalizePrompt,
   cleanPrompt,
-  openSettings: _openSettings,
+  // Normalisation settings now live in the XYZ Prompt Tools unified settings page.
+  openSettings: () => { try { window.xyzSettingsPage?.show(); } catch {} },
 
   windows: {
     editor:  editorWin,
@@ -1103,7 +1003,7 @@ window.plv2 = {
   },
 };
 
-// ─── Node extension (two buttons) + topbar (two buttons) ──────────────────────
+// ─── Node extension (three per-node buttons) ──────────────────────────────────────
 
 const PLV2_TYPES = new Set([
   'XYZ Prompt Library V2 Positive',
@@ -1122,41 +1022,6 @@ function _nodeBtn(label) {
   b.addEventListener('mouseenter', () => { b.style.background = '#6d28d9'; });
   b.addEventListener('mouseleave', () => { b.style.background = '#7c3aed'; });
   return b;
-}
-
-const PLV2_BTN_CLASS = 'xyz-plv2-top-menu-group';
-const MAX_ATTACH     = 120;
-
-function _attachTopBarButtons(attempt = 0) {
-  if (document.querySelector(`.${PLV2_BTN_CLASS}`)) return;
-
-  const settingsGroup = app.menu?.settingsGroup;
-  if (!settingsGroup?.element?.parentElement) {
-    if (attempt >= MAX_ATTACH) {
-      console.warn('[PLv2] Unable to locate ComfyUI settings group; topbar buttons skipped.');
-      return;
-    }
-    requestAnimationFrame(() => _attachTopBarButtons(attempt + 1));
-    return;
-  }
-
-  const edBtn = makeMenuButton({
-    icon: 'note-edit-outline', tooltip: 'Open Prompt Library V2 — Text Editor',
-    classList: 'comfyui-button comfyui-menu-mobile-collapse primary',
-  });
-  edBtn.element.title = 'PLv2 Text Editor';
-  edBtn.element.addEventListener('click', () => editorWin.show(null));
-
-  const libBtn = makeMenuButton({
-    icon: 'book-open-variant', tooltip: 'Open Prompt Library V2 — Library',
-    classList: 'comfyui-button comfyui-menu-mobile-collapse primary',
-  });
-  libBtn.element.title = 'PLv2 Library';
-  libBtn.element.addEventListener('click', () => libraryWin.show());
-
-  const group = makeButtonGroup(edBtn, libBtn);
-  group.element.classList.add(PLV2_BTN_CLASS);
-  settingsGroup.element.before(group.element);
 }
 
 app.registerExtension({
@@ -1207,6 +1072,6 @@ app.registerExtension({
   },
 
   async setup() {
-    _attachTopBarButtons();
+    // Topbar buttons are now consolidated into the XYZ dropdown (gallery_topbar.js).
   },
 });

@@ -182,7 +182,7 @@ class TagDBManager {
 
   // ── active dataset info ──
   _sectionActive() {
-    this.els.banner = el('div', { style: { fontSize: '12px', color: '#ccc', lineHeight: '1.5' } }, 'Loading…');
+    this.els.banner = el('div', { style: { fontSize: '12px', color: '#ccc', lineHeight: '1.7' } }, 'Loading…');
     return this._section('Active dataset', this.els.banner);
   }
 
@@ -190,15 +190,23 @@ class TagDBManager {
     try {
       const a = (await api.activeInfo()).active;
       if (!a) { this.els.banner.textContent = 'No active dataset.'; this._activeFilename = null; return; }
-      const isRecon = String(a.label || '').startsWith('recon');
       const tc = Number(a.tag_count || 0).toLocaleString();
-      const counts = fmtEpoch(Number(a.full_count_synced_at || 0));
-      const dataTime = fmtEpoch(Number(a.structure_synced_through || 0));
-      this.els.banner.innerHTML =
-        `<b>${a.label || a.filename}</b> · ${tc} tags` +
-        `<br>counts &amp; related captured: <b>${counts}</b>` +
-        `<br>tag data current to: <b>${dataTime}</b>` +
-        (isRecon ? ` <span style="color:#fc6">(reconstructed time-node)</span>` : '');
+      const created      = fmtEpoch(Number(a.created_at || 0));
+      const incrUpdate   = Number(a.structure_synced_through || 0);
+      const incrStr      = incrUpdate ? fmtEpoch(incrUpdate) : '—';
+      const countRelated = fmtEpoch(Number(a.full_count_synced_at || 0));
+      const isRecon      = String(a.label || '').startsWith('recon');
+      const reconDate    = isRecon ? (String(a.label || '').replace('recon_', '')) : null;
+      const parts = [
+        `<b>${a.label || a.filename}</b> · ${tc} tags`,
+        `Creation: <b>${created}</b>`,
+        `Latest incremental update: <b>${incrStr}</b>`,
+        `Count &amp; related data date: <b>${countRelated}</b>`,
+      ];
+      if (isRecon && reconDate) {
+        parts.push(`Time backtrack: <b style="color:#fc6">${reconDate}</b> <span style="color:#fc6">(historical snapshot)</span>`);
+      }
+      this.els.banner.innerHTML = parts.join('<br>');
       this._activeFilename = a.filename;
     } catch {}
   }

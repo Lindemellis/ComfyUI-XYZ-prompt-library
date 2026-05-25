@@ -407,6 +407,86 @@ async def _handle_artist_posts(request: web.Request) -> web.Response:
     return _ok({"name": name, "posts": posts})
 
 
+# In-memory cache for tag preview: {tag_name: {preview_url, ..., fetched_at}}
+_tag_preview_cache: Dict[str, Dict[str, Any]] = {}
+_TAG_PREVIEW_CACHE_MAX = 500
+_TAG_PREVIEW_CACHE_TTL = 600  # 10 minutes
+
+
+async def _handle_tag_preview(request: web.Request) -> web.Response:
+    """GET /xyz/tagdb/tag_preview?name=&limit= — preview images for a tag."""
+    name = request.rel_url.query.get("name", "").strip()
+    if not name:
+        return _ok({"name": "", "posts": []})
+    try:
+        limit = max(1, min(int(request.rel_url.query.get("limit", "1")), 10))
+    except ValueError:
+        limit = 1
+
+    import time as _t
+    now = _t.time()
+
+    # Check cache (must have enough posts and not expired)
+    cached = _tag_preview_cache.get(name)
+    if cached and (now - cached.get("fetched_at", 0)) < _TAG_PREVIEW_CACHE_TTL:
+        posts = cached.get("posts", [])
+        if len(posts) >= limit:
+            return _ok({"name": name, "posts": posts[:limit]})
+
+    # Fetch from danbooru
+    login, api_key = _get_credentials()
+    loop = request.app.loop if hasattr(request.app, "loop") else None
+    from . import scraper as _sc
+
+    def _fetch():
+        return _sc.fetch_artist_posts(name, limit=limit, login=login, api_key=api_key)
+
+    try:
+        posts = await loop.run_in_executor(None, _fetch) if loop else _fetch()
+    except Exception as exc:
+        if cached:
+            return _ok({"name": name, "posts": cached.get("posts", [])[:limit]})
+        return _err(502, f"tag preview fetch failed: {exc}")
+
+    # Store non-empty results in cache (FIFO eviction)
+    if posts:
+        if len(_tag_preview_cache) >= _TAG_PREVIEW_CACHE_MAX:
+            oldest = min(_tag_preview_cache, key=lambda k: _tag_preview_cache[k].get("fetched_at", 0))
+            del _tag_preview_cache[oldest]
+        _tag_preview_cache[name] = {"posts": posts, "fetched_at": now}
+
+    return _ok({"name": name, "posts": posts[:limit]})
+
+
+async def _handle_preview_image(request: web.Request) -> web.Response:
+    """GET /xyz/tagdb/preview_image?url= — proxy a danbooru CDN image through the backend.
+
+    The browser may not be able to load cdn.donmai.us images directly.
+    This handler fetches the image server-side via curl_cffi and returns it.
+    """
+    import urllib.parse as _up
+    raw = request.rel_url.query.get("url", "")
+    url = _up.unquote(raw)
+    if not url or not url.startswith("https://cdn.donmai.us/"):
+        return _err(400, "invalid or disallowed image url")
+    from . import scraper as _sc
+    loop = request.app.loop if hasattr(request.app, "loop") else None
+
+    def _fetch():
+        s = _sc._make_session()
+        r = s.get(url, timeout=15)
+        r.raise_for_status()
+        ct = r.headers.get("content-type", "image/jpeg")
+        return ct, r.content
+
+    try:
+        ct, body = await loop.run_in_executor(None, _fetch) if loop else _fetch()
+    except Exception as exc:
+        return _err(502, f"image fetch failed: {exc}")
+    return web.Response(body=body, content_type=ct,
+                        headers={"Cache-Control": "public, max-age=86400"})
+
+
 async def _handle_official_check(request: web.Request) -> web.Response:
     if not _data_dir:
         return _err(500, "tagdb data directory not initialized")
@@ -616,6 +696,8 @@ def register(server: Any, data_dir: Path) -> None:
     r.get("/xyz/tagdb/search")(_handle_search)
     r.get("/xyz/tagdb/related")(_handle_related)
     r.get("/xyz/tagdb/artist_posts")(_handle_artist_posts)
+    r.get("/xyz/tagdb/tag_preview")(_handle_tag_preview)
+    r.get("/xyz/tagdb/preview_image")(_handle_preview_image)
     r.post("/xyz/tagdb/reconstruct")(_handle_reconstruct)
     r.get("/xyz/tagdb/snapshots")(_handle_snapshots_list)
     r.get("/xyz/tagdb/snapshots/active")(_handle_snapshots_get_active)

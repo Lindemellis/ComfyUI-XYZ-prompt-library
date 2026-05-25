@@ -752,6 +752,12 @@ async def _ac_refs(request: web.Request) -> web.Response:
     return _ok({"refs": _repo.search_refs(q, _ac_limit(request))})
 
 
+async def _ac_entries_by_prompt(request: web.Request) -> web.Response:
+    """GET /xyz/plv2/ac/entries_by_prompt?q=&limit= — entries whose prompts contain q."""
+    q = request.rel_url.query.get("q", "")
+    return _ok({"entries": _repo.search_entries_by_prompt(q, _ac_limit(request))})
+
+
 async def _resolve_shallow(request: web.Request) -> web.Response:
     """POST /xyz/plv2/resolve_shallow  Body: {"ref": "...", "seed": 0}
 
@@ -833,6 +839,7 @@ def register(server) -> None:
     r.post("/xyz/plv2/resolve_ref")(_resolve_ref)
     r.get("/xyz/plv2/ac/prompts")(_ac_prompts)
     r.get("/xyz/plv2/ac/refs")(_ac_refs)
+    r.get("/xyz/plv2/ac/entries_by_prompt")(_ac_entries_by_prompt)
     r.post("/xyz/plv2/resolve_shallow")(_resolve_shallow)
 
     # Common lists

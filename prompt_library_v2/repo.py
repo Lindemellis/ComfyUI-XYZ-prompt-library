@@ -835,6 +835,11 @@ def search_prompt_contents(q: str, limit: int = 20) -> List[Dict[str, Any]]:
             FROM prompts p
             JOIN nodes n ON n.id = p.node_id
             WHERE p.enabled = 1 AND p.content LIKE ?
+              AND NOT (p.content LIKE '[%' AND p.content LIKE '%]'
+                       AND p.content NOT LIKE '%,%'
+                       AND p.content NOT LIKE '%{%'
+                       AND p.content NOT LIKE '%|%'
+                       AND p.content NOT LIKE '%' || char(10) || '%')
             GROUP BY p.content
             ORDER BY uses DESC, LENGTH(p.content) ASC
             LIMIT ?
@@ -858,19 +863,62 @@ def search_refs(q: str, limit: int = 20) -> List[Dict[str, Any]]:
     try:
         out: List[Dict[str, Any]] = []
         for r in conn.execute(
-            "SELECT name, full_path FROM nodes WHERE has_prompts = 1 "
-            "AND (full_path LIKE ? OR name LIKE ?) ORDER BY full_path LIMIT ?",
+            "SELECT n.id, n.name, n.full_path, "
+            "(SELECT t.trigger_text FROM triggers t WHERE t.node_id = n.id AND t.is_auto = 1 LIMIT 1) AS auto_trigger "
+            "FROM nodes n WHERE n.has_prompts = 1 "
+            "AND (n.full_path LIKE ? OR n.name LIKE ?) ORDER BY n.full_path LIMIT ?",
             (pattern, pattern, limit),
         ).fetchall():
-            out.append({"name": r["full_path"], "kind": "entry", "definition": r["name"]})
+            out.append({"name": r["full_path"], "kind": "entry", "definition": r["name"], "id": r["id"], "auto_trigger": r["auto_trigger"]})
         for r in conn.execute(
-            "SELECT t.trigger_text AS trigger_text, n.full_path AS full_path "
+            "SELECT t.trigger_text AS trigger_text, n.full_path AS full_path, n.id AS node_id "
             "FROM triggers t JOIN nodes n ON n.id = t.node_id "
             "WHERE t.trigger_text LIKE ? ORDER BY t.trigger_text LIMIT ?",
             (pattern, limit),
         ).fetchall():
-            out.append({"name": r["trigger_text"], "kind": "trigger", "definition": r["full_path"]})
+            out.append({"name": r["trigger_text"], "kind": "trigger", "definition": r["full_path"], "id": r["node_id"]})
         return out[:limit]
+    finally:
+        conn.close()
+
+
+def search_entries_by_prompt(q: str, limit: int = 20) -> List[Dict[str, Any]]:
+    """Return distinct entries whose enabled prompts contain q (substring).
+
+    Returns dicts: {id, name, full_path, pos_neg, delimiter, auto_trigger}.
+    """
+    q = (q or "").strip()
+    if not q:
+        return []
+    pattern = f"%{q}%"
+    conn = _db.connect_read(_db_path())
+    try:
+        rows = conn.execute(
+            """
+            SELECT DISTINCT n.id, n.name, n.full_path, n.pos_neg, n.delimiter
+            FROM nodes n
+            JOIN prompts p ON p.node_id = n.id
+            WHERE n.has_prompts = 1 AND p.enabled = 1 AND p.content LIKE ?
+            ORDER BY n.full_path
+            LIMIT ?
+            """,
+            (pattern, limit),
+        ).fetchall()
+        out: List[Dict[str, Any]] = []
+        for r in rows:
+            trigger = conn.execute(
+                "SELECT trigger_text FROM triggers WHERE node_id=? AND is_auto=1 LIMIT 1",
+                (r["id"],),
+            ).fetchone()
+            out.append({
+                "id": r["id"],
+                "name": r["name"],
+                "full_path": r["full_path"],
+                "pos_neg": r["pos_neg"],
+                "delimiter": r["delimiter"],
+                "auto_trigger": trigger["trigger_text"] if trigger else None,
+            })
+        return out
     finally:
         conn.close()
 

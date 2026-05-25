@@ -1,6 +1,5 @@
 import { api } from '../../../scripts/api.js';
 import { app } from '../../../scripts/app.js';
-import { makeMenuButton, makeButtonGroup } from './xyz_topbar.js';
 import { TagToolkitWindow } from './tag_toolkit_window.js';
 
 const PROMPT_LIBRARY_WINDOW_DEBUG = '[XYZ Prompt Library Window]';
@@ -31,8 +30,8 @@ app.registerExtension({
     // Initialize the library window
     this.createLibraryWindow();
 
-    // Add prompt library button to topbar menu
-    this.addPromptLibraryToTopbar();
+    // Global access for the consolidated topbar dropdown menu.
+    window.xyzV1Library = { show: () => this.showLibraryWindow() };
   },
 
   loadStyles() {
@@ -1255,70 +1254,7 @@ app.registerExtension({
     }
   },
 
-  addPromptLibraryToTopbar() {
-    this.attachTopMenuButton();
-  },
-
-  createTopMenuButton() {
-    const button = makeMenuButton({
-      icon: 'promptlibrary',
-      tooltip: 'Launch Prompt Library Manager',
-      classList: 'comfyui-button comfyui-menu-mobile-collapse primary',
-    });
-
-    button.element.setAttribute('aria-label', 'Launch Prompt Library Manager');
-    button.element.title = 'Launch Prompt Library Manager';
-
-    if (button.iconElement) {
-      button.iconElement.innerHTML = this.getPromptLibraryIcon();
-      button.iconElement.style.width = '1.2rem';
-      button.iconElement.style.height = '1.2rem';
-    }
-
-    button.element.addEventListener('click', () => {
-      this.showLibraryWindow();
-    });
-
-    return button;
-  },
-
-  attachTopMenuButton(attempt = 0) {
-    const BUTTON_GROUP_CLASS = 'prompt-library-top-menu-group';
-    const MAX_ATTACH_ATTEMPTS = 120;
-
-    if (document.querySelector(`.${BUTTON_GROUP_CLASS}`)) {
-      return;
-    }
-
-    const settingsGroup = app.menu?.settingsGroup;
-    if (!settingsGroup?.element?.parentElement) {
-      if (attempt >= MAX_ATTACH_ATTEMPTS) {
-        console.warn('Prompt Library: unable to locate the ComfyUI settings button group.');
-        return;
-      }
-
-      requestAnimationFrame(() => this.attachTopMenuButton(attempt + 1));
-      return;
-    }
-
-    const promptLibraryButton = this.createTopMenuButton();
-    const buttonGroup = makeButtonGroup(promptLibraryButton);
-    buttonGroup.element.classList.add(BUTTON_GROUP_CLASS);
-
-    settingsGroup.element.before(buttonGroup.element);
-  },
-
-  getPromptLibraryIcon() {
-    return `
-      <svg width="20" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" xmlns="http://www.w3.org/2000/svg">
-        <path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20"/>
-        <path d="M6.5 2H20v20H6.5A2.5 2.5 0 0 1 4 19.5v-15A2.5 2.5 0 0 1 6.5 2z"/>
-        <path d="M8 7h6"/>
-        <path d="M8 11h6"/>
-        <path d="M8 15h4"/>
-      </svg>
-    `;
-  },
+  // No standalone topbar button — consolidated into the XYZ dropdown menu.
 
   showTagToolkit() {
     if (!this.tagToolkitWindow) {

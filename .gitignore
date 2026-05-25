@@ -5,6 +5,7 @@ __pycache__/
 # Claude AI (project-level AI assistance config — not part of the node)
 .claude/
 CLAUDE.md
+HANDOFF.md
 skills-lock.json
 
 # Local gallery index (SQLite WAL, thumbs, config with folder roots — do not publish)
