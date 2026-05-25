@@ -57,6 +57,8 @@ const api = {
   saveSettings:    (b) => api.postJSON('/xyz/tagdb/settings', b),
   officialCheck:   () => api.getJSON('/xyz/tagdb/official/check'),
   officialDownload:(b) => api.postJSON('/xyz/tagdb/official/download', b),
+  translationsCheck:    () => api.getJSON('/xyz/tagdb/translations/check'),
+  translationsDownload: () => api.postJSON('/xyz/tagdb/translations/download', {}),
   maintain:        (b) => api.postJSON('/xyz/tagdb/maintain', b),
   maintainStatus:  () => api.getJSON('/xyz/tagdb/maintain/status'),
   maintainCancel:  () => api.postJSON('/xyz/tagdb/maintain/cancel', {}),
@@ -222,13 +224,24 @@ class TagDBManager {
   // ── official dataset ──
   _sectionOfficial() {
     this.els.official = el('div', { style: { fontSize: '12px', marginBottom: '6px' } }, '—');
+    this.els.trStatus = el('div', { style: { fontSize: '11px', color: '#999', margin: '4px 0' } }, '');
+    this.els.inclTr = el('input', { type: 'checkbox' });
     return this._section('Prebuilt dataset (from the node author’s GitHub release)',
       this.els.official,
       el('div', {},
         this._btn('Check for updates', () => this._checkOfficial()),
         this._btn('Download / Update', () => this._downloadOfficial(), { primary: true }),
       ),
+      el('label', { style: { fontSize: '12px', display: 'block', marginTop: '8px' } },
+        this.els.inclTr, ' also fetch the translations add-on (JP/CN names + artist former names)'),
+      this.els.trStatus,
+      el('div', {}, this._btn('Download translations add-on only', () => this._downloadTranslations())),
     );
+  }
+
+  async _downloadTranslations() {
+    try { await api.translationsDownload(); this._toast('Translations download started'); }
+    catch (e) { this._toast(e.message.includes('400') ? 'Download the base dataset first' : 'Error: ' + e.message); }
   }
 
   // ── update ──
@@ -310,6 +323,13 @@ class TagDBManager {
         `latest: <b>${info.latest || '—'}</b> · installed: <b>${info.installed || 'none'}</b>` +
         (info.update_available ? ' · <span style="color:#6f6">update available</span>' : ' · up to date');
       if (!silent) this._toast(`Prebuilt dataset: ${status} (latest ${info.latest || '—'}, installed ${info.installed || 'none'})`);
+      try {
+        const t = await api.translationsCheck();
+        this.els.trStatus.textContent = t.available
+          ? (t.installed ? 'Translations add-on: installed ✓'
+                         : `Translations add-on: available (${Math.round((t.size_bytes || 0) / 1e6)} MB) — not installed`)
+          : 'Translations add-on: none published';
+      } catch {}
     } catch (e) {
       this.els.official.textContent = 'check failed: ' + e.message;
       if (!silent) this._toast('Check failed: ' + e.message);
@@ -321,7 +341,8 @@ class TagDBManager {
       // If a working DB exists, replace it (the backend exports it to local/ first).
       const snaps = await api.snapshots();
       const hasWorking = snaps.some((s) => s.kind === 'working');
-      await api.officialDownload({ replace_working: hasWorking });
+      await api.officialDownload({ replace_working: hasWorking,
+                                   include_translations: this.els.inclTr?.checked });
       this._toast('Download started');
     } catch (e) { this._toast('Download error: ' + e.message); }
   }
@@ -450,7 +471,7 @@ app.registerExtension({
       tooltip: 'Lower = more (rarer) tags but a larger DB and longer scrape. 10 is a good default.',
       type: 'number',
       attrs: { min: 0, step: 5 },
-      defaultValue: 10,
+      defaultValue: 50,
       category: ['XYZ Tag Autocomplete', 'Danbooru account', 'Scrape threshold'],
     },
     {

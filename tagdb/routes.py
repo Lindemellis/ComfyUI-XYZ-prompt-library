@@ -426,6 +426,7 @@ async def _handle_official_download(request: web.Request) -> web.Response:
         body = {}
     version = body.get("version") or None
     replace_working = bool(body.get("replace_working", False))
+    include_translations = bool(body.get("include_translations", False))
     manifest_url = _load_settings().get("manifest_url") or None
     working = _working_db_path
     data_dir = _data_dir
@@ -448,6 +449,10 @@ async def _handle_official_download(request: web.Request) -> web.Response:
                                               stop_event=_maintain_stop_event)
                 ver = path.name.split("_danbooru.sqlite")[0]
                 _dist.seed_working_db_from_official(path, working, version=ver)
+                if include_translations and _dist.translations_available(manifest_url):
+                    _dist.download_translations(data_dir, working, version=version,
+                                               manifest_url=manifest_url, progress_cb=log,
+                                               stop_event=_maintain_stop_event)
             _adopt_working_db()
             log("Prebuilt dataset installed and active.")
         except Exception as exc:
@@ -459,6 +464,47 @@ async def _handle_official_download(request: web.Request) -> web.Response:
     _start_maintain_thread("tagdb-download", _run, "download",
                            "[download] fetching official dataset...", threading.Event())
     return _ok({"ok": True, "message": "download started"})
+
+
+async def _handle_translations_check(request: web.Request) -> web.Response:
+    from . import distribution as _dist
+    manifest_url = _load_settings().get("manifest_url") or None
+    tr = _dist.translations_available(manifest_url)
+    return _ok({
+        "available": bool(tr),
+        "installed": _dist.translations_installed(_working_db_path) if _working_db_path else False,
+        "size_bytes": (tr or {}).get("size_bytes"),
+    })
+
+
+async def _handle_translations_download(request: web.Request) -> web.Response:
+    if _maintain_running:
+        return _err(409, "a maintenance task is already running")
+    if not _data_dir or not _working_db_path or not _working_db_path.exists():
+        return _err(400, "download/seed the base dataset first")
+    manifest_url = _load_settings().get("manifest_url") or None
+    working = _working_db_path
+    data_dir = _data_dir
+
+    def _run() -> None:
+        global _maintain_running, _search_conn
+        from . import distribution as _dist
+        log = _maintain_log.append
+        try:
+            with _maintain_lock:
+                _dist.download_translations(data_dir, working, manifest_url=manifest_url,
+                                           progress_cb=log, stop_event=_maintain_stop_event)
+            _search_conn = None  # FTS changed — drop cached read conn so it reopens
+            log("Translations add-on installed.")
+        except Exception as exc:
+            log(f"Error: {exc}")
+            logger.exception("Translations download failed")
+        finally:
+            _maintain_running = False
+
+    _start_maintain_thread("tagdb-translations", _run, "translations",
+                           "[translations] downloading add-on...", threading.Event())
+    return _ok({"ok": True, "message": "translations download started"})
 
 
 def _export_working_to_local(log) -> Optional[Path]:
@@ -579,6 +625,8 @@ def register(server: Any, data_dir: Path) -> None:
     r.post("/xyz/tagdb/settings")(_handle_settings_post)
     r.get("/xyz/tagdb/official/check")(_handle_official_check)
     r.post("/xyz/tagdb/official/download")(_handle_official_download)
+    r.get("/xyz/tagdb/translations/check")(_handle_translations_check)
+    r.post("/xyz/tagdb/translations/download")(_handle_translations_download)
     r.post("/xyz/tagdb/maintain")(_handle_maintain_start)
     r.get("/xyz/tagdb/maintain/status")(_handle_maintain_status)
     r.post("/xyz/tagdb/maintain/cancel")(_handle_maintain_cancel)

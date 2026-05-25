@@ -178,6 +178,101 @@ def download_official(
     return target
 
 
+def translations_available(manifest_url: Optional[str] = None) -> Optional[Dict[str, Any]]:
+    """Return the translations-DLC entry for the latest dataset, or None."""
+    manifest = load_manifest(manifest_url)
+    ds = _dataset_by_version(manifest, manifest.get("latest"))
+    return (ds or {}).get("translations")
+
+
+def translations_installed(working_path: Path) -> bool:
+    """True if the working DB already has translations merged in."""
+    working_path = Path(working_path)
+    if not working_path.exists():
+        return False
+    conn = _db.connect_read(working_path)
+    try:
+        return conn.execute("SELECT COUNT(*) FROM translations").fetchone()[0] > 0
+    except Exception:
+        return False
+    finally:
+        conn.close()
+
+
+def merge_translations(working_path: Path, dlc_path: Path,
+                       progress_cb: Optional[Callable[[str], None]] = None) -> None:
+    """Merge a translations-DLC sqlite into the working DB + refold into FTS."""
+    from .snapshots import rebuild_fts
+    conn = _db.connect_write(working_path)
+    try:
+        conn.execute(f"ATTACH '{Path(dlc_path).as_posix()}' AS dlc")
+        conn.execute("BEGIN")
+        conn.execute("INSERT OR REPLACE INTO translations(tag, lang, text) "
+                     "SELECT tag, lang, text FROM dlc.translations")
+        conn.execute("COMMIT")
+        conn.execute("DETACH dlc")
+        if progress_cb:
+            progress_cb("Folding translations into the search index...")
+        rebuild_fts(conn)
+        conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES('translations_installed','1')")
+    finally:
+        conn.close()
+
+
+def download_translations(data_dir: Path, working_path: Path, version: Optional[str] = None,
+                          manifest_url: Optional[str] = None,
+                          progress_cb: Optional[Callable[[str], None]] = None,
+                          stop_event=None) -> None:
+    """Download + verify + unzip the translations DLC, then merge it into the working DB."""
+    def _log(m):
+        logger.info(m)
+        if progress_cb:
+            progress_cb(m)
+
+    manifest = load_manifest(manifest_url)
+    ds = _dataset_by_version(manifest, version)
+    tr = (ds or {}).get("translations")
+    if not tr:
+        raise RuntimeError("No translations DLC is available in the manifest.")
+    if not Path(working_path).exists():
+        raise RuntimeError("Download/seed the base dataset first, then add translations.")
+
+    out_dir = _official_dir(data_dir)
+    part = out_dir / ".translations.part"
+    _log(f"Downloading translations DLC ({tr.get('size_bytes', '?')} bytes)...")
+    session = _sc._make_session()
+    resp = session.get(tr["url"], stream=True, timeout=120)
+    resp.raise_for_status()
+    with open(part, "wb") as f:
+        for chunk in resp.iter_content(chunk_size=1 << 20):
+            if stop_event and stop_event.is_set():
+                f.close(); part.unlink(missing_ok=True)
+                raise RuntimeError("Download cancelled")
+            if chunk:
+                f.write(chunk)
+    if tr.get("sha256") and _sha256(part) != tr["sha256"]:
+        part.unlink(missing_ok=True)
+        raise RuntimeError("translations DLC sha256 mismatch")
+
+    tmpdb = out_dir / ".translations.sqlite"
+    if tr.get("compression") == "zip":
+        with zipfile.ZipFile(part) as zf:
+            members = [n for n in zf.namelist() if n.endswith(".sqlite")]
+            if not members:
+                part.unlink(missing_ok=True)
+                raise RuntimeError("translations DLC zip has no .sqlite")
+            with zf.open(members[0]) as src, open(tmpdb, "wb") as dst:
+                shutil.copyfileobj(src, dst)
+        part.unlink(missing_ok=True)
+    else:
+        os.replace(part, tmpdb)
+
+    _log("Merging translations...")
+    merge_translations(working_path, tmpdb, progress_cb)
+    tmpdb.unlink(missing_ok=True)
+    _log("Translations DLC installed.")
+
+
 def seed_working_db_from_official(official_path: Path, working_path: Path,
                                   version: Optional[str] = None) -> None:
     """Copy a downloaded official file to the working DB and mark its origin."""

@@ -1,19 +1,25 @@
 {
-  "_comment": "Author-maintained pointer to prebuilt TagDB datasets on GitHub Releases. After running `python -m tagdb.build_dataset --full --zip`, paste the printed entry into 'datasets' and set 'latest' to its version, then create a GitHub Release (tag tagdb-<version>) and upload the .zip as an asset. The .zip lives on the Release, NOT in git.",
+  "_comment": "Author-maintained pointer to prebuilt TagDB datasets on GitHub Releases. Build with `python -m tagdb.build_dataset --full --with-versions --with-artists --zip` (base, no translations) and `--translations-dlc` (the optional translations add-on). Upload both .zip to a Release; paste the printed entries here. The .zip lives on the Release, NOT in git.",
   "latest": "2026-05-24",
   "datasets": [
     {
       "version": "2026-05-24",
-      "min_post_count": 10,
-      "tag_count": 306246,
+      "min_post_count": 50,
+      "tag_count": 118135,
       "alias_count": 38975,
       "schema_version": 2,
       "structure_synced_through": 1779666111,
       "full_count_synced_at": 1779666111,
       "url": "https://github.com/zhupeter010903/ComfyUI-XYZ-prompt-library/releases/download/tagdb-2026-05-24/danbooru_2026-05-24.sqlite.zip",
-      "sha256": "305c3889e6fe494b8138fb78065fdb5f0ef0fb695042749e2a9b0bbbb7e6c737",
-      "size_bytes": 110162406,
-      "compression": "zip"
+      "sha256": "ca4135c68c77b752a4a44fc60be03483d9eff6ad867e0e9c61c190d6213e0735",
+      "size_bytes": 40298356,
+      "compression": "zip",
+      "translations": {
+        "url": "https://github.com/zhupeter010903/ComfyUI-XYZ-prompt-library/releases/download/tagdb-2026-05-24/translations_2026-05-24.sqlite.zip",
+        "sha256": "8071c8f6445ed277d810b0b13f7813cc060038d93f6550dfe8f45a75b4ee9da5",
+        "size_bytes": 4906827,
+        "compression": "zip"
+      }
     }
   ]
 }
