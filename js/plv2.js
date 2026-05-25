@@ -1083,6 +1083,7 @@ window.plv2 = {
   inlinePrompt,
   insert: { plan: _planInsert, assemble: _assembleInsert },
   settings: _settings,
+  saveSettings: _saveSettings,   // persist normalize flags (used by unified settings page)
   normalizePrompt,
   cleanPrompt,
   openSettings: _openSettings,

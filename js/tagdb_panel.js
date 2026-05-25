@@ -29,11 +29,11 @@ const KIND_LABELS = {
   legacy:   'legacy',
 };
 
-// Persistent default for the scrape threshold (count >= N), set in ComfyUI Settings.
-const SCRAPE_MIN_SETTING = EXT_ID + '.ScrapeMinPostCount';
+// Scrape threshold default (count >= N) — lives in the shared settings object,
+// edited in the unified XYZ Prompt Tools settings page.
 function scrapeMinDefault() {
-  const n = parseInt(app.extensionManager?.setting?.get(SCRAPE_MIN_SETTING), 10);
-  return Number.isFinite(n) && n >= 0 ? n : 10;
+  const n = parseInt(window.xyzAcSettings?.scrapeMin, 10);
+  return Number.isFinite(n) && n >= 0 ? n : 50;
 }
 
 // ─── API ───────────────────────────────────────────────────────────────────────
@@ -113,6 +113,24 @@ class TagDBManager {
     this.root.style.display = 'flex';
     this.refreshAll();
     this._startPolling();
+  }
+
+  // Render the manager's sections into a host element (the unified settings page's
+  // "Tag dataset" tab) instead of a standalone window.
+  renderInto(host) {
+    host.append(
+      this._sectionActive(),
+      this._sectionCredentials(),
+      this._sectionOfficial(),
+      this._sectionUpdate(),
+      this._sectionSnapshots(),
+    );
+    this.refreshAll();
+    this._startPolling();
+  }
+
+  detach() {
+    this._stopPolling();
   }
 
   // ── build ──
@@ -458,50 +476,6 @@ const manager = new TagDBManager();
 
 // ─── Extension registration ─────────────────────────────────────────────────────
 
-app.registerExtension({
-  id: EXT_ID,
-  name: 'XYZ Tag DB Manager',
-  // Launcher button rendered INSIDE the ComfyUI Settings page (function-type
-  // setting → custom DOM). Grouped under the same category as the autocomplete
-  // settings. NOT a topbar button.
-  settings: [
-    {
-      id: SCRAPE_MIN_SETTING,
-      name: 'Scrape: only fetch tags with post count ≥ this',
-      tooltip: 'Lower = more (rarer) tags but a larger DB and longer scrape. 10 is a good default.',
-      type: 'number',
-      attrs: { min: 0, step: 5 },
-      defaultValue: 50,
-      category: ['XYZ Tag Autocomplete', 'Danbooru account', 'Scrape threshold'],
-    },
-    {
-      id: EXT_ID + '.openManager',
-      name: 'Tag DB Manager (API key, dataset download/update, snapshots)',
-      category: ['XYZ Tag Autocomplete', 'Danbooru account', 'Manager'],
-      type: () => {
-        const b = document.createElement('button');
-        b.textContent = 'Open Tag DB Manager';
-        Object.assign(b.style, {
-          background: '#3a6', color: '#fff', border: '1px solid #555',
-          borderRadius: '4px', padding: '5px 12px', cursor: 'pointer',
-        });
-        b.addEventListener('click', () => manager.show());
-        return b;
-      },
-    },
-  ],
-  // Also expose via command palette + the main menu (Extensions) — never topbar.
-  commands: [
-    {
-      id: EXT_ID + '.open',
-      label: 'Open Tag DB Manager',
-      icon: 'pi pi-database',
-      function: () => manager.toggle(),
-    },
-  ],
-  menuCommands: [
-    { path: ['Extensions', 'XYZ Nodes'], commands: [EXT_ID + '.open'] },
-  ],
-});
-
+// No native ComfyUI settings / launcher here — the unified XYZ Prompt Tools
+// settings page (xyz_settings.js) embeds this manager via manager.renderInto().
 export { manager };

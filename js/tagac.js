@@ -46,15 +46,26 @@ const settings = {
   enableRelated: false,
   minPostCount: 0,         // client-side: hide suggestions below this post count
   relatedMaxAgeDays: 30,   // related cache freshness window
+  halfwidth: false,        // full-width （） → half-width on insert
   // Prompt Library sources
   useLibrary: true,        // suggest prompts from the Prompt Library (tag mode)
   maxLibrary: 10,          // cap on library suggestions shown
   useRefs: true,           // suggest entry/trigger refs after "[" or "/"
   maxRefs: 10,             // cap on ref suggestions
+  // Dataset
+  scrapeMin: 50,           // default scrape threshold (count >= N)
 };
 
-// Settings shared with PLv2 normalization live on window.xyzAcSettings so the
-// unified settings page (xyz_settings.js) can mutate one object.
+// Single shared settings object. The unified settings page (xyz_settings.js)
+// mutates this; we persist it to localStorage and load it back on startup.
+const _SETTINGS_KEY = 'xyzAcSettings_v1';
+try { Object.assign(settings, JSON.parse(localStorage.getItem(_SETTINGS_KEY) || '{}')); } catch {}
+settings.save = function () {
+  try {
+    const { save, ...plain } = settings;
+    localStorage.setItem(_SETTINGS_KEY, JSON.stringify(plain));
+  } catch {}
+};
 window.xyzAcSettings = settings;
 
 // ─── API ─────────────────────────────────────────────────────────────────────
@@ -808,67 +819,6 @@ app.registerExtension({
     // Attach to any already-existing textareas
     document.querySelectorAll('.comfy-multiline-input').forEach(attachTo);
   },
-
-  settings: [
-    {
-      id:           EXT_ID + '.Enable',
-      name:         'Enable tag autocomplete',
-      type:         'boolean',
-      defaultValue: true,
-      category:     [EXT_NAME, 'General', 'Enable'],
-      onChange:     (v) => { settings.enabled = v; if (!v) handler.ui.hide(); },
-    },
-    {
-      id:           EXT_ID + '.MaxSuggestions',
-      name:         'Max suggestions',
-      type:         'slider',
-      attrs:        { min: 5, max: 50, step: 5 },
-      defaultValue: 15,
-      category:     [EXT_NAME, 'General', 'Max suggestions'],
-      onChange:     (v) => { settings.maxSuggestions = v; },
-    },
-    {
-      id:           EXT_ID + '.ReplaceUnderscore',
-      name:         "Replace '_' with space",
-      type:         'boolean',
-      defaultValue: true,
-      category:     [EXT_NAME, 'General', 'Replace underscore'],
-      onChange:     (v) => { settings.replaceUnderscore = v; },
-    },
-    {
-      id:           EXT_ID + '.AutoComma',
-      name:         'Auto-insert comma after tag',
-      type:         'boolean',
-      defaultValue: true,
-      category:     [EXT_NAME, 'General', 'Auto comma'],
-      onChange:     (v) => { settings.autoInsertComma = v; },
-    },
-    {
-      id:           EXT_ID + '.MinPostCount',
-      name:         'Hide suggestions below this post count',
-      type:         'number',
-      attrs:        { min: 0, step: 10 },
-      defaultValue: 0,
-      category:     [EXT_NAME, 'General', 'Min post count'],
-      onChange:     (v) => { settings.minPostCount = Number(v) || 0; },
-    },
-    {
-      id:           EXT_ID + '.EnableRelated',
-      name:         'Show related-tags affordance (1 request per click)',
-      type:         'boolean',
-      defaultValue: false,
-      category:     [EXT_NAME, 'Related', 'Enable'],
-      onChange:     (v) => { settings.enableRelated = v; },
-    },
-    {
-      id:           EXT_ID + '.RelatedMaxAgeDays',
-      name:         'Related tags cache freshness (days)',
-      type:         'number',
-      attrs:        { min: 1, step: 1 },
-      defaultValue: 30,
-      category:     [EXT_NAME, 'Related', 'Cache age'],
-      onChange:     (v) => { settings.relatedMaxAgeDays = Number(v) || 30; },
-    },
-    // Danbooru login + api key live in the Tag DB Manager window (see tagdb_panel.js).
-  ],
+  // All options now live in the unified "XYZ Prompt Tools" settings page
+  // (xyz_settings.js), which edits window.xyzAcSettings. No native settings here.
 });
