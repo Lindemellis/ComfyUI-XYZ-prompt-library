@@ -574,10 +574,6 @@ function getPartialTag(el) {
   return partial.replace(/\s+/g, '_');
 }
 
-function getTagRangeStart(el) {
-  return _tokenStart(el.value, el.selectionStart);
-}
-
 // Full tag token surrounding the caret (both directions), canonical underscore
 // form — used for "click a prompt → related tags".
 // Unescapes \( → ( and \) → ) before canonicalising.
@@ -1120,35 +1116,6 @@ class TagAutocompleteUI {
       this.hide();
     });
     row.appendChild(openBtn);
-  }
-
-  async _showRelated(name) {
-    this._isRelated = true;
-    // Show self-tag info immediately from cache / fast API.
-    const selfResults = searchTags(name, 1);
-    // Kick off the related fetch in parallel.
-    const relatedPromise = fetchRelated(name, settings.maxSuggestions);
-
-    const selfTag = (await selfResults).find(t => t.name === name);
-    const results = [];
-    if (selfTag) results.push({ ...selfTag, kind: 'tag', _isSelf: true });
-
-    // Show what we have immediately
-    if (results.length) {
-      this._open(this._target, [...results], this._rangeStart);
-    }
-
-    // Then wait for related results and update
-    const relatedResults = await relatedPromise;
-    for (const r of relatedResults) results.push(r);
-    if (!results.length || !this._target) return;
-    // Only update if we're still the same target
-    if (this.isVisible()) {
-      this._candidates = results;
-      this._selIndex = 0;
-      this._render();
-      this._highlight();
-    }
   }
 
   // Show the resolved entry for a clicked [ref].
