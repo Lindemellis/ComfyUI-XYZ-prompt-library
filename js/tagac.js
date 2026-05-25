@@ -21,7 +21,7 @@ import { ComfyWidgets } from '../../../scripts/widgets.js';
 const EXT_ID   = 'XYZNodes.TagAutocomplete';
 const EXT_NAME = 'XYZ Tag Autocomplete';
 
-const DEBOUNCE_MS = 150;
+const DEBOUNCE_MS = 70;
 
 const CATEGORY_COLORS = {
   0: '#aaddff',  // general
@@ -42,18 +42,38 @@ const settings = {
   maxSuggestions: 15,
   replaceUnderscore: true,
   autoInsertComma: true,
+  escapeParens: true,      // escape ( ) in inserted tags (prompt weight syntax)
   enableRelated: false,
   minPostCount: 0,         // client-side: hide suggestions below this post count
   relatedMaxAgeDays: 30,   // related cache freshness window
+  // Prompt Library sources
+  useLibrary: true,        // suggest prompts from the Prompt Library (tag mode)
+  maxLibrary: 10,          // cap on library suggestions shown
+  useRefs: true,           // suggest entry/trigger refs after "[" or "/"
+  maxRefs: 10,             // cap on ref suggestions
 };
+
+// Settings shared with PLv2 normalization live on window.xyzAcSettings so the
+// unified settings page (xyz_settings.js) can mutate one object.
+window.xyzAcSettings = settings;
 
 // ─── API ─────────────────────────────────────────────────────────────────────
 
+// Small LRU-ish cache so re-typing / deleting doesn't re-hit the server.
+const _searchCache = new Map();
+const _SEARCH_CACHE_MAX = 300;
+
 async function searchTags(q, limit) {
+  const key = `${limit}|${q}`;
+  const hit = _searchCache.get(key);
+  if (hit) return hit;
   try {
     const r = await fetch(`/xyz/tagdb/search?q=${encodeURIComponent(q)}&limit=${limit}`);
     if (!r.ok) return [];
-    return await r.json();
+    const data = await r.json();
+    if (_searchCache.size >= _SEARCH_CACHE_MAX) _searchCache.clear();
+    _searchCache.set(key, data);
+    return data;
   } catch {
     return [];
   }
@@ -65,7 +85,7 @@ async function fetchRelated(tag, limit) {
     if (!r.ok) return [];
     const data = await r.json();
     return (data.related || []).map((x) => ({
-      name: x.name, category: x.category, aliases: [], post_count: undefined,
+      kind: 'tag', name: x.name, category: x.category, aliases: [], post_count: undefined,
     }));
   } catch {
     return [];
@@ -75,6 +95,108 @@ async function fetchRelated(tag, limit) {
 function _applyMinCount(results) {
   if (!settings.minPostCount) return results;
   return results.filter((r) => (r.post_count ?? Infinity) >= settings.minPostCount);
+}
+
+// Library prompts matching q → candidates {kind:'library', name, entry}.
+async function fetchLibraryPrompts(q, limit) {
+  try {
+    const r = await fetch(`/xyz/plv2/ac/prompts?q=${encodeURIComponent(q)}&limit=${limit}`);
+    if (!r.ok) return [];
+    const data = await r.json();
+    return (data.prompts || []).map((p) => ({
+      kind: 'library', name: p.content, entry: p.entry_name || p.full_path || '',
+    }));
+  } catch { return []; }
+}
+
+// Entry/trigger refs matching q → candidates {kind:'ref', name, refKind, entryKind, definition}.
+async function fetchRefs(q, limit, refKind) {
+  try {
+    const r = await fetch(`/xyz/plv2/ac/refs?q=${encodeURIComponent(q)}&limit=${limit}`);
+    if (!r.ok) return [];
+    const data = await r.json();
+    return (data.refs || []).map((x) => ({
+      kind: 'ref', name: x.name, refKind, entryKind: x.kind, definition: x.definition || '',
+    }));
+  } catch { return []; }
+}
+
+// Resolve an entry ref to its shallow text (for "/entry" insertion).
+async function resolveShallow(ref) {
+  try {
+    const r = await fetch('/xyz/plv2/resolve_shallow', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ref }),
+    });
+    if (!r.ok) return null;
+    const d = await r.json();
+    return d.found ? (d.text || '') : null;
+  } catch { return null; }
+}
+
+// Merge tag + library candidates for tag mode: library first, drop a library prompt
+// whose text exactly equals a danbooru tag name (req 2a: "not part of the dataset").
+function _mergeTagSources(tags, library) {
+  const tagNames = new Set(tags.map((t) => t.name));
+  const lib = library.filter((p) => !tagNames.has(p.name)).slice(0, settings.maxLibrary);
+  return [...lib, ...tags];
+}
+
+// ─── Artist works popup ─────────────────────────────────────────────────────────
+
+let _artistWin = null;
+
+async function showArtistWorks(name) {
+  if (!_artistWin) {
+    _artistWin = document.createElement('div');
+    Object.assign(_artistWin.style, {
+      position: 'fixed', top: '60px', left: '50%', transform: 'translateX(-50%)',
+      width: '600px', maxWidth: '90vw', maxHeight: '80vh', overflowY: 'auto',
+      background: '#1a1a2e', border: '1px solid #444', borderRadius: '8px',
+      boxShadow: '0 8px 32px rgba(0,0,0,.6)', zIndex: '100000', padding: '10px',
+      color: '#ddd', font: '13px sans-serif',
+    });
+    document.body.appendChild(_artistWin);
+  }
+  const win = _artistWin;
+  win.style.display = 'block';
+  const display = settings.replaceUnderscore ? name.replace(/_/g, ' ') : name;
+  win.innerHTML = '';
+  const bar = document.createElement('div');
+  Object.assign(bar.style, { display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' });
+  bar.innerHTML = `<b>Recent works — ${display}</b>`;
+  const close = document.createElement('span');
+  close.textContent = '✕'; close.style.cursor = 'pointer'; close.style.padding = '0 6px';
+  close.addEventListener('click', () => { win.style.display = 'none'; });
+  bar.appendChild(close);
+  win.appendChild(bar);
+  const status = document.createElement('div');
+  status.textContent = 'Loading…';
+  win.appendChild(status);
+
+  let posts = [];
+  try {
+    const r = await fetch(`/xyz/tagdb/artist_posts?name=${encodeURIComponent(name)}&limit=24`);
+    posts = (await r.json()).posts || [];
+  } catch { /* ignore */ }
+
+  if (!posts.length) { status.textContent = 'No works found (or fetch failed).'; return; }
+  status.remove();
+  const grid = document.createElement('div');
+  Object.assign(grid.style, { display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: '6px' });
+  for (const p of posts) {
+    const a = document.createElement('a');
+    a.href = `https://danbooru.donmai.us/posts/${p.id}`;
+    a.target = '_blank';
+    const img = document.createElement('img');
+    img.src = p.preview_url;
+    img.loading = 'lazy';
+    Object.assign(img.style, { width: '100%', borderRadius: '4px', display: 'block' });
+    if (p.rating && p.rating !== 'g' && p.rating !== 's') img.style.filter = 'blur(0px)';
+    a.appendChild(img);
+    grid.appendChild(a);
+  }
+  win.appendChild(grid);
 }
 
 // ─── Caret position helper ────────────────────────────────────────────────────
@@ -119,15 +241,22 @@ function getCaretCoordinates(el) {
 
 // ─── Partial-tag extraction ───────────────────────────────────────────────────
 
+function _tokenStart(text, pos) {
+  // Token boundaries: comma, newline, and ". " (period+space) to match the
+  // Prompt Library's delimiter handling.
+  const lastComma   = text.lastIndexOf(',', pos - 1);
+  const lastNewline = text.lastIndexOf('\n', pos - 1);
+  let start = Math.max(lastComma, lastNewline) + 1;
+  const lastDotSpace = text.lastIndexOf('. ', pos - 1);
+  if (lastDotSpace !== -1) start = Math.max(start, lastDotSpace + 2);
+  return start;
+}
+
 function getPartialTag(el) {
   const text = el.value;
   const pos  = el.selectionStart;
 
-  // Find last comma or newline before cursor
-  const lastComma   = text.lastIndexOf(',', pos - 1);
-  const lastNewline = text.lastIndexOf('\n', pos - 1);
-  const start = Math.max(lastComma, lastNewline) + 1;
-
+  const start = _tokenStart(text, pos);
   const segment = text.substring(start, pos);
 
   // Don't trigger inside weight modifiers like :1.2
@@ -150,46 +279,76 @@ function getPartialTag(el) {
   // Strip leading paren/angle-bracket weight wrappers and spaces
   const partial = segment.replace(/^\s*[\(\<]+/, '').trim();
 
-  return partial.replace(/_/g, settings.replaceUnderscore ? ' ' : '_');
+  // Canonical search form: danbooru tag names use underscores, so normalise the
+  // user's spaces → underscores (e.g. "yd (orange maru" → "yd_(orange_maru").
+  return partial.replace(/\s+/g, '_');
 }
 
 function getTagRangeStart(el) {
-  const text = el.value;
-  const pos  = el.selectionStart;
-  const lastComma   = text.lastIndexOf(',', pos - 1);
-  const lastNewline = text.lastIndexOf('\n', pos - 1);
-  return Math.max(lastComma, lastNewline) + 1;
+  return _tokenStart(el.value, el.selectionStart);
 }
 
-// ─── Tag insertion ────────────────────────────────────────────────────────────
+// Full tag token surrounding the caret (both directions), canonical underscore
+// form — used for "click a prompt → related tags".
+function getTokenAtCaret(el) {
+  const text = el.value;
+  const pos  = el.selectionStart;
+  const start = _tokenStart(text, pos);
+  let end = text.length;
+  for (const idx of [text.indexOf(',', pos), text.indexOf('\n', pos), text.indexOf('. ', pos)]) {
+    if (idx !== -1) end = Math.min(end, idx);
+  }
+  let tok = text.substring(start, end).trim()
+    .replace(/^[\(\<\s]+/, '').replace(/[\)\>\s]+$/, '');
+  const ci = tok.indexOf(':');           // drop a trailing :weight
+  if (ci !== -1) tok = tok.substring(0, ci);
+  return tok.trim().replace(/\s+/g, '_');
+}
 
-function insertTag(el, tagData) {
-  const text      = el.value;
-  const cursorPos = el.selectionStart;
-  const rangeStart = getTagRangeStart(el);
+// ─── Token mode analysis ────────────────────────────────────────────────────
+// Decides tag mode vs ref mode from the current token's leading char.
+//   unclosed "[…"  → ref/bracket (insert [name])
+//   "/…" at token start → ref/slash (insert resolved text)
+//   otherwise       → tag mode (tags + library prompts)
 
-  let tagName = tagData.name;
-  if (settings.replaceUnderscore) tagName = tagName.replace(/_/g, ' ');
+function _analyzeToken(el) {
+  const text = el.value;
+  const pos  = el.selectionStart;
 
-  const needsSpaceBefore = text[rangeStart - 1] === ',';
-  const prefix = needsSpaceBefore ? ' ' : '';
+  const lastOpen  = text.lastIndexOf('[', pos - 1);
+  const lastClose = text.lastIndexOf(']', pos - 1);
+  if (lastOpen > lastClose) {
+    return { mode: 'ref', refKind: 'bracket',
+             query: text.substring(lastOpen + 1, pos).trim(), rangeStart: lastOpen };
+  }
+  const start = _tokenStart(text, pos);
+  const seg = text.substring(start, pos);
+  const sm = seg.match(/^(\s*)\/(.*)$/);
+  if (sm) {
+    return { mode: 'ref', refKind: 'slash',
+             query: sm[2].trim(), rangeStart: start + sm[1].length };
+  }
+  return { mode: 'tag', query: getPartialTag(el), rangeStart: start };
+}
 
-  const afterCursor = text[cursorPos];
-  const needsSuffix = afterCursor !== ',' && afterCursor !== ':';
-  const suffix = (needsSuffix && settings.autoInsertComma) ? ', ' : '';
+// ─── Insertion text builders ──────────────────────────────────────────────────
 
-  const toInsert = prefix + tagName + suffix;
+function _normalizeTagInsert(name) {
+  if (settings.replaceUnderscore) name = name.replace(/_/g, ' ');
+  if (settings.escapeParens) name = name.replace(/([()])/g, '\\$1');
+  return name;
+}
 
+// Replace text[start, end) in `el` with `toInsert` (undo-safe via execCommand).
+function _spliceInsert(el, start, end, toInsert) {
   el.focus();
-  el.setSelectionRange(rangeStart, cursorPos);
-
+  el.setSelectionRange(start, end);
   const ok = document.execCommand('insertText', false, toInsert);
   if (!ok) {
-    const before = text.substring(0, rangeStart);
-    const after  = text.substring(cursorPos);
-    el.value = before + toInsert + after;
-    const newPos = rangeStart + toInsert.length;
-    el.setSelectionRange(newPos, newPos);
+    const v = el.value;
+    el.value = v.substring(0, start) + toInsert + v.substring(end);
+    const np = start + toInsert.length;
+    el.setSelectionRange(np, np);
     el.dispatchEvent(new Event('input', { bubbles: true }));
   }
 }
@@ -208,12 +367,12 @@ class TagAutocompleteUI {
       border:          '1px solid #444',
       borderRadius:    '4px',
       boxShadow:       '0 4px 16px rgba(0,0,0,0.5)',
-      maxHeight:       '320px',
+      maxHeight:       '360px',
       overflowY:       'auto',
-      minWidth:        '220px',
-      maxWidth:        '480px',
-      fontFamily:      'monospace',
-      fontSize:        '12px',
+      minWidth:        '260px',
+      maxWidth:        '560px',
+      fontFamily:      'sans-serif',
+      fontSize:        '15px',
     });
 
     document.body.appendChild(this._root);
@@ -222,16 +381,15 @@ class TagAutocompleteUI {
     this._candidates = [];
     this._selIndex   = -1;
 
+    this._rangeStart = 0;
+
     // Click-to-insert
     this._root.addEventListener('mousedown', (e) => {
       const row = e.target.closest('[data-tagac-index]');
       if (row) {
         const idx = parseInt(row.dataset.tagacIndex, 10);
-        const tag = this._candidates[idx];
-        if (tag && this._target) {
-          insertTag(this._target, tag);
-          this.hide();
-        }
+        const cand = this._candidates[idx];
+        if (cand && this._target) this._insert(this._target, cand);
         e.preventDefault();
         e.stopPropagation();
       }
@@ -242,15 +400,31 @@ class TagAutocompleteUI {
     return this._root.style.display !== 'none';
   }
 
-  async show(el, q) {
-    const results = _applyMinCount(await searchTags(q, settings.maxSuggestions));
+  // Tag mode: danbooru/gelbooru tags + library prompts (library first, deduped).
+  async showTags(el, info) {
+    const [tagsRaw, libRaw] = await Promise.all([
+      searchTags(info.query, settings.maxSuggestions),
+      settings.useLibrary ? fetchLibraryPrompts(info.query, settings.maxLibrary) : [],
+    ]);
+    const tags = _applyMinCount(tagsRaw).map((t) => ({ ...t, kind: 'tag' }));
+    const results = _mergeTagSources(tags, libRaw);
     if (!results.length) { this.hide(); return; }
+    this._open(el, results, info.rangeStart);
+  }
 
-    this._target     = el;
-    this._candidates = results;
-    this._selIndex   = 0;
+  // Ref mode: entry names + trigger names (after "[" or "/").
+  async showRefs(el, info) {
+    const results = await fetchRefs(info.query, settings.maxRefs, info.refKind);
+    if (!results.length) { this.hide(); return; }
+    this._open(el, results, info.rangeStart);
+  }
 
-    this._render(q);
+  _open(el, candidates, rangeStart) {
+    this._target = el;
+    this._candidates = candidates;
+    this._selIndex = 0;
+    this._rangeStart = rangeStart;
+    this._render();
     this._position(el);
     this._root.style.display = 'block';
     this._highlight();
@@ -271,99 +445,159 @@ class TagAutocompleteUI {
 
   confirmSelected() {
     if (this._selIndex >= 0 && this._selIndex < this._candidates.length && this._target) {
-      insertTag(this._target, this._candidates[this._selIndex]);
-      this.hide();
+      this._insert(this._target, this._candidates[this._selIndex]);
       return true;
     }
     return false;
   }
 
-  _render(q) {
+  // Insert a candidate by kind: tag/library → normalized text + comma; ref/bracket
+  // → [name]; ref/slash → the entry's resolved-shallow text.
+  async _insert(el, cand) {
+    const text = el.value;
+    const start = this._rangeStart;
+    const pos = el.selectionStart;
+    let core;
+    if (cand.kind === 'ref' && cand.refKind === 'slash') {
+      const resolved = await resolveShallow(cand.name);
+      if (resolved == null) { this.hide(); return; }
+      core = resolved;
+    } else if (cand.kind === 'ref') {
+      core = `[${cand.name}]`;
+    } else if (cand.kind === 'library') {
+      core = cand.name;                       // prompt text, inserted as-is
+    } else {
+      core = _normalizeTagInsert(cand.name);  // danbooru tag
+    }
+    const afterCursor = text[pos];
+    const wantComma = settings.autoInsertComma && cand.refKind !== 'bracket'
+                      && afterCursor !== ',' && afterCursor !== ':';
+    let toInsert = core + (wantComma ? ', ' : '');
+    if (text[start - 1] === ',') toInsert = ' ' + toInsert;
+    _spliceInsert(el, start, pos, toInsert);
+    this.hide();
+  }
+
+  _render() {
     this._root.innerHTML = '';
     const frag = document.createDocumentFragment();
-
     for (let i = 0; i < this._candidates.length; i++) {
-      const tag = this._candidates[i];
+      const cand = this._candidates[i];
       const row = document.createElement('div');
       row.dataset.tagacIndex = i;
       Object.assign(row.style, {
-        display:    'flex',
-        alignItems: 'center',
-        padding:    '3px 8px',
-        cursor:     'pointer',
-        gap:        '6px',
-        borderBottom: '1px solid #2a2a3e',
+        display: 'flex', alignItems: 'center', padding: '4px 8px',
+        cursor: 'pointer', gap: '6px', borderBottom: '1px solid #2a2a3e',
       });
-
-      // Category dot
-      const dot = document.createElement('span');
-      const color = CATEGORY_COLORS[tag.category] || '#aaddff';
-      Object.assign(dot.style, {
-        width:        '6px',
-        height:       '6px',
-        borderRadius: '50%',
-        backgroundColor: color,
-        flexShrink:   '0',
-      });
-      dot.title = CATEGORY_NAMES[tag.category] || 'general';
-
-      // Tag name (highlight matching part)
-      const nameSpan = document.createElement('span');
-      nameSpan.style.flexGrow   = '1';
-      nameSpan.style.color      = '#e0e0e0';
-      nameSpan.style.overflow   = 'hidden';
-      nameSpan.style.textOverflow = 'ellipsis';
-      nameSpan.style.whiteSpace = 'nowrap';
-      const displayName = settings.replaceUnderscore ? tag.name.replace(/_/g, ' ') : tag.name;
-      nameSpan.textContent = displayName;
-
-      // Alias hint (first alias)
-      const aliasSpan = document.createElement('span');
-      aliasSpan.style.color     = '#888';
-      aliasSpan.style.fontSize  = '11px';
-      aliasSpan.style.flexShrink = '0';
-      aliasSpan.style.maxWidth  = '120px';
-      aliasSpan.style.overflow  = 'hidden';
-      aliasSpan.style.textOverflow = 'ellipsis';
-      aliasSpan.style.whiteSpace   = 'nowrap';
-      if (tag.aliases && tag.aliases.length) {
-        aliasSpan.textContent = tag.aliases[0];
-        aliasSpan.title = tag.aliases.join(', ');
-      }
-
-      // Post count
-      const countSpan = document.createElement('span');
-      countSpan.style.color     = '#666';
-      countSpan.style.fontSize  = '11px';
-      countSpan.style.flexShrink = '0';
-      countSpan.textContent = _fmtCount(tag.post_count);
-
-      row.appendChild(dot);
-      row.appendChild(nameSpan);
-      row.appendChild(aliasSpan);
-      row.appendChild(countSpan);
-
-      // Optional related-tags affordance (default off; one request per click).
-      if (settings.enableRelated) {
-        const rel = document.createElement('span');
-        rel.textContent = '⋯rel';
-        rel.title = 'Show related tags';
-        Object.assign(rel.style, {
-          color: '#7af', fontSize: '11px', flexShrink: '0', cursor: 'pointer',
-          padding: '0 2px',
-        });
-        rel.addEventListener('mousedown', (e) => {
-          e.preventDefault();
-          e.stopPropagation();  // do not trigger row insert
-          this._showRelated(tag.name);
-        });
-        row.appendChild(rel);
-      }
-
+      if (cand.kind === 'ref') this._fillRefRow(row, cand);
+      else if (cand.kind === 'library') this._fillLibraryRow(row, cand);
+      else this._fillTagRow(row, cand);
       frag.appendChild(row);
     }
-
     this._root.appendChild(frag);
+  }
+
+  _badge(label, bg) {
+    const b = document.createElement('span');
+    b.textContent = label;
+    Object.assign(b.style, {
+      background: bg, color: '#111', borderRadius: '3px', padding: '0 5px',
+      fontSize: '11px', fontWeight: 'bold', flexShrink: '0',
+    });
+    return b;
+  }
+
+  _nameSpan(text) {
+    const s = document.createElement('span');
+    Object.assign(s.style, {
+      flexGrow: '1', color: '#e0e0e0', overflow: 'hidden',
+      textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+    });
+    s.textContent = text;
+    return s;
+  }
+
+  _fillTagRow(row, tag) {
+    const dot = document.createElement('span');
+    Object.assign(dot.style, {
+      width: '7px', height: '7px', borderRadius: '50%',
+      backgroundColor: CATEGORY_COLORS[tag.category] || '#aaddff', flexShrink: '0',
+    });
+    dot.title = CATEGORY_NAMES[tag.category] || 'general';
+    row.appendChild(dot);
+    row.appendChild(this._nameSpan(settings.replaceUnderscore ? tag.name.replace(/_/g, ' ') : tag.name));
+
+    const aliasSpan = document.createElement('span');
+    Object.assign(aliasSpan.style, {
+      color: '#888', fontSize: '13px', flexShrink: '0', maxWidth: '120px',
+      overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+    });
+    if (tag.aliases && tag.aliases.length) {
+      aliasSpan.textContent = tag.aliases[0]; aliasSpan.title = tag.aliases.join(', ');
+    } else if (tag.translations && tag.translations.length) {
+      aliasSpan.textContent = tag.translations[0]; aliasSpan.title = tag.translations.join(', ');
+      aliasSpan.style.color = '#caa';
+    }
+    row.appendChild(aliasSpan);
+
+    const countSpan = document.createElement('span');
+    Object.assign(countSpan.style, { color: '#666', fontSize: '13px', flexShrink: '0' });
+    countSpan.textContent = _fmtCount(tag.post_count);
+    row.appendChild(countSpan);
+
+    const jump = document.createElement('span');
+    jump.textContent = '↗'; jump.title = 'Open danbooru wiki';
+    Object.assign(jump.style, { color: '#7af', fontSize: '13px', flexShrink: '0', cursor: 'pointer', padding: '0 2px' });
+    jump.addEventListener('mousedown', (e) => {
+      e.preventDefault(); e.stopPropagation();
+      window.open(`https://danbooru.donmai.us/wiki_pages/${encodeURIComponent(tag.name)}`, '_blank');
+    });
+    row.appendChild(jump);
+
+    if (tag.category === 1) {
+      const works = document.createElement('span');
+      works.textContent = '🖼'; works.title = 'Show recent works';
+      Object.assign(works.style, { fontSize: '13px', flexShrink: '0', cursor: 'pointer', padding: '0 2px' });
+      works.addEventListener('mousedown', (e) => {
+        e.preventDefault(); e.stopPropagation(); showArtistWorks(tag.name);
+      });
+      row.appendChild(works);
+    }
+    if (settings.enableRelated) {
+      const rel = document.createElement('span');
+      rel.textContent = '⋯rel'; rel.title = 'Show related tags';
+      Object.assign(rel.style, { color: '#7af', fontSize: '13px', flexShrink: '0', cursor: 'pointer', padding: '0 2px' });
+      rel.addEventListener('mousedown', (e) => {
+        e.preventDefault(); e.stopPropagation(); this._showRelated(tag.name);
+      });
+      row.appendChild(rel);
+    }
+  }
+
+  _fillLibraryRow(row, cand) {
+    row.appendChild(this._badge('library', '#ffd479'));
+    row.appendChild(this._nameSpan(cand.name));
+    if (cand.entry) {
+      const src = document.createElement('span');
+      Object.assign(src.style, { color: '#888', fontSize: '12px', flexShrink: '0', maxWidth: '160px',
+        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' });
+      src.textContent = cand.entry; src.title = 'from entry: ' + cand.entry;
+      row.appendChild(src);
+    }
+  }
+
+  _fillRefRow(row, cand) {
+    const isTrigger = cand.entryKind === 'trigger';
+    row.appendChild(this._badge(isTrigger ? 'trigger' : 'entry', isTrigger ? '#aaffaa' : '#aaddff'));
+    row.appendChild(this._nameSpan((cand.refKind === 'bracket' ? '[' : '/') + cand.name +
+                                   (cand.refKind === 'bracket' ? ']' : '')));
+    if (cand.definition) {
+      const def = document.createElement('span');
+      Object.assign(def.style, { color: '#888', fontSize: '12px', flexShrink: '0', maxWidth: '180px',
+        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' });
+      def.textContent = cand.definition; def.title = cand.definition;
+      row.appendChild(def);
+    }
   }
 
   async _showRelated(name) {
@@ -371,8 +605,15 @@ class TagAutocompleteUI {
     if (!results.length || !this._target) return;
     this._candidates = results;
     this._selIndex = 0;
-    this._render(name);
+    this._render();
     this._highlight();
+  }
+
+  // Open the dropdown showing related tags for a clicked token in the textarea.
+  async showRelatedFor(el, name) {
+    const results = await fetchRelated(name, settings.maxSuggestions);
+    if (!results.length) { this.hide(); return; }
+    this._open(el, results, el.selectionStart);  // selecting one inserts at caret
   }
 
   _highlight() {
@@ -429,9 +670,12 @@ class TagACHandler {
     clearTimeout(this._timer);
     this._timer = setTimeout(async () => {
       if (!settings.enabled) return;
-      const q = getPartialTag(el);
-      if (q.length >= 2) {
-        await this.ui.show(el, q);
+      const info = _analyzeToken(el);
+      if (info.mode === 'ref') {
+        if (settings.useRefs && info.query !== null) await this.ui.showRefs(el, info);
+        else this.ui.hide();
+      } else if (info.query.length >= 1) {
+        await this.ui.showTags(el, info);
       } else {
         this.ui.hide();
       }
@@ -441,6 +685,15 @@ class TagACHandler {
   handleInput(e) {
     if (!settings.enabled || !e.isTrusted) return;
     this._debounce(e.target);
+  }
+
+  // Click a token in the textarea → show its related tags. Gated to textareas
+  // flagged related-capable (the rich editor + entry text view only).
+  handleClick(e) {
+    if (!settings.enabled || !settings.enableRelated || !e.target._xyzRelated) return;
+    const name = getTokenAtCaret(e.target);
+    if (name && name.length >= 2) this.ui.showRelatedFor(e.target, name);
+    else this.ui.hide();
   }
 
   handleKeyDown(e) {
@@ -505,7 +758,10 @@ class TagACHandler {
 
 const handler = new TagACHandler();
 
-function attachTo(el) {
+// opts.related = this textarea supports click-a-token → related tags (the PLv2
+// rich editor + entry text view set this; node/general boxes do not).
+function attachTo(el, opts = {}) {
+  if (opts.related) el._xyzRelated = true;   // allow upgrading an already-hooked box
   if (el._xyzTagACHooked) return;
   el._xyzTagACHooked = true;
 
@@ -513,7 +769,11 @@ function attachTo(el) {
   el.addEventListener('keydown', (e) => handler.handleKeyDown(e));
   el.addEventListener('keyup',   (e) => handler.handleKeyUp(e));
   el.addEventListener('blur',    (e) => handler.handleBlur(e));
+  el.addEventListener('click',   (e) => handler.handleClick(e));
 }
+
+// Public API so PLv2 windows can attach their bespoke textareas.
+window.xyzTagAC = { attach: attachTo };
 
 app.registerExtension({
   id:   EXT_ID,
@@ -547,13 +807,6 @@ app.registerExtension({
 
     // Attach to any already-existing textareas
     document.querySelectorAll('.comfy-multiline-input').forEach(attachTo);
-
-    // Prefill the native "Danbooru login" setting from the backend (source of truth).
-    fetch('/xyz/tagdb/settings').then((r) => r.json()).then((s) => {
-      if (s.danbooru_login) {
-        try { app.extensionManager?.setting?.set(EXT_ID + '.DanbooruLogin', s.danbooru_login); } catch {}
-      }
-    }).catch(() => {});
   },
 
   settings: [
@@ -616,19 +869,6 @@ app.registerExtension({
       category:     [EXT_NAME, 'Related', 'Cache age'],
       onChange:     (v) => { settings.relatedMaxAgeDays = Number(v) || 30; },
     },
-    {
-      id:           EXT_ID + '.DanbooruLogin',
-      name:         'Danbooru login (api key is set in the Tag DB Manager)',
-      type:         'text',
-      defaultValue: '',
-      category:     [EXT_NAME, 'Danbooru account', 'Login'],
-      onChange:     (v) => {
-        // Persist the (non-secret) login to the backend settings.
-        fetch('/xyz/tagdb/settings', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ danbooru_login: (v || '').trim() }),
-        }).catch(() => {});
-      },
-    },
+    // Danbooru login + api key live in the Tag DB Manager window (see tagdb_panel.js).
   ],
 });

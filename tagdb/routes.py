@@ -44,6 +44,28 @@ _maintain_mode: Optional[str] = None
 # Serialises any writer to the working DB (updates, related-cache refresh).
 _maintain_lock = threading.Lock()
 
+# Persistent read connection for autocomplete (avoids per-keystroke open cost).
+_search_conn = None
+_search_conn_path: Optional[Path] = None
+
+
+def _search_connection():
+    """Return (conn, active_path) reusing a cached read connection; reopen on switch."""
+    global _search_conn, _search_conn_path
+    active = _active_db()
+    if active is None:
+        return None, None
+    if _search_conn is None or _search_conn_path != active:
+        if _search_conn is not None:
+            try:
+                _search_conn.close()
+            except Exception:
+                pass
+        from . import db as _db
+        _search_conn = _db.connect_read(active)
+        _search_conn_path = active
+    return _search_conn, active
+
 
 # ─── Internal helpers ─────────────────────────────────────────────────────────
 
@@ -148,7 +170,7 @@ def _get_credentials() -> tuple[Optional[str], Optional[str]]:
 # ─── Route handlers ───────────────────────────────────────────────────────────
 
 async def _handle_search(request: web.Request) -> web.Response:
-    active = _active_db()
+    conn, active = _search_connection()
     if not active:
         return _ok([])
     q = request.rel_url.query.get("q", "").strip()
@@ -161,7 +183,7 @@ async def _handle_search(request: web.Request) -> web.Response:
         limit = 20
 
     from . import repo as _repo
-    results = _repo.search_tags(q, active, limit=limit)
+    results = _repo.search_tags(q, active, limit=limit, conn=conn)
     return _ok(results)
 
 
@@ -269,8 +291,14 @@ async def _handle_maintain_start(request: web.Request) -> web.Response:
         try:
             with _maintain_lock:
                 if mode == "full":
+                    # Include reconstruction data (tag_versions) + translations +
+                    # artist other_names so a full rebuild stays self-sufficient.
+                    # (artist_versions — millions of rows — is left to the prebuilt
+                    # dataset + incrementals to avoid a ~45min routine refresh.)
                     _up.run_full_update(working, min_post_count=min_post_count,
                                         login=login, api_key=api_key,
+                                        with_translations=True, with_versions=True,
+                                        with_artist_names=True,
                                         progress_cb=log, stop_event=stop_ev)
                 else:
                     _up.run_incremental_update(working, min_post_count=min_post_count,
@@ -312,6 +340,71 @@ async def _handle_maintain_cancel(request: web.Request) -> web.Response:
     if _maintain_stop_event:
         _maintain_stop_event.set()
     return _ok({"ok": True})
+
+
+async def _handle_reconstruct(request: web.Request) -> web.Response:
+    if _maintain_running:
+        return _err(409, "a maintenance task is already running")
+    if not _data_dir or not _working_db_path or not _working_db_path.exists():
+        return _err(400, "no working DB to reconstruct from")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    date_str = (body.get("date") or "").strip()
+    import datetime as _dt
+    try:
+        d = _dt.datetime.strptime(date_str, "%Y-%m-%d").replace(
+            hour=23, minute=59, second=59, tzinfo=_dt.timezone.utc)
+    except ValueError:
+        return _err(400, "date must be YYYY-MM-DD")
+    target = int(d.timestamp())
+    out = _data_dir / "snapshots" / "local" / f"recon_{date_str}.sqlite"
+    src = _working_db_path
+
+    def _run() -> None:
+        global _maintain_running, _active_snapshot_path
+        from . import updater as _up
+        log = _maintain_log.append
+        try:
+            with _maintain_lock:
+                _up.reconstruct_as_of(src, target, out, progress_cb=log,
+                                     stop_event=_maintain_stop_event)
+            _active_snapshot_path = out  # serve the historical view (read-only)
+            log("Reconstructed snapshot is now the active autocomplete source. "
+                "NOTE: post_count and related tags are current values, not historical.")
+        except Exception as exc:
+            log(f"Error: {exc}")
+            logger.exception("Reconstruct failed")
+        finally:
+            _maintain_running = False
+
+    _start_maintain_thread("tagdb-reconstruct", _run, "reconstruct",
+                           f"[reconstruct] building vocabulary as of {date_str}...",
+                           threading.Event())
+    return _ok({"ok": True, "message": "reconstruct started"})
+
+
+async def _handle_artist_posts(request: web.Request) -> web.Response:
+    name = request.rel_url.query.get("name", "").strip()
+    if not name:
+        return _ok({"name": "", "posts": []})
+    try:
+        limit = max(1, min(int(request.rel_url.query.get("limit", "20")), 50))
+    except ValueError:
+        limit = 20
+    login, api_key = _get_credentials()
+    from . import scraper as _sc
+    loop = request.app.loop if hasattr(request.app, "loop") else None
+
+    def _fetch():
+        return _sc.fetch_artist_posts(name, limit=limit, login=login, api_key=api_key)
+
+    try:
+        posts = await loop.run_in_executor(None, _fetch) if loop else _fetch()
+    except Exception as exc:
+        return _err(502, f"artist posts fetch failed: {exc}")
+    return _ok({"name": name, "posts": posts})
 
 
 async def _handle_official_check(request: web.Request) -> web.Response:
@@ -356,7 +449,7 @@ async def _handle_official_download(request: web.Request) -> web.Response:
                 ver = path.name.split("_danbooru.sqlite")[0]
                 _dist.seed_working_db_from_official(path, working, version=ver)
             _adopt_working_db()
-            log("Official dataset installed and active.")
+            log("Prebuilt dataset installed and active.")
         except Exception as exc:
             log(f"Error: {exc}")
             logger.exception("Official download failed")
@@ -476,6 +569,8 @@ def register(server: Any, data_dir: Path) -> None:
     r = server.routes
     r.get("/xyz/tagdb/search")(_handle_search)
     r.get("/xyz/tagdb/related")(_handle_related)
+    r.get("/xyz/tagdb/artist_posts")(_handle_artist_posts)
+    r.post("/xyz/tagdb/reconstruct")(_handle_reconstruct)
     r.get("/xyz/tagdb/snapshots")(_handle_snapshots_list)
     r.get("/xyz/tagdb/snapshots/active")(_handle_snapshots_get_active)
     r.post("/xyz/tagdb/snapshots/active")(_handle_snapshots_set_active)

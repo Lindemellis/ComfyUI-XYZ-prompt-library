@@ -53,27 +53,12 @@ def _sha256(path: Path) -> str:
 
 
 def _backfill_tag_versions(db_path: Path, login, api_key) -> int:
-    """Scrape the entire tag_versions event log (small; back to 2013) into the DB."""
+    """Scrape the entire tag_versions event log into the DB (reuses updater helper)."""
     conn = _db.connect_write(db_path)
-    n = 0
     try:
-        conn.execute("BEGIN")
-        for v in _sc.scrape_tag_versions_since(0, login=login, api_key=api_key):
-            conn.execute(
-                "INSERT OR IGNORE INTO tag_versions(version_id, tag_id, name, category, "
-                "is_deprecated, created_at, previous_version_id, synced_at) "
-                "VALUES (?,?,?,?,?,?,?,?)",
-                (v["version_id"], v["tag_id"], v["name"], v["category"],
-                 v["is_deprecated"], v["created_at"], v["previous_version_id"], int(time.time())),
-            )
-            n += 1
-            if n % 2000 == 0:
-                conn.execute("COMMIT"); conn.execute("BEGIN")
-                print(f"  tag_versions: {n:,}")
-        conn.execute("COMMIT")
+        return _up.backfill_tag_versions(conn, login=login, api_key=api_key, progress_cb=print)
     finally:
         conn.close()
-    return n
 
 
 def main() -> None:
@@ -84,6 +69,10 @@ def main() -> None:
     ap.add_argument("--out", default=None, help="output .sqlite path")
     ap.add_argument("--with-versions", action="store_true",
                     help="also backfill the full tag_versions event log")
+    ap.add_argument("--with-translations", action="store_true",
+                    help="also scrape wiki other_names (translations) — searchable by JP/CN names")
+    ap.add_argument("--with-artists", action="store_true",
+                    help="also scrape artist other_names + full artist_versions (rename history)")
     ap.add_argument("--zip", action="store_true", help="also produce a .zip asset")
     ap.add_argument("--login", default=None)
     ap.add_argument("--api-key", default=None)
@@ -103,7 +92,9 @@ def main() -> None:
     t0 = time.time()
     summary = _up.run_full_update(
         out, min_post_count=args.min_post_count, label="danbooru",
-        login=login, api_key=api_key, progress_cb=print,
+        login=login, api_key=api_key, with_translations=args.with_translations,
+        with_artist_names=args.with_artists, with_artist_versions=args.with_artists,
+        progress_cb=print,
     )
     if args.with_versions:
         print("Backfilling tag_versions event log...")

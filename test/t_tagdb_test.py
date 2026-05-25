@@ -161,6 +161,67 @@ def test_list_snapshots_kinds():
     assert {"working", "official", "local"} <= kinds
 
 
+def test_translation_search():
+    from tagdb.snapshots import rebuild_fts
+    p = _tmp_db()
+    c = _db.connect_write(p); _db.migrate(c)
+    c.execute("INSERT INTO tags(name,category,post_count) VALUES('hakurei_reimu',4,500000)")
+    c.execute("INSERT INTO translations(tag,lang,text) VALUES('hakurei_reimu','other','博麗霊夢 霊夢 reimu')")
+    rebuild_fts(c); c.close()
+    for q in ["博麗霊夢", "霊夢", "reimu"]:
+        res = _repo.search_tags(q, p, limit=3)
+        assert res and res[0]["name"] == "hakurei_reimu", f"{q} -> {res}"
+        assert res[0]["translations"], "translations not returned"
+
+
+def test_reconstruct_as_of():
+    p = _tmp_db().parent
+    src = p / "work.sqlite"
+    c = _db.connect_write(src); _db.migrate(c)
+    now = int(time.time()); old = now - 100 * 86400; new = now - 10 * 86400
+    c.execute("INSERT INTO tags(name,category,post_count,danbooru_id,created_at) VALUES('cat_a',0,100,1,?)", (old,))
+    c.execute("INSERT INTO tag_versions(version_id,tag_id,name,category,is_deprecated,created_at,synced_at) VALUES(10,1,'cat_a',4,0,?,?)", (new, now))
+    c.execute("INSERT INTO tags(name,category,post_count,danbooru_id,created_at) VALUES('cat_b',0,50,2,?)", (new,))
+    c.execute("INSERT INTO aliases(alias,canonical,created_at,synced_at) VALUES('old_name','cat_a',?,?)", (new, now))
+    c.close()
+    x = now - 50 * 86400
+    out = p / "recon.sqlite"
+    _up.reconstruct_as_of(src, x, out)
+    c = _db.connect_read(out)
+    rows = {r[0]: r[1] for r in c.execute("SELECT name, category FROM tags")}
+    c.close()
+    assert "cat_b" not in rows           # didn't exist at X
+    assert "old_name" in rows            # cat_a's name rolled back
+    assert rows["old_name"] == 0         # category as of X (before recat to 4)
+
+
+def test_reconstruct_artist_multilevel_rename():
+    p = _tmp_db().parent
+    src = p / "work.sqlite"
+    c = _db.connect_write(src); _db.migrate(c)
+    now = int(time.time())
+    d1, d2, d3 = now - 1500 * 86400, now - 700 * 86400, now - 60 * 86400
+    c.execute("INSERT INTO tags(name,category,post_count,danbooru_id,created_at) VALUES('bunchi',1,385,99,?)", (d1,))
+    for vid, (nm, ca) in enumerate([("o_(jshn3457)", d1), ("otintin", d2), ("bunchi", d3)], 1):
+        c.execute("INSERT INTO artist_versions(version_id,artist_id,name,created_at,synced_at) VALUES(?,?,?,?,?)", (vid, 7, nm, ca, now))
+    c.close()
+
+    def recon(days_ago):
+        x = now - days_ago * 86400
+        out = p / f"r{days_ago}.sqlite"
+        if out.exists():
+            out.unlink()
+        _up.reconstruct_as_of(src, x, out)
+        cc = _db.connect_read(out)
+        names = [r[0] for r in cc.execute("SELECT name FROM tags")]
+        cc.close()
+        return names
+
+    assert recon(1000) == ["o_(jshn3457)"]   # o_ era
+    assert recon(10) == ["bunchi"]            # current
+    assert recon(2000) == []                  # before the tag existed
+
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])

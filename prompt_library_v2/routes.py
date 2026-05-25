@@ -730,6 +730,61 @@ async def _resolve_ref(request: web.Request) -> web.Response:
 
 
 # ---------------------------------------------------------------------------
+# Autocomplete sources (library prompts + entry/trigger refs) + shallow resolve
+# ---------------------------------------------------------------------------
+
+def _ac_limit(request: web.Request, default: int = 20) -> int:
+    try:
+        return max(1, min(int(request.rel_url.query.get("limit", str(default))), 50))
+    except ValueError:
+        return default
+
+
+async def _ac_prompts(request: web.Request) -> web.Response:
+    """GET /xyz/plv2/ac/prompts?q=&limit= — library prompt texts matching q."""
+    q = request.rel_url.query.get("q", "")
+    return _ok({"prompts": _repo.search_prompt_contents(q, _ac_limit(request))})
+
+
+async def _ac_refs(request: web.Request) -> web.Response:
+    """GET /xyz/plv2/ac/refs?q=&limit= — entry full_paths + trigger names matching q."""
+    q = request.rel_url.query.get("q", "")
+    return _ok({"refs": _repo.search_refs(q, _ac_limit(request))})
+
+
+async def _resolve_shallow(request: web.Request) -> web.Response:
+    """POST /xyz/plv2/resolve_shallow  Body: {"ref": "...", "seed": 0}
+
+    Resolve an entry ref to its OWN generated text, leaving nested [refs] literal
+    (req 170: the `/entry` insert form). {a|b} choices are resolved; [refs] are not.
+    """
+    try:
+        body: Dict = await request.json()
+    except Exception:
+        return _err(400, "bad_json", "request body must be valid JSON")
+    ref = str(body.get("ref", "")).strip()
+    seed = int(body.get("seed", 0))
+    if not ref:
+        return _ok({"text": "", "found": False})
+    res = resolve_trigger(ref)
+    if res is None:
+        return _ok({"text": "", "found": False})
+    node_id, sub_path = res
+    if sub_path:
+        node = _repo.get_node(node_id)
+        if node is not None:
+            target_path = node["full_path"] + "." + sub_path
+            n2 = next((n for n in _repo.get_tree() if n["full_path"] == target_path), None)
+            if n2 is not None:
+                node_id = n2["id"]
+    rng = _random.Random(seed)
+    text = _engine.generate_entry_text(node_id, rng, frozenset())
+    text = _engine._apply_choices(text, 0)
+    text = _engine._cleanup(text)
+    return _ok({"text": text, "found": True})
+
+
+# ---------------------------------------------------------------------------
 # Common formats / delimiters
 # ---------------------------------------------------------------------------
 
@@ -776,6 +831,9 @@ def register(server) -> None:
     r.post(r"/xyz/plv2/nodes/{id:\d+}/preview")(_preview_node)
     r.post("/xyz/plv2/resolve")(_resolve_template)
     r.post("/xyz/plv2/resolve_ref")(_resolve_ref)
+    r.get("/xyz/plv2/ac/prompts")(_ac_prompts)
+    r.get("/xyz/plv2/ac/refs")(_ac_refs)
+    r.post("/xyz/plv2/resolve_shallow")(_resolve_shallow)
 
     # Common lists
     r.get("/xyz/plv2/common/formats")(_get_common_formats)

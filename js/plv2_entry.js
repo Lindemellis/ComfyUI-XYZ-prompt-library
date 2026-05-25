@@ -361,6 +361,8 @@ function _render() {
   });
   _promptTextarea.setAttribute('spellcheck', 'false');
   _promptTextarea.placeholder = 'Active prompts joined by delimiter…';
+  // Entry text view = related-capable (req #1).
+  window.xyzTagAC?.attach(_promptTextarea, { related: true });
   _promptTextarea.addEventListener('blur', _syncTextToList);
   textSection.appendChild(_promptTextarea);
 
@@ -653,6 +655,7 @@ function _verticalRow(p) {
   const contentIn = document.createElement('input');
   contentIn.value = p.content;
   contentIn.style.cssText = 'flex:1;background:#1e1e2e;border:1px solid #313244;border-radius:3px;color:#cdd6f4;font-size:11px;padding:2px 5px;min-width:0;';
+  window.xyzTagAC?.attach(contentIn);  // autocomplete only (no related), per req #1
   contentIn.addEventListener('change', async () => {
     const v = window.plv2.cleanPrompt(contentIn.value.trim());
     if (!v || v === p.content) { contentIn.value = p.content; return; }

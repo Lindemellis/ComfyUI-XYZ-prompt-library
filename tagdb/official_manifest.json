@@ -5,14 +5,14 @@
     {
       "version": "2026-05-24",
       "min_post_count": 10,
-      "tag_count": 306144,
-      "alias_count": 38949,
+      "tag_count": 306246,
+      "alias_count": 38975,
       "schema_version": 2,
-      "structure_synced_through": 1779602230,
-      "full_count_synced_at": 1779602230,
+      "structure_synced_through": 1779666111,
+      "full_count_synced_at": 1779666111,
       "url": "https://github.com/zhupeter010903/ComfyUI-XYZ-prompt-library/releases/download/tagdb-2026-05-24/danbooru_2026-05-24.sqlite.zip",
-      "sha256": "4936b88c1990e15ea12e1bd3421288e2dbb5e1a711e4f79e019f684480035468",
-      "size_bytes": 32141241,
+      "sha256": "305c3889e6fe494b8138fb78065fdb5f0ef0fb695042749e2a9b0bbbb7e6c737",
+      "size_bytes": 110162406,
       "compression": "zip"
     }
   ]

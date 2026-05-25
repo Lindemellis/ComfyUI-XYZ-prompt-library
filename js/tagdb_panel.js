@@ -61,8 +61,10 @@ const api = {
   maintainStatus:  () => api.getJSON('/xyz/tagdb/maintain/status'),
   maintainCancel:  () => api.postJSON('/xyz/tagdb/maintain/cancel', {}),
   snapshots:       () => api.getJSON('/xyz/tagdb/snapshots'),
+  activeInfo:      () => api.getJSON('/xyz/tagdb/snapshots/active'),
   setActive:       (b) => api.postJSON('/xyz/tagdb/snapshots/active', b),
   exportWorking:   () => api.postJSON('/xyz/tagdb/snapshots/export', {}),
+  reconstruct:     (b) => api.postJSON('/xyz/tagdb/reconstruct', b),
 };
 
 // ─── DOM helpers ─────────────────────────────────────────────────────────────────
@@ -158,36 +160,61 @@ class TagDBManager {
     }}, label);
   }
 
-  // ── active / freshness banner ──
+  // ── active dataset info ──
   _sectionActive() {
-    this.els.banner = el('div', { style: { fontSize: '12px', color: '#ccc' } }, 'Loading…');
-    return this._section('Active database', this.els.banner);
+    this.els.banner = el('div', { style: { fontSize: '12px', color: '#ccc', lineHeight: '1.5' } }, 'Loading…');
+    return this._section('Active dataset', this.els.banner);
   }
 
-  // ── credentials (api key only; login lives in ComfyUI Settings) ──
+  async _refreshActiveInfo() {
+    try {
+      const a = (await api.activeInfo()).active;
+      if (!a) { this.els.banner.textContent = 'No active dataset.'; this._activeFilename = null; return; }
+      const isRecon = String(a.label || '').startsWith('recon');
+      const tc = Number(a.tag_count || 0).toLocaleString();
+      const counts = fmtEpoch(Number(a.full_count_synced_at || 0));
+      const dataTime = fmtEpoch(Number(a.structure_synced_through || 0));
+      this.els.banner.innerHTML =
+        `<b>${a.label || a.filename}</b> · ${tc} tags` +
+        `<br>counts &amp; related captured: <b>${counts}</b>` +
+        `<br>tag data current to: <b>${dataTime}</b>` +
+        (isRecon ? ` <span style="color:#fc6">(reconstructed time-node)</span>` : '');
+      this._activeFilename = a.filename;
+    } catch {}
+  }
+
+  // ── credentials (login + api key; key masked with Show/Hide) ──
   _sectionCredentials() {
+    this.els.login = el('input', { type: 'text', placeholder: 'danbooru login', style: this._inputStyle() });
     this.els.apikey = el('input', { type: 'password', placeholder: 'api key', style: this._inputStyle() });
-    return this._section('Danbooru API key (optional — raises rate limit)',
-      el('div', { style: { fontSize: '11px', color: '#999', marginBottom: '4px' } },
-        'Login is set in ComfyUI Settings → XYZ Tag Autocomplete. The key is stored locally and masked by default.'),
-      this.els.apikey,
-      el('div', { style: { marginTop: '6px' } },
-        this._btn('Save', async () => {
-          if (!this.els.apikey.value) { this._toast('Enter a key to save'); return; }
-          await api.saveSettings({ danbooru_api_key: this.els.apikey.value.trim() });
-          this.els.apikey.value = '';
-          this.els.apikey.type = 'password';
-          this._loadCredentials();
-          this._toast('API key saved');
-        }, { primary: true }),
-        this._btn('Show stored', async () => {
-          // Reveal the user's own stored key (localhost) into the field.
+    this._keyShown = false;
+    const toggle = this._btn('Show', async () => {
+      if (!this._keyShown) {
+        if (!this.els.apikey.value) {
           try {
             const s = await api.getJSON('/xyz/tagdb/settings?reveal=1');
             this.els.apikey.value = s.danbooru_api_key || '';
-            this.els.apikey.type = 'text';
           } catch {}
-        }),
+        }
+        this.els.apikey.type = 'text'; this._keyShown = true; toggle.textContent = 'Hide';
+      } else {
+        this.els.apikey.type = 'password'; this._keyShown = false; toggle.textContent = 'Show';
+      }
+    });
+    return this._section('Danbooru credentials (optional — raises rate limit)',
+      el('div', { style: { fontSize: '11px', color: '#999', marginBottom: '4px' } },
+        'Stored locally; the API key is masked by default.'),
+      this.els.login,
+      this.els.apikey,
+      el('div', { style: { marginTop: '6px' } },
+        this._btn('Save', async () => {
+          const body = { danbooru_login: this.els.login.value.trim() };
+          if (this.els.apikey.value) body.danbooru_api_key = this.els.apikey.value.trim();
+          await api.saveSettings(body);
+          this._loadCredentials();
+          this._toast('Credentials saved');
+        }, { primary: true }),
+        toggle,
       ),
     );
   }
@@ -229,7 +256,15 @@ class TagDBManager {
   // ── snapshots ──
   _sectionSnapshots() {
     this.els.snaps = el('div', {});
+    this.els.reconDate = el('input', { type: 'date',
+      style: { ...this._inputStyle(), width: '150px', display: 'inline-block' } });
     return this._section('Snapshots (switch time node)',
+      el('div', { style: { marginBottom: '6px' } },
+        el('span', { style: { fontSize: '12px' } }, 'Reconstruct vocabulary as of '),
+        this.els.reconDate,
+        this._btn('Reconstruct & use', () => this._reconstruct(), { primary: true })),
+      el('div', { style: { fontSize: '11px', color: '#888', marginBottom: '6px' } },
+        'Rebuilds which tags existed + their category/name at that date (needs a dataset built with --with-versions for category history). Post counts & related stay current.'),
       el('div', {}, this._btn('Export working DB → checkpoint', async () => {
         await api.exportWorking(); this._loadSnapshots(); this._toast('Exported checkpoint');
       })),
@@ -243,9 +278,10 @@ class TagDBManager {
   }
 
   // ── data loads ──
-  refreshAll() {
+  async refreshAll() {
     if (this.els.minCount) this.els.minCount.value = String(scrapeMinDefault());
     this._loadCredentials();
+    await this._refreshActiveInfo();   // sets _activeFilename for the list marker
     this._loadSnapshots();
     this._checkOfficial(true);
   }
@@ -253,6 +289,10 @@ class TagDBManager {
   async _loadCredentials() {
     try {
       const s = await api.settings();
+      this.els.login.value = s.danbooru_login || '';
+      this.els.apikey.value = '';
+      this.els.apikey.type = 'password';
+      this._keyShown = false;
       this.els.apikey.placeholder = s.has_credentials ? 'api key saved (•••) — type to change' : 'api key';
     } catch {}
   }
@@ -262,13 +302,17 @@ class TagDBManager {
       const info = await api.officialCheck();
       if (!info.has_manifest) {
         this.els.official.textContent = 'No prebuilt dataset published yet — use a Full re-scrape, or wait for the author to publish one.';
+        if (!silent) this._toast('No prebuilt dataset published yet');
         return;
       }
+      const status = info.update_available ? 'update available' : 'up to date';
       this.els.official.innerHTML =
         `latest: <b>${info.latest || '—'}</b> · installed: <b>${info.installed || 'none'}</b>` +
         (info.update_available ? ' · <span style="color:#6f6">update available</span>' : ' · up to date');
+      if (!silent) this._toast(`Prebuilt dataset: ${status} (latest ${info.latest || '—'}, installed ${info.installed || 'none'})`);
     } catch (e) {
-      if (!silent) this.els.official.textContent = 'check failed: ' + e.message;
+      this.els.official.textContent = 'check failed: ' + e.message;
+      if (!silent) this._toast('Check failed: ' + e.message);
     }
   }
 
@@ -291,6 +335,17 @@ class TagDBManager {
     }
   }
 
+  async _reconstruct() {
+    const date = this.els.reconDate.value;
+    if (!date) { this._toast('Pick a date first'); return; }
+    try {
+      await api.reconstruct({ date });
+      this._toast(`Reconstructing as of ${date}…`);
+    } catch (e) {
+      this._toast(e.message.includes('409') ? 'A task is already running' : 'Error: ' + e.message);
+    }
+  }
+
   async _loadSnapshots() {
     try {
       const snaps = await api.snapshots();
@@ -307,40 +362,42 @@ class TagDBManager {
           el('div', {}, badge,
             el('span', { title: `structure→${fmtEpoch(s.structure_synced_through)}, counts→${fmtEpoch(s.full_count_synced_at)}` },
               `${s.filename} (${s.tag_count.toLocaleString()} tags)`)),
-          s.kind === 'working' ? el('span', { style: { color: '#6f6', fontSize: '11px' } }, 'active')
-            : this._btn('Use', async () => { await api.setActive({ filename: s.filename }); this._toast('Switched'); this._refreshBanner(); }),
+          s.filename === this._activeFilename
+            ? el('span', { style: { color: '#6f6', fontSize: '11px' } }, 'active')
+            : this._btn('Use', async () => {
+                await api.setActive({ filename: s.filename });
+                await this._refreshActiveInfo();
+                this._loadSnapshots();
+                this._toast('Switched');
+              }),
         );
         this.els.snaps.append(row);
       }
     } catch (e) { this.els.snaps.textContent = 'failed: ' + e.message; }
   }
 
-  async _refreshBanner() {
-    try {
-      const st = await api.maintainStatus();
-      const f = st.freshness || {};
-      const stale = f.full_count_age_days;
-      this.els.banner.innerHTML =
-        `structure current to <b>${fmtEpoch(f.structure_synced_through)}</b> · ` +
-        `post counts refreshed <b style="color:${stale > 30 ? '#f88' : '#9c9'}">${fmtDays(stale)}</b>`;
-    } catch {}
-  }
-
-  // ── polling for the live log + freshness while open ──
+  // ── polling for the live log while open ──
   _startPolling() {
     if (this.pollTimer) return;
     const tick = async () => {
       try {
         const st = await api.maintainStatus();
-        this.els.log.textContent = (st.log || []).join('\n');
-        this.els.log.scrollTop = this.els.log.scrollHeight;
-        const f = st.freshness || {};
-        const stale = f.full_count_age_days;
-        this.els.banner.innerHTML =
-          `structure current to <b>${fmtEpoch(f.structure_synced_through)}</b> · ` +
-          `post counts refreshed <b style="color:${stale > 30 ? '#f88' : '#9c9'}">${fmtDays(stale)}</b>` +
-          (st.running ? ` · <span style="color:#fc6">${st.mode || 'task'} running…</span>` : '');
-        if (!st.running && this._wasRunning) { this._loadSnapshots(); this._checkOfficial(true); }
+        // Only rewrite the log when it actually changed, and preserve the user's
+        // scroll position / text selection (auto-scroll only if already at bottom).
+        const text = (st.log || []).join('\n');
+        if (text !== this._lastLog) {
+          const pre = this.els.log;
+          const atBottom = pre.scrollHeight - pre.scrollTop - pre.clientHeight < 24;
+          pre.textContent = text;
+          if (atBottom) pre.scrollTop = pre.scrollHeight;
+          this._lastLog = text;
+        }
+        // On running→idle transition, refresh the active-dataset info + lists.
+        if (!st.running && this._wasRunning) {
+          this._refreshActiveInfo();
+          this._loadSnapshots();
+          this._checkOfficial(true);
+        }
         this._wasRunning = st.running;
       } catch {}
     };

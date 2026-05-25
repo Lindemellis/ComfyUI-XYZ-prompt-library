@@ -41,19 +41,24 @@ def search_tags(
     q: str,
     db_path: Path,
     limit: int = 20,
+    conn: Any = None,
 ) -> List[Dict[str, Any]]:
     """Substring search using FTS5 trigram index, falling back to LIKE for short queries.
 
     Returns list of dicts: name, category, category_name, post_count,
     is_deprecated, aliases (list of str).
+
+    If `conn` is provided it is reused (and NOT closed) — the routes layer keeps a
+    persistent read connection for autocomplete to avoid per-keystroke open cost.
     """
-    if not db_path or not Path(db_path).exists():
-        return []
     q = q.strip()
     if not q:
         return []
-
-    conn = _db.connect_read(db_path)
+    own = conn is None
+    if own:
+        if not db_path or not Path(db_path).exists():
+            return []
+        conn = _db.connect_read(db_path)
     try:
         if len(q) >= 3:
             try:
@@ -64,7 +69,8 @@ def search_tags(
                 logger.debug("FTS search failed, falling back to LIKE: %s", exc)
         return _search_like(conn, q, limit)
     finally:
-        conn.close()
+        if own:
+            conn.close()
 
 
 def _search_fts(conn: Any, q: str, limit: int) -> Optional[List[Dict[str, Any]]]:
@@ -72,7 +78,8 @@ def _search_fts(conn: Any, q: str, limit: int) -> Optional[List[Dict[str, Any]]]
     escaped = q.replace('"', '""')
     sql = """
         SELECT t.name, t.category, t.post_count, t.is_deprecated,
-               COALESCE(GROUP_CONCAT(a.alias, ','), '') AS aliases
+               COALESCE(GROUP_CONCAT(a.alias, ','), '') AS aliases,
+               (SELECT text FROM translations tr WHERE tr.tag = t.name) AS translations
         FROM tags_fts f
         JOIN tags t ON t.id = f.rowid
         LEFT JOIN aliases a ON a.canonical = t.name
@@ -86,24 +93,68 @@ def _search_fts(conn: Any, q: str, limit: int) -> Optional[List[Dict[str, Any]]]
 
 
 def _search_like(conn: Any, q: str, limit: int) -> List[Dict[str, Any]]:
-    """LIKE-based fallback for queries shorter than 3 chars or when FTS5 fails."""
-    pattern = f"%{q}%"
-    sql = """
-        SELECT t.name, t.category, t.post_count, t.is_deprecated,
-               COALESCE(GROUP_CONCAT(a.alias, ','), '') AS aliases
-        FROM tags t
-        LEFT JOIN aliases a ON a.canonical = t.name
-        WHERE t.name LIKE ? OR a.alias LIKE ?
-        GROUP BY t.id
-        ORDER BY t.post_count DESC
-        LIMIT ?
+    """Fast name-prefix match for short queries (<3 chars) + FTS-failure fallback.
+
+    Two cheap steps instead of a join+group over the whole prefix set (which would
+    sort tens of thousands of rows): (1) top-N tag rows by post_count via the name
+    prefix, then (2) enrich just those few with aliases/translations. Substring and
+    translation search is handled by the FTS path for 3+ char queries.
     """
-    rows = conn.execute(sql, (pattern, pattern, limit)).fetchall()
-    return [_row_to_dict(r) for r in rows]
+    # Non-ASCII (CJK/kana/hangul) short query: it can only be a translated name,
+    # which lives mid-blob in translations.text — so accept a substring scan here
+    # (these queries are less frequent and users expect a small delay).
+    if not q.isascii():
+        pat = f"%{q}%"
+        rows = conn.execute("""
+            SELECT t.name, t.category, t.post_count, t.is_deprecated,
+                   COALESCE(GROUP_CONCAT(a.alias, ','), '') AS aliases,
+                   (SELECT text FROM translations tr WHERE tr.tag = t.name) AS translations
+            FROM tags t
+            LEFT JOIN aliases a ON a.canonical = t.name
+            WHERE t.name LIKE ? OR a.alias LIKE ?
+               OR t.name IN (SELECT tag FROM translations WHERE text LIKE ?)
+            GROUP BY t.id ORDER BY t.post_count DESC LIMIT ?
+        """, (pat, pat, pat, limit)).fetchall()
+        return [_row_to_dict(r) for r in rows]
+
+    prefix = f"{q}%"
+    base = conn.execute(
+        "SELECT name, category, post_count, is_deprecated FROM tags "
+        "WHERE name LIKE ? ORDER BY post_count DESC LIMIT ?",
+        (prefix, limit),
+    ).fetchall()
+    if not base:
+        return []
+    names = [r["name"] for r in base]
+    qmarks = ",".join("?" * len(names))
+    amap: Dict[str, str] = {}
+    for row in conn.execute(
+        f"SELECT canonical, GROUP_CONCAT(alias, ',') FROM aliases "
+        f"WHERE canonical IN ({qmarks}) GROUP BY canonical", names):
+        amap[row[0]] = row[1]
+    tmap: Dict[str, str] = {}
+    for row in conn.execute(
+        f"SELECT tag, text FROM translations WHERE tag IN ({qmarks})", names):
+        tmap[row[0]] = row[1]
+    out: List[Dict[str, Any]] = []
+    for r in base:
+        aliases_raw = amap.get(r["name"], "") or ""
+        translations_raw = tmap.get(r["name"], "") or ""
+        out.append({
+            "name": r["name"],
+            "category": r["category"],
+            "category_name": _CATEGORY_NAMES.get(r["category"], "general"),
+            "post_count": r["post_count"],
+            "is_deprecated": bool(r["is_deprecated"]),
+            "aliases": [a for a in aliases_raw.split(",") if a],
+            "translations": [t for t in translations_raw.split(" ") if t],
+        })
+    return out
 
 
 def _row_to_dict(row: Any) -> Dict[str, Any]:
     aliases_raw = row["aliases"] or ""
+    translations_raw = (row["translations"] if "translations" in row.keys() else "") or ""
     return {
         "name": row["name"],
         "category": row["category"],
@@ -111,6 +162,7 @@ def _row_to_dict(row: Any) -> Dict[str, Any]:
         "post_count": row["post_count"],
         "is_deprecated": bool(row["is_deprecated"]),
         "aliases": [a for a in aliases_raw.split(",") if a],
+        "translations": [t for t in translations_raw.split(" ") if t],
     }
 
 

@@ -128,6 +128,9 @@ function _makePane(tab, withHeader) {
   textarea.setAttribute('spellcheck', 'false');
   textarea.placeholder = 'e.g. [toki], {smile|laugh}, solo';
 
+  // Tag/library/ref autocomplete + related-on-click (rich editor = related-capable).
+  window.xyzTagAC?.attach(textarea, { related: true });
+
   textarea.addEventListener('focus', () => _setActive(pane));
   textarea.addEventListener('scroll', () => { backdrop.scrollTop = textarea.scrollTop; });
   textarea.addEventListener('input', () => { pane.updateBackdrop(); pane.syncToNode(); pane.ckptRecord(); _emitChanged(); });

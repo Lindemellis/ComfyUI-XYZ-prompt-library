@@ -364,6 +364,84 @@ def fetch_related(
     return out
 
 
+def fetch_artist_posts(
+    name: str,
+    limit: int = 20,
+    login: Optional[str] = None,
+    api_key: Optional[str] = None,
+    timeout: int = 30,
+) -> List[Dict[str, Any]]:
+    """Fetch recent danbooru posts for an artist tag (on-demand; not cached here).
+
+    Returns [{id, preview_url, large_url, rating}], skipping posts without a preview.
+    """
+    session = _make_session()
+    q = urllib.parse.quote(name)
+    url = (
+        f"{DANBOORU_BASE}/posts.json?tags={q}&limit={limit}"
+        f"{_build_auth_params(login, api_key)}"
+    )
+    data = _get_json(session, url, timeout=timeout)
+    out: List[Dict[str, Any]] = []
+    for p in data if isinstance(data, list) else []:
+        preview = p.get("preview_file_url")
+        if not preview:
+            continue
+        out.append({
+            "id": p.get("id"),
+            "preview_url": preview,
+            "large_url": p.get("large_file_url") or p.get("file_url"),
+            "rating": p.get("rating"),
+        })
+    return out
+
+
+def scrape_artist_other_names(
+    page_limit: int = DEFAULT_PAGE_LIMIT,
+    rate_delay: float = DEFAULT_RATE_DELAY,
+    login: Optional[str] = None,
+    api_key: Optional[str] = None,
+    stop_event=None,
+) -> Generator[Dict[str, Any], None, None]:
+    """Yield {tag, other_names:[...]} from danbooru artist entries (artist-category tags).
+
+    artist other_names are the artist's handles on other sites + FORMER danbooru
+    names (e.g. bunchi → [..., 'o_(jshn3457)', 'otintin', ...]). Distinct from wiki
+    other_names (translations). Lets users find an artist by any former/alt name.
+    """
+    base = f"&search[any_other_name_matches]=*{_build_auth_params(login, api_key)}"
+    session = _make_session()
+    for a in _paginate(session, "artists.json", base, "artist other_names",
+                      page_limit, rate_delay, stop_event):
+        names = a.get("other_names") or []
+        name = a.get("name")
+        if name and names:
+            yield {"tag": name, "other_names": names}
+
+
+def scrape_wiki_other_names(
+    page_limit: int = DEFAULT_PAGE_LIMIT,
+    rate_delay: float = DEFAULT_RATE_DELAY,
+    login: Optional[str] = None,
+    api_key: Optional[str] = None,
+    stop_event=None,
+) -> Generator[Dict[str, Any], None, None]:
+    """Yield {tag, other_names:[...]} from danbooru wiki pages that have other_names.
+
+    other_names are alternate / translated names (Japanese, Chinese, romaji, …),
+    e.g. aris_(blue_archive) → ['天童アリス', 'Tendou_Aris', ...]. Used to make tags
+    searchable by their translations.
+    """
+    base = f"&search[other_names_present]=true{_build_auth_params(login, api_key)}"
+    session = _make_session()
+    for w in _paginate(session, "wiki_pages.json", base, "wiki other_names",
+                      page_limit, rate_delay, stop_event):
+        names = w.get("other_names") or []
+        title = w.get("title")
+        if title and names:
+            yield {"tag": title, "other_names": names}
+
+
 if __name__ == "__main__":
     import argparse
 

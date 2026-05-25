@@ -814,6 +814,67 @@ def get_all_triggers() -> List[Dict[str, Any]]:
         conn.close()
 
 
+def search_prompt_contents(q: str, limit: int = 20) -> List[Dict[str, Any]]:
+    """Autocomplete: distinct enabled prompt contents matching q (substring).
+
+    Each result carries one source entry (name + full_path) for display. Used as a
+    library autocomplete source alongside danbooru tags.
+    """
+    q = (q or "").strip()
+    if not q:
+        return []
+    pattern = f"%{q}%"
+    conn = _db.connect_read(_db_path())
+    try:
+        rows = conn.execute(
+            """
+            SELECT p.content AS content,
+                   MIN(n.name) AS entry_name,
+                   MIN(n.full_path) AS full_path,
+                   COUNT(*) AS uses
+            FROM prompts p
+            JOIN nodes n ON n.id = p.node_id
+            WHERE p.enabled = 1 AND p.content LIKE ?
+            GROUP BY p.content
+            ORDER BY uses DESC, LENGTH(p.content) ASC
+            LIMIT ?
+            """,
+            (pattern, limit),
+        ).fetchall()
+        return _rows_to_list(rows)
+    finally:
+        conn.close()
+
+
+def search_refs(q: str, limit: int = 20) -> List[Dict[str, Any]]:
+    """Autocomplete for [entry]/​/entry refs: matching entry full_paths + triggers.
+
+    Returns dicts: {name, kind: 'entry'|'trigger', definition} where `definition`
+    is the owning entry's full_path (req 171: trigger suggestions show their entry).
+    """
+    q = (q or "").strip()
+    pattern = f"%{q}%"
+    conn = _db.connect_read(_db_path())
+    try:
+        out: List[Dict[str, Any]] = []
+        for r in conn.execute(
+            "SELECT name, full_path FROM nodes WHERE has_prompts = 1 "
+            "AND (full_path LIKE ? OR name LIKE ?) ORDER BY full_path LIMIT ?",
+            (pattern, pattern, limit),
+        ).fetchall():
+            out.append({"name": r["full_path"], "kind": "entry", "definition": r["name"]})
+        for r in conn.execute(
+            "SELECT t.trigger_text AS trigger_text, n.full_path AS full_path "
+            "FROM triggers t JOIN nodes n ON n.id = t.node_id "
+            "WHERE t.trigger_text LIKE ? ORDER BY t.trigger_text LIMIT ?",
+            (pattern, limit),
+        ).fetchall():
+            out.append({"name": r["trigger_text"], "kind": "trigger", "definition": r["full_path"]})
+        return out[:limit]
+    finally:
+        conn.close()
+
+
 def get_template_slots(folder_id: int) -> List[Dict[str, Any]]:
     """Return template slots for a folder node, ordered by order_index."""
     conn = _db.connect_read(_db_path())
