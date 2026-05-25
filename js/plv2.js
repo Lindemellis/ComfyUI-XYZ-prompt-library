@@ -77,6 +77,10 @@ const api = {
   createSlotPrompt:   (sid, body) => _req('POST',   `/xyz/plv2/template_slots/${sid}/prompts`, body),
   updateSlotPrompt:   (id, body)  => _req('PATCH',  `/xyz/plv2/template_prompts/${id}`, body),
   deleteSlotPrompt:   (id)        => _req('DELETE', `/xyz/plv2/template_prompts/${id}`),
+
+  replaceRefs:       (nid, body) => _req('POST',  `/xyz/plv2/nodes/${nid}/refs/replace`, body),
+  getUsages:         (nid)       => _req('GET',   `/xyz/plv2/nodes/${nid}/usages`),
+  stripRefs:          (nid, body) => _req('POST',  `/xyz/plv2/nodes/${nid}/strip_refs`, body),
 };
 
 // ─── State ────────────────────────────────────────────────────────────────────
@@ -539,10 +543,11 @@ function _makeWindow({ key, title, defs, minW, buildBody, openOtherLabel, openOt
     const titleEl = _span(title, 'font-weight:600;font-size:13px;color:#cba6f7;flex:1;');
     const closeBtn = _iconBtn('×', 'Close', () => _closeWin(win), { fontSize: '18px', lineHeight: '1', padding: '0 4px', color: '#6c7086' });
     bar.append(handle);
-    if (openOtherLabel) {
-      bar.append(_iconBtn(openOtherLabel, openOtherTitle || 'Open the other window (snapped)', () => _openOther(win), { fontSize: '13px', padding: '1px 4px' }));
-    }
     bar.append(titleEl);
+    if (openOtherLabel) {
+      const otherBtn = _iconBtn(openOtherLabel, openOtherTitle || 'Open the other window (snapped)', () => _openOther(win), { fontSize: '11px', padding: '3px 8px' });
+      bar.append(otherBtn);
+    }
     if (showSettings) {
       const gear = _iconBtn('⚙', 'Open XYZ Prompt Tools settings', () => {
         try { window.xyzSettingsPage?.show(); } catch {}
@@ -580,7 +585,7 @@ function _makeWindow({ key, title, defs, minW, buildBody, openOtherLabel, openOt
 // Editor: plv2_editor.js renders into win.body directly.
 const editorWin = _makeWindow({
   key: EDITOR_KEY, title: 'Text Editor', defs: EDITOR_DEFS, minW: 320,
-  openOtherLabel: '📚', openOtherTitle: 'Open Library (snapped to this window)',
+  openOtherLabel: 'Library', openOtherTitle: 'Open Library (snaps to this window)',
   buildBody(body) { body.style.flexDirection = 'column'; },
 });
 
@@ -588,7 +593,7 @@ const editorWin = _makeWindow({
 let _treePanel = null, _detailPanel = null, _treeW = LIBRARY_DEFS.treeW;
 const libraryWin = _makeWindow({
   key: LIBRARY_KEY, title: 'Prompt Library', defs: LIBRARY_DEFS, minW: 560,
-  openOtherLabel: '📝', openOtherTitle: 'Open Text Editor (snapped to this window)',
+  openOtherLabel: 'Editor', openOtherTitle: 'Open Text Editor (snaps to this window)',
   showSettings: true,
   buildBody(body, win) {
     const g = _loadGeom(LIBRARY_KEY, LIBRARY_DEFS);

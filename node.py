@@ -22,8 +22,8 @@ class MultiTextConcate:
     def INPUT_TYPES(s):
         return {
             "optional": {
-                "prefix": ("STRING", {"defaultInput": True}),
-                "suffix": ("STRING", {"defaultInput": True}),
+                "prefix": ("STRING", {"forceInput": True}),
+                "suffix": ("STRING", {"forceInput": True}),
             },
             "required": {
                 "delimiter": ("STRING", {"default": ", "}),
@@ -41,6 +41,8 @@ class MultiTextConcate:
         return 
     
     def concate_and_encode(self, delimiter, clean_whitespace, prefix, suffix, **kwargs):
+        prefix = prefix or ""
+        suffix = suffix or ""
         if clean_whitespace == "true":
             prefix = prefix.strip().rstrip(',')
             suffix = suffix.strip().rstrip(',')
@@ -65,7 +67,7 @@ class MutiTextReplace:
     def INPUT_TYPES(cls):
         return {
             "required": {
-                "template": ("STRING",  {"defaultInput": True}),
+                "template": ("STRING",  {"default": "", "multiline": True}),
             },
         }
     
@@ -147,8 +149,8 @@ class MultiClipEncoder:
         return { 
             "required":  { 
                 "clip": ("CLIP",),
-                "positive": ("STRING", {"defaultInput": True}),
-                "negative": ("STRING", {"defaultInput": True}),
+                "positive": ("STRING", {"default": "", "multiline": True}),
+                "negative": ("STRING", {"default": "", "multiline": True}),
             },
         }
     

@@ -729,6 +729,81 @@ async def _resolve_ref(request: web.Request) -> web.Response:
     return _ok({"node": node})
 
 
+async def _replace_refs(request: web.Request) -> web.Response:
+    """POST /xyz/plv2/nodes/{id}/refs/replace
+
+    Body: {"replacements": [{"old": "old_path", "new": "new_path"}, ...]}
+
+    Replaces ``[old]`` and ``[old.`` patterns in all prompt contents across the
+    library with the new names. Used after rename/move to keep references in sync.
+    """
+    try:
+        body: Dict = await request.json()
+    except Exception:
+        return _err(400, "bad_json", "request body must be valid JSON")
+
+    replacements = body.get("replacements")
+    if not isinstance(replacements, list) or not replacements:
+        return _err(400, "bad_request", "replacements must be a non-empty list")
+
+    for r in replacements:
+        if not isinstance(r, dict) or "old" not in r or "new" not in r:
+            return _err(400, "bad_request", "each replacement must have 'old' and 'new'")
+        if not str(r["old"]).strip() or not str(r["new"]).strip():
+            return _err(400, "bad_request", "'old' and 'new' must be non-empty strings")
+
+    try:
+        updated = _repo.replace_refs_in_prompts(replacements)
+    except Exception as e:
+        logger.exception("replace refs failed")
+        return _err(500, "internal", str(e))
+
+    return _ok({"updated": updated})
+
+
+async def _get_usages(request: web.Request) -> web.Response:
+    """GET /xyz/plv2/nodes/{id}/usages
+
+    Returns all references to this node (and its subtree entries) in other entries'
+    prompts. Used before delete to show impact.
+    """
+    nid = _node_id(request)
+    if _repo.get_node(nid) is None:
+        return _err(404, "not_found", f"node {nid} not found")
+    try:
+        usages = _repo.find_usages(nid)
+    except Exception as e:
+        logger.exception("find usages failed")
+        return _err(500, "internal", str(e))
+    return _ok(usages)
+
+
+async def _strip_refs(request: web.Request) -> web.Response:
+    """POST /xyz/plv2/nodes/{id}/strip_refs
+
+    Body: {"refs": ["quality.toki", "toki", ...]}
+
+    Removes all ``[ref]`` and ``[ref.sub]`` tokens from ALL prompts in the library.
+    Used before delete to clean up references to entries being removed.
+    """
+    try:
+        body: Dict = await request.json()
+    except Exception:
+        return _err(400, "bad_json", "request body must be valid JSON")
+
+    refs = body.get("refs")
+    if not isinstance(refs, list) or not refs:
+        return _err(400, "bad_request", "refs must be a non-empty list of strings")
+
+    try:
+        updated = _repo.strip_refs([str(r) for r in refs])
+    except Exception as e:
+        logger.exception("strip refs failed")
+        return _err(500, "internal", str(e))
+
+    return _ok({"updated": updated})
+
+
 # ---------------------------------------------------------------------------
 # Autocomplete sources (library prompts + entry/trigger refs) + shallow resolve
 # ---------------------------------------------------------------------------
@@ -837,6 +912,9 @@ def register(server) -> None:
     r.post(r"/xyz/plv2/nodes/{id:\d+}/preview")(_preview_node)
     r.post("/xyz/plv2/resolve")(_resolve_template)
     r.post("/xyz/plv2/resolve_ref")(_resolve_ref)
+    r.post(r"/xyz/plv2/nodes/{id:\d+}/refs/replace")(_replace_refs)
+    r.get(r"/xyz/plv2/nodes/{id:\d+}/usages")(_get_usages)
+    r.post(r"/xyz/plv2/nodes/{id:\d+}/strip_refs")(_strip_refs)
     r.get("/xyz/plv2/ac/prompts")(_ac_prompts)
     r.get("/xyz/plv2/ac/refs")(_ac_refs)
     r.get("/xyz/plv2/ac/entries_by_prompt")(_ac_entries_by_prompt)

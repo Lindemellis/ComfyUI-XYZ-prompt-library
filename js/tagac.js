@@ -128,7 +128,8 @@ async function fetchRelated(tag, limit) {
     if (!r.ok) return [];
     const data = await r.json();
     return (data.related || []).map((x) => ({
-      kind: 'tag', name: x.name, category: x.category, aliases: [], post_count: undefined,
+      kind: 'tag', name: x.name, category: x.category, aliases: [],
+      post_count: x.post_count, frequency: x.frequency, overlap: x.overlap,
     }));
   } catch {
     return [];
@@ -709,7 +710,8 @@ class TagAutocompleteUI {
       if (row) {
         const idx = parseInt(row.dataset.tagacIndex, 10);
         const cand = this._candidates[idx];
-        if (cand && this._target) this._insert(this._target, cand);
+        // Skip header rows (tag itself / entry itself) — they are info only
+        if (cand && this._target && !cand._isSelf) this._insert(this._target, cand);
         e.preventDefault();
         e.stopPropagation();
       }
@@ -748,7 +750,11 @@ class TagAutocompleteUI {
   _open(el, candidates, rangeStart) {
     this._target = el;
     this._candidates = candidates;
-    this._selIndex = 0;
+    this._hasNavigated = false;
+    // Info panel mode: start with no selection, so Enter inserts a newline
+    // instead of auto-selecting the first row. Navigation (arrow keys) enables
+    // selection mode and skips header rows (tag itself / entry itself).
+    this._selIndex = this._isInfo ? -1 : 0;
     this._rangeStart = rangeStart;
     this._render();
     this._position(el);
@@ -766,11 +772,38 @@ class TagAutocompleteUI {
     this._candidates = [];
     this._selIndex   = -1;
     this._target     = null;
+    this._hasNavigated = false;
   }
 
   navigate(dir) {
     if (!this._candidates.length) return;
-    this._selIndex = (this._selIndex + dir + this._candidates.length) % this._candidates.length;
+    if (!this._hasNavigated) {
+      this._hasNavigated = true;
+      // Find the first selectable index (skip header rows: _isSelf tags / entry refs)
+      let first = 0;
+      while (first < this._candidates.length && this._candidates[first]._isSelf) {
+        first++;
+      }
+      if (first >= this._candidates.length) {
+        // No selectable items — keep no selection, Enter will just close the panel
+        this._selIndex = -1;
+        return;
+      }
+      this._selIndex = first;
+      // Apply the direction from this starting point
+      if (dir > 0) {
+        this._selIndex = (this._selIndex + dir - 1 + this._candidates.length) % this._candidates.length;
+        // Re-skip headers
+        while (this._candidates[this._selIndex]._isSelf) {
+          this._selIndex = (this._selIndex + 1) % this._candidates.length;
+        }
+      }
+    } else {
+      // Normal wrap-around navigation, skipping headers
+      do {
+        this._selIndex = (this._selIndex + dir + this._candidates.length) % this._candidates.length;
+      } while (this._candidates[this._selIndex]._isSelf);
+    }
     this._highlight();
   }
 
@@ -904,7 +937,7 @@ class TagAutocompleteUI {
     row.appendChild(this._nameSpan(settings.replaceUnderscore ? tag.name.replace(/_/g, ' ') : tag.name));
 
     if (tag._isSelf) {
-      // Show category + post count inline
+      // Show category + post count inline (header style)
       const infoSpan = document.createElement('span');
       Object.assign(infoSpan.style, { color: '#aaa', fontSize: '12px', flexShrink: '0' });
       infoSpan.textContent = `${CATEGORY_NAMES[tag.category] || 'general'} · ${_fmtCount(tag.post_count)}`;
@@ -924,22 +957,32 @@ class TagAutocompleteUI {
       row.appendChild(aliasSpan);
     }
 
-    const countSpan = document.createElement('span');
-    Object.assign(countSpan.style, { color: '#666', fontSize: '13px', flexShrink: '0' });
-    countSpan.textContent = _fmtCount(tag.post_count);
-    row.appendChild(countSpan);
-
     if (!tag._isSelf) {
-      const jump = document.createElement('span');
-      jump.textContent = '↗'; jump.title = 'Open danbooru wiki';
-      Object.assign(jump.style, { color: '#7af', fontSize: '13px', flexShrink: '0', cursor: 'pointer', padding: '0 2px' });
-      jump.addEventListener('mousedown', (e) => {
-        e.preventDefault(); e.stopPropagation();
-        window.open(`https://danbooru.donmai.us/wiki_pages/${encodeURIComponent(tag.name)}`, '_blank');
-      });
-      row.appendChild(jump);
+      const infoSpan = document.createElement('span');
+      Object.assign(infoSpan.style, { color: '#888', fontSize: '11px', flexShrink: '1', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '130px' });
+      const cat = CATEGORY_NAMES[tag.category] || 'general';
+      // Show post_count for autocomplete, frequency/overlap for related tags
+      const countText = tag.post_count != null ? _fmtCount(tag.post_count)
+        : tag.frequency != null ? _fmtCount(tag.frequency)
+        : tag.overlap != null ? `${(tag.overlap * 100).toFixed(0)}%`
+        : '';
+      infoSpan.textContent = countText ? `${cat} · ${countText}` : cat;
+      infoSpan.title = infoSpan.textContent;
+      row.appendChild(infoSpan);
+    }
 
-      // Preview icon: showArtistPreview → artist tags only; showTagPreview → all tags
+    // Open danbooru wiki (header + regular rows)
+    const jump = document.createElement('span');
+    jump.textContent = '↗'; jump.title = 'Open danbooru wiki';
+    Object.assign(jump.style, { color: '#7af', fontSize: '13px', flexShrink: '0', cursor: 'pointer', padding: '0 2px' });
+    jump.addEventListener('mousedown', (e) => {
+      e.preventDefault(); e.stopPropagation();
+      window.open(`https://danbooru.donmai.us/wiki_pages/${encodeURIComponent(tag.name)}`, '_blank');
+    });
+    row.appendChild(jump);
+
+    // Preview icon (header + regular rows): showArtistPreview → artist tags only; showTagPreview → all tags
+    if (!tag._isSelf || settings.showTagPreview || (settings.showArtistPreview && tag.category === 1)) {
       const wantTagPv = settings.showTagPreview;
       const wantArtistPv = !wantTagPv && settings.showArtistPreview && tag.category === 1;
       if (wantTagPv || wantArtistPv) {
@@ -1130,6 +1173,7 @@ class TagAutocompleteUI {
       pos_neg: node.pos_neg,
       delimiter: node.delimiter,
       has_prompts: true,
+      _isSelf: true,   // entry itself is a header, not selectable for insertion
     };
     this._isRelated = false;
     this._isInfo    = true;
@@ -1168,11 +1212,11 @@ class TagAutocompleteUI {
   async showRelatedFor(el, name) {
     this._isRelated = true;
     this._isInfo    = true;
-    // Compute the token's end position so insertion appends after it.
     const tokEnd = getTokenEnd(el);
     this._rangeStart = tokEnd;
 
-    // Show self-tag info immediately from cache / fast API.
+    // Fetch self-tag for the header row (fast, from local cache) and related
+    // tags (slower, from network) in parallel.
     const selfResults = searchTags(name, 1);
     const relatedPromise = fetchRelated(name, settings.maxSuggestions);
 
@@ -1180,17 +1224,19 @@ class TagAutocompleteUI {
     const results = [];
     if (selfTag) results.push({ ...selfTag, kind: 'tag', _isSelf: true });
 
-    // Show immediately with what we have
+    // Show immediately with the header row
     if (results.length) {
       this._open(el, [...results], tokEnd);
     }
 
-    // Then wait for related and update
+    // Wait for related, filter out the tag itself, and update
     const relatedResults = await relatedPromise;
-    for (const r of relatedResults) results.push(r);
-    if (!results.length) { this.hide(); return; }
+    for (const r of relatedResults) {
+      if (r.name !== name) results.push(r);
+    }
+    if (results.length <= 1) { this.hide(); return; }  // only header, nothing to select
     this._candidates = results;
-    this._selIndex = 0;
+    if (!this._hasNavigated) this._selIndex = -1;
     this._render();
     this._highlight();
   }
@@ -1198,7 +1244,7 @@ class TagAutocompleteUI {
   _highlight() {
     const rows = this._root.querySelectorAll('[data-tagac-index]');
     rows.forEach((r, i) => {
-      if (i === this._selIndex) {
+      if (i === this._selIndex && this._selIndex >= 0) {
         r.style.backgroundColor = '#2a2a5e';
         r.scrollIntoView({ block: 'nearest' });
       } else {
@@ -1325,6 +1371,9 @@ class TagACHandler {
         const mod = e.shiftKey || e.ctrlKey || e.altKey || e.metaKey;
         if (!mod && this.ui.confirmSelected()) {
           e.preventDefault();
+        } else if (e.key === 'Enter' && this.ui._isInfo && !this.ui._hasNavigated) {
+          // Info panel, not yet navigating: let Enter insert a newline in the textarea
+          this.ui.hide();
         } else {
           this.ui.hide();
         }

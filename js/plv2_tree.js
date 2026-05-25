@@ -44,6 +44,70 @@ function _panelCenter() {
   return r ? { x: r.left + r.width / 2, y: r.top + r.height / 2 } : { x: window.innerWidth / 2, y: window.innerHeight / 2 };
 }
 
+function _showCreateFolderPrompt(title, defaultValue = '') {
+  return new Promise(resolve => {
+    const c = _panelCenter();
+    const box = document.createElement('div');
+    Object.assign(box.style, {
+      position: 'fixed', zIndex: '10002',
+      left: (c.x - 140) + 'px', top: (c.y - 68) + 'px',
+      background: '#252526', border: '1px solid #454545', borderRadius: '6px',
+      padding: '12px 14px', boxShadow: '0 4px 20px rgba(0,0,0,.7)',
+      display: 'flex', flexDirection: 'column', gap: '8px', minWidth: '300px',
+      fontFamily: 'ui-sans-serif,system-ui,sans-serif',
+    });
+    const lbl = document.createElement('div');
+    lbl.textContent = title;
+    Object.assign(lbl.style, { fontSize: '12px', color: '#cdd6f4', fontWeight: '600' });
+    const inp = document.createElement('input');
+    inp.value = defaultValue;
+    Object.assign(inp.style, {
+      background: '#3c3c3c', border: '1px solid #454545', borderRadius: '3px',
+      color: '#cccccc', fontSize: '12px', padding: '5px 8px', outline: 'none',
+    });
+    inp.addEventListener('focus', () => { inp.style.borderColor = '#7c3aed'; });
+    inp.addEventListener('blur',  () => { inp.style.borderColor = '#454545'; });
+
+    // Checkbox row
+    const checkRow = document.createElement('div');
+    checkRow.style.cssText = 'display:flex;align-items:center;gap:8px;';
+    const check = document.createElement('input');
+    check.type = 'checkbox';
+    check.checked = false;
+    check.style.cssText = 'cursor:pointer;accent-color:#7c3aed;width:14px;height:14px;margin:0;';
+    check.id = 'plv2-newfolder-template';
+    const checkLbl = document.createElement('label');
+    checkLbl.htmlFor = 'plv2-newfolder-template';
+    checkLbl.textContent = 'Create a _template entry inside this folder';
+    checkLbl.style.cssText = 'font-size:12px;color:#a6adc8;cursor:pointer;user-select:none;';
+    checkRow.append(check, checkLbl);
+
+    const btns = document.createElement('div');
+    btns.style.cssText = 'display:flex;gap:6px;justify-content:flex-end;';
+    const cancel = document.createElement('button');
+    cancel.textContent = 'Cancel';
+    Object.assign(cancel.style, { background: 'none', border: '1px solid #454545', color: '#a6adc8', fontSize: '11px', padding: '3px 10px', borderRadius: '3px', cursor: 'pointer' });
+    const ok = document.createElement('button');
+    ok.textContent = 'OK';
+    Object.assign(ok.style, { background: '#7c3aed', border: 'none', color: '#fff', fontSize: '11px', padding: '3px 10px', borderRadius: '3px', cursor: 'pointer' });
+    btns.append(cancel, ok);
+    box.append(lbl, inp, checkRow, btns);
+    document.body.appendChild(box);
+    const done = val => { box.remove(); resolve(val); };
+    cancel.addEventListener('click', () => done(null));
+    ok.addEventListener('click', () => {
+      const name = inp.value.trim();
+      if (!name) { done(null); return; }
+      done({ name, createTemplate: check.checked });
+    });
+    inp.addEventListener('keydown', e => {
+      if (e.key === 'Enter')  { e.preventDefault(); const name = inp.value.trim(); if (!name) { done(null); return; } done({ name, createTemplate: check.checked }); }
+      if (e.key === 'Escape') { e.preventDefault(); done(null); }
+    });
+    requestAnimationFrame(() => { inp.focus(); inp.select(); });
+  });
+}
+
 function _showInlinePrompt(title, defaultValue = '') {
   return new Promise(resolve => {
     const c = _panelCenter();
@@ -307,17 +371,23 @@ function _hasMatchingDescendant(nodeId, treeMap, filteredIds) {
 function _showNodeMenu(x, y, node, isFolder) {
   const items = [];
 
-  // Insert into text editor
-  items.push({
-    label: 'Insert [reference]',
-    action: () => _insertIntoEditor(node),
-  });
+  if (!isFolder) {
+    items.push({
+      label: 'Insert [reference]',
+      action: () => _insertIntoEditor(node),
+    });
+  }
 
   items.push({ separator: true });
 
   items.push({
     label: 'Rename',
     action: () => _renameNode(node),
+  });
+
+  items.push({
+    label: 'Move…',
+    action: () => _showMoveDialog(node, isFolder),
   });
 
   if (isFolder) {
@@ -350,7 +420,18 @@ function _insertIntoEditor(node) {
 // ─── CRUD (using ComfyUI dialogs, no browser dialogs) ────────────────────────
 
 async function _createNode(parentId, hasPrompts) {
-  const name = await _showInlinePrompt(hasPrompts ? 'New Entry — name:' : 'New Folder — name:');
+  let name;
+  let createTemplate = false;
+
+  if (hasPrompts) {
+    name = await _showInlinePrompt('New Entry — name:');
+  } else {
+    const result = await _showCreateFolderPrompt('New Folder — name:');
+    if (!result) return;
+    name = result.name;
+    createTemplate = result.createTemplate;
+  }
+
   if (!name?.trim()) return;
 
   const body = { name: name.trim(), has_prompts: hasPrompts };
@@ -364,6 +445,16 @@ async function _createNode(parentId, hasPrompts) {
     return;
   }
   if (parentId != null) _expanded.add(parentId);
+
+  // Auto-create _template entry inside the new folder
+  if (!hasPrompts && createTemplate && res?.node?.id) {
+    const tplBody = { name: '_template', has_prompts: true, parent_id: res.node.id };
+    const tplRes = await window.plv2.api.createNode(tplBody);
+    if (tplRes?.error) {
+      try { app.extensionManager.toast.add({ severity: 'warn', summary: 'PLv2', detail: '_template entry creation failed: ' + tplRes.error.message, life: 4000 }); } catch {}
+    }
+  }
+
   await _load();
   if (res?.node?.id) {
     if (hasPrompts) _fireSelectEntry(res.node);
@@ -383,18 +474,299 @@ async function _renameNode(node) {
 }
 
 async function _deleteNode(node) {
-  const ok = await _showInlineConfirm(`Delete "${node.full_path}" and all its children?`);
-  if (!ok) return;
-  const res = await window.plv2.api.deleteNode(node.id);
-  if (res?.error) {
-    try { app.extensionManager.toast.add({ severity: 'error', summary: 'PLv2', detail: res.error.message, life: 4000 }); } catch {}
-    return;
+  // Step 1: find usages before deleting
+  let usages = null;
+  try { usages = await window.plv2.api.getUsages(node.id); } catch {}
+  const entries = usages?.entries ?? [];
+  const usageList = usages?.usages ?? [];
+
+  const hasUsages = usageList.length > 0;
+  const entryCount = entries.length;
+
+  // Step 2: build and show the confirmation dialog
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:99999;display:flex;align-items:center;justify-content:center;';
+  const box = document.createElement('div');
+  box.style.cssText = 'background:#1e1e2e;border:1px solid #45475a;border-radius:8px;padding:16px;min-width:420px;max-width:560px;max-height:75vh;display:flex;flex-direction:column;gap:10px;box-shadow:0 8px 32px rgba(0,0,0,0.5);';
+
+  const title = document.createElement('div');
+  title.style.cssText = 'font-size:14px;font-weight:600;color:#cdd6f4;';
+  title.innerHTML = entryCount > 1
+    ? `Delete <b>${entryCount}</b> entries in "${node.full_path}" and its children?`
+    : `Delete "<b>${node.full_path}</b>" ?`;
+
+  const body = document.createElement('div');
+  body.style.cssText = 'font-size:12px;color:#a6adc8;line-height:1.5;overflow-y:auto;max-height:300px;';
+
+  if (hasUsages) {
+    body.innerHTML = '<div style="color:#f38ba8;margin-bottom:8px;">⚠ These entries are still referenced elsewhere:</div>';
+    // Group usages by target entry
+    const byTarget = new Map();
+    for (const u of usageList) {
+      const key = u.entry_full_path;
+      if (!byTarget.has(key)) byTarget.set(key, []);
+      byTarget.get(key).push(u);
+    }
+    for (const [target, refs] of byTarget) {
+      const item = document.createElement('div');
+      item.style.cssText = 'margin-bottom:6px;padding:4px 8px;background:#1a1426;border:1px solid #313244;border-radius:4px;';
+      item.innerHTML = `<div style="color:#cba6f7;font-weight:600;">${target}</div>`;
+      const uniqueRefs = [...new Set(refs.map(r => r.matched_ref))];
+      const maxShow = 4;
+      for (const r of uniqueRefs.slice(0, maxShow)) {
+        const refItem = document.createElement('div');
+        refItem.style.cssText = 'color:#6c7086;font-size:11px;padding:1px 0;';
+        refItem.textContent = `  [${r}]`;
+        item.appendChild(refItem);
+      }
+      const totalRefs = refs.length;
+      const totalUnique = uniqueRefs.length;
+      if (totalUnique > maxShow) {
+        const more = document.createElement('div');
+        more.style.cssText = 'color:#6c7086;font-size:11px;';
+        more.textContent = `  … and ${totalUnique - maxShow} more refs (${totalRefs} occurrences)`;
+        item.appendChild(more);
+      } else if (totalRefs > 1) {
+        const more = document.createElement('div');
+        more.style.cssText = 'color:#6c7086;font-size:11px;';
+        more.textContent = `  (${totalRefs} occurrences)`;
+        item.appendChild(more);
+      }
+      body.appendChild(item);
+    }
+    body.appendChild(document.createElement('br'));
+    body.appendChild(document.createTextNode('Remove these references before deleting?'));
+  } else if (entryCount > 0) {
+    body.textContent = `This will remove ${entryCount > 1 ? entryCount + ' entries' : '1 entry'}. No external references were found.`;
+  } else {
+    body.textContent = 'This will remove the folder and all its contents.';
   }
-  if (window.plv2.state.selectedLibNodeId === node.id) {
-    window.plv2.state.selectedLibNodeId = null;
-    _fireSelectEntry(null);
+
+  let _cleanup = hasUsages;
+  const cleanupRow = document.createElement('div');
+  cleanupRow.style.cssText = `display:${hasUsages ? 'flex' : 'none'};align-items:center;gap:8px;padding:4px 0;`;
+  const cleanupChk = document.createElement('input');
+  cleanupChk.type = 'checkbox'; cleanupChk.checked = true;
+  cleanupChk.style.cssText = 'cursor:pointer;accent-color:#cba6f7;';
+  cleanupChk.addEventListener('change', () => { _cleanup = cleanupChk.checked; });
+  const cleanupLabel = document.createElement('span');
+  cleanupLabel.style.cssText = 'font-size:12px;color:#a6adc8;';
+  cleanupLabel.textContent = 'Remove references from library + workflow before deleting';
+  cleanupRow.append(cleanupChk, cleanupLabel);
+
+  const btnRow = document.createElement('div');
+  btnRow.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;';
+
+  const cancelBtn = document.createElement('button');
+  cancelBtn.textContent = 'Cancel';
+  Object.assign(cancelBtn.style, { background:'#313244',border:'1px solid #45475a',borderRadius:'4px',color:'#cdd6f4',cursor:'pointer',padding:'4px 14px',fontSize:'12px' });
+  cancelBtn.addEventListener('click', () => overlay.remove());
+
+  const deleteBtn = document.createElement('button');
+  deleteBtn.textContent = hasUsages ? (_cleanup ? 'Clean up & Delete' : 'Delete anyway') : 'Delete';
+  Object.assign(deleteBtn.style, { background:'#f38ba8',border:'none',borderRadius:'4px',color:'#1e1e2e',cursor:'pointer',padding:'4px 14px',fontSize:'12px',fontWeight:'600' });
+  deleteBtn.addEventListener('click', async () => {
+    deleteBtn.textContent = 'Deleting…';
+    deleteBtn.disabled = true;
+    cancelBtn.disabled = true;
+
+    try {
+      if (_cleanup && hasUsages) {
+        // Collect all ref strings to strip
+        const allRefs = [];
+        for (const e of entries) {
+          if (e.refs) allRefs.push(...e.refs);
+        }
+        const uniqueRefs = [...new Set(allRefs)];
+        if (uniqueRefs.length) {
+          try { await window.plv2.api.stripRefs(node.id, { refs: uniqueRefs }); } catch(e) { console.error('[PLv2] stripRefs failed', e); }
+        }
+
+        // Also strip from workflow nodes
+        try {
+          const types = ['XYZ Prompt Library V2 Positive', 'XYZ Prompt Library V2 Negative'];
+          for (const gn of (app.graph?._nodes ?? [])) {
+            if (!types.includes(gn.comfyClass)) continue;
+            const w = gn.widgets?.find(x => x.name === 'prompt_template');
+            if (!w) continue;
+            let v = w.value;
+            let changed = false;
+            for (const ref of uniqueRefs) {
+              const re = new RegExp(`\\[${ref.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:\\.[^\\]]+)?\\]`, 'g');
+              const before = v;
+              v = v.replace(re, '');
+              if (v !== before) {
+                // Clean up delimiter debris
+                v = v.replace(/,\s*,/g, ', ').replace(/\|\s*\|/g, '|').replace(/^\s*[,|]\s*/, '').replace(/\s*[,|]\s*$/, '').trim();
+                changed = true;
+              }
+            }
+            if (changed) {
+              w.value = v;
+              if (w.inputEl && w.inputEl.value !== v) w.inputEl.value = v;
+              gn.onWidgetChanged?.(w.name, v, v, w);
+              app.graph.setDirtyCanvas(true, true);
+              document.dispatchEvent(new CustomEvent('plv2:node-edited', { detail: { nodeId: gn.id, value: v } }));
+            }
+          }
+        } catch(e) { console.error('[PLv2] workflow strip failed', e); }
+      }
+    } catch(e) { /* continue with delete */ }
+
+    const res = await window.plv2.api.deleteNode(node.id);
+    if (res?.error) {
+      try { app.extensionManager.toast.add({ severity: 'error', summary: 'PLv2', detail: res.error.message, life: 4000 }); } catch {}
+      deleteBtn.textContent = 'Delete';
+      deleteBtn.disabled = false;
+      cancelBtn.disabled = false;
+      return;
+    }
+    if (window.plv2.state.selectedLibNodeId === node.id) {
+      window.plv2.state.selectedLibNodeId = null;
+      _fireSelectEntry(null);
+    }
+    overlay.remove();
+    await _load();
+  });
+
+  cleanupChk.addEventListener('change', () => {
+    deleteBtn.textContent = cleanupChk.checked ? 'Clean up & Delete' : 'Delete anyway';
+  });
+
+  btnRow.append(cancelBtn, deleteBtn);
+  box.append(title, body, cleanupRow, btnRow);
+  overlay.appendChild(box);
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+  document.body.appendChild(overlay);
+}
+
+// ─── Move dialog ──────────────────────────────────────────────────────────────
+
+function _showMoveDialog(node, isFolder) {
+  // Build the set of forbidden target ids: the node itself + all descendants
+  const forbidden = new Set([node.id]);
+  for (const n of _nodes) {
+    if (n.full_path && n.full_path.startsWith(node.full_path + '.')) forbidden.add(n.id);
   }
-  await _load();
+
+  // Build tree map for rendering
+  const treeMap = _buildTreeMap(_nodes);
+
+  // Modal
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:99999;display:flex;align-items:center;justify-content:center;';
+  const box = document.createElement('div');
+  box.style.cssText = 'background:#1e1e2e;border:1px solid #45475a;border-radius:8px;padding:16px;min-width:380px;max-width:520px;max-height:70vh;display:flex;flex-direction:column;gap:10px;box-shadow:0 8px 32px rgba(0,0,0,0.5);';
+
+  const title = document.createElement('div');
+  title.textContent = `Move "${node.name}" to…`;
+  title.style.cssText = 'font-size:14px;font-weight:600;color:#cdd6f4;';
+
+  const treeContainer = document.createElement('div');
+  treeContainer.style.cssText = 'flex:1;overflow-y:auto;min-height:200px;max-height:50vh;scrollbar-width:thin;scrollbar-color:#45475a transparent;border:1px solid #313244;border-radius:4px;padding:4px;';
+
+  let selectedParentId = node.parent_id ?? null;
+  let selectedEl = null;
+
+  function selectTarget(parentId, row) {
+    selectedParentId = parentId;
+    if (selectedEl) selectedEl.style.background = '';
+    selectedEl = row;
+    if (row) row.style.background = '#2d1b5e';
+  }
+
+  function renderTree(container, parentId, depth) {
+    const children = treeMap.get(parentId) ?? [];
+    for (const child of children) {
+      const isDisabled = forbidden.has(child.id);
+      // Folders can only go under folders; entries can go under folders
+      const isTarget = !isDisabled && (!isFolder || !child.has_prompts);
+      const isChildFolder = !child.has_prompts;
+
+      const row = document.createElement('div');
+      row.style.cssText = `display:flex;align-items:center;gap:6px;padding:4px 6px 4px ${6 + depth * 16}px;cursor:${isTarget ? 'pointer' : 'default'};opacity:${isDisabled ? '0.35' : '1'};border-radius:3px;`;
+      row.style.color = isDisabled ? '#6c7086' : '#cdd6f4';
+      row.style.fontSize = '12px';
+
+      const icon = document.createElement('span');
+      icon.textContent = child.has_prompts ? '📝' : '📁';
+      icon.style.flexShrink = '0';
+
+      const nameEl = document.createElement('span');
+      nameEl.textContent = child.name + (isDisabled ? ' (current)' : '');
+      nameEl.style.cssText = 'overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
+
+      row.append(icon, nameEl);
+
+      if (isTarget) {
+        row.addEventListener('click', () => selectTarget(child.id, row));
+        if (child.id === selectedParentId) selectTarget(child.id, row);
+      }
+
+      container.appendChild(row);
+
+      // Render children of folders (targets need to see the full tree)
+      if (isChildFolder) renderTree(container, child.id, depth + 1);
+    }
+  }
+
+  // Root option
+  const rootRow = document.createElement('div');
+  rootRow.style.cssText = 'display:flex;align-items:center;gap:6px;padding:4px 6px;cursor:pointer;border-radius:3px;font-size:12px;color:#a6adc8;';
+  rootRow.innerHTML = '<span>📁</span><span>/ (root)</span>';
+  rootRow.addEventListener('click', () => selectTarget(null, rootRow));
+  if (selectedParentId === null) selectTarget(null, rootRow);
+  treeContainer.appendChild(rootRow);
+
+  renderTree(treeContainer, null, 0);
+
+  // Buttons
+  const btnRow = document.createElement('div');
+  btnRow.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;';
+
+  const cancelBtn = document.createElement('button');
+  cancelBtn.textContent = 'Cancel';
+  Object.assign(cancelBtn.style, { background:'#313244',border:'1px solid #45475a',borderRadius:'4px',color:'#cdd6f4',cursor:'pointer',padding:'4px 14px',fontSize:'12px' });
+  cancelBtn.addEventListener('click', () => overlay.remove());
+
+  const okBtn = document.createElement('button');
+  okBtn.textContent = 'Move';
+  Object.assign(okBtn.style, { background:'#7c3aed',border:'none',borderRadius:'4px',color:'#fff',cursor:'pointer',padding:'4px 14px',fontSize:'12px',fontWeight:'600' });
+  okBtn.addEventListener('click', async () => {
+    if (selectedParentId === (node.parent_id ?? null)) { overlay.remove(); return; }
+    okBtn.textContent = 'Moving…';
+    okBtn.disabled = true;
+    try {
+      const res = await window.plv2.api.moveNode(node.id, { parent_id: selectedParentId });
+      if (res?.error) {
+        try { app.extensionManager.toast.add({ severity: 'error', summary: 'PLv2 Move', detail: res.error.message, life: 4000 }); } catch {}
+        okBtn.textContent = 'Move';
+        okBtn.disabled = false;
+        return;
+      }
+      const oldFullPath = node.full_path;
+      const oldAutoTrigger = node.auto_trigger ?? null;
+      const movedNode = res?.node;
+      if (movedNode) {
+        try { await window.plv2Entry?.afterPathChange?.(movedNode, oldFullPath, oldAutoTrigger, true); } catch(e) { console.error('[PLv2] afterPathChange failed', e); }
+      }
+      overlay.remove();
+      await _load();
+    } catch(e) {
+      console.error('[PLv2] move failed', e);
+      okBtn.textContent = 'Move';
+      okBtn.disabled = false;
+    }
+  });
+
+  btnRow.append(cancelBtn, okBtn);
+  box.append(title, treeContainer, btnRow);
+  overlay.appendChild(box);
+
+  // Close on overlay click
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+
+  document.body.appendChild(overlay);
 }
 
 // ─── Load + render ────────────────────────────────────────────────────────────

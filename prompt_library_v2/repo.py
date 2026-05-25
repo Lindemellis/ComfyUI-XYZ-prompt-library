@@ -699,11 +699,19 @@ def get_prompt(prompt_id: int) -> Optional[Dict[str, Any]]:
 
 
 def get_node(node_id: int) -> Optional[Dict[str, Any]]:
-    """Fetch a single node by id. Returns None if not found."""
+    """Fetch a single node by id. Returns None if not found.
+
+    Includes auto_trigger from the triggers table (NULL for folders).
+    """
     conn = _db.connect_read(_db_path())
     try:
         row = conn.execute(
-            "SELECT * FROM nodes WHERE id = ?", (node_id,)
+            """
+            SELECT n.*, t.trigger_text AS auto_trigger
+            FROM nodes n
+            LEFT JOIN triggers t ON t.node_id = n.id AND t.is_auto = 1
+            WHERE n.id = ?
+            """, (node_id,)
         ).fetchone()
         return _row_to_dict(row) if row else None
     finally:
@@ -758,11 +766,20 @@ def get_subtree_paths(root_full_path: str) -> List[str]:
 
 
 def get_tree() -> List[Dict[str, Any]]:
-    """Return ALL nodes ordered by full_path (caller builds tree structure)."""
+    """Return ALL nodes ordered by full_path (caller builds tree structure).
+
+    Each row includes an ``auto_trigger`` column (the node's single is_auto=1
+    trigger text, or None for folders / entries without one).
+    """
     conn = _db.connect_read(_db_path())
     try:
         rows = conn.execute(
-            "SELECT * FROM nodes ORDER BY full_path"
+            """
+            SELECT n.*, t.trigger_text AS auto_trigger
+            FROM nodes n
+            LEFT JOIN triggers t ON t.node_id = n.id AND t.is_auto = 1
+            ORDER BY n.full_path
+            """
         ).fetchall()
         return _rows_to_list(rows)
     finally:
@@ -971,3 +988,179 @@ def get_common_delimiters() -> List[Dict[str, Any]]:
         return _rows_to_list(rows)
     finally:
         conn.close()
+
+
+def replace_refs_in_prompts(replacements: List[Dict[str, str]]) -> int:
+    """Replace old [ref] patterns with new ones in all prompt contents.
+
+    Each entry in `replacements` must have ``old`` and ``new`` keys. The function
+    replaces ``[old]`` and ``[old.`` (prefix for sub-entry refs) with
+    ``[new]`` / ``[new.`` across every row in the ``prompts`` table. Returns the
+    total number of rows updated.
+    """
+    if not replacements:
+        return 0
+    conn = _db.connect_write(_db_path())
+    total = 0
+    try:
+        with conn:
+            for r in replacements:
+                old = str(r["old"])
+                new = str(r["new"])
+                if old == new:
+                    continue
+                old_b = f"[{old}]"
+                new_b = f"[{new}]"
+                old_d = f"[{old}."
+                new_d = f"[{new}."
+                # Replace prefix first to keep them disjoint
+                res = conn.execute(
+                    "UPDATE prompts SET content = REPLACE(REPLACE(content, ?, ?), ?, ?), updated_at = ? "
+                    "WHERE content LIKE ? OR content LIKE ?",
+                    (old_d, new_d, old_b, new_b, _now(), f"%[{old}]%", f"%[{old}.%"),
+                )
+                total += res.rowcount
+    finally:
+        conn.close()
+    return total
+
+
+def find_usages(node_id: int) -> Dict[str, Any]:
+    """Find all references to a node (and its subtree entries) in other entries' prompts.
+
+    Returns {entries: [{id, name, full_path, triggers: [str], refs: [str]}],
+             usages: [{prompt_id, content_snippet, entry_name, entry_full_path, matched_ref}]}
+    Only includes usages from *other* nodes (not the subtree itself).
+    """
+    conn = _db.connect_read(_db_path())
+    try:
+        node = conn.execute("SELECT id, name, full_path, has_prompts FROM nodes WHERE id = ?", (node_id,)).fetchone()
+        if not node:
+            return {"entries": [], "usages": []}
+
+        # Gather all entries in the subtree
+        root_path = node["full_path"]
+        subtree_rows = conn.execute(
+            "SELECT id, name, full_path, has_prompts FROM nodes WHERE full_path = ? OR full_path LIKE ? ORDER BY full_path",
+            (root_path, root_path + ".%"),
+        ).fetchall()
+
+        subtree_ids = {r["id"] for r in subtree_rows}
+        entry_rows = [r for r in subtree_rows if r["has_prompts"]]
+        if not entry_rows:
+            return {"entries": [], "usages": []}
+
+        # Gather triggers for each entry
+        trigger_map = {}
+        all_refs = []
+        for e in entry_rows:
+            triggers = conn.execute(
+                "SELECT trigger_text, is_auto FROM triggers WHERE node_id = ?", (e["id"],)
+            ).fetchall()
+            trigger_texts = [t["trigger_text"] for t in triggers]
+            trigger_map[e["id"]] = trigger_texts
+            # Build all possible ref strings for this entry
+            entry_refs = [e["full_path"]] + trigger_texts
+            all_refs.extend(entry_refs)
+
+        if not all_refs:
+            return {"entries": [], "usages": []}
+
+        # Build entries list for the response
+        entries_out = [
+            {
+                "id": e["id"],
+                "name": e["name"],
+                "full_path": e["full_path"],
+                "triggers": trigger_map.get(e["id"], []),
+                "refs": [e["full_path"]] + trigger_map.get(e["id"], []),
+            }
+            for e in entry_rows
+        ]
+
+        # Search prompts for references — exclude prompts belonging to the subtree
+        import re
+        escaped = [re.escape(r) for r in all_refs]
+        ref_re = re.compile(r'\[(' + '|'.join(escaped) + r')(?:\.[^\]]+)?\]')
+
+        prompt_rows = conn.execute(
+            """
+            SELECT p.id, p.content, p.node_id, n.name AS entry_name, n.full_path AS entry_full_path
+            FROM prompts p
+            JOIN nodes n ON n.id = p.node_id
+            WHERE p.enabled = 1
+            ORDER BY n.full_path, p.order_index
+            """
+        ).fetchall()
+
+        usages_out = []
+        for pr in prompt_rows:
+            if pr["node_id"] in subtree_ids:
+                continue  # skip own subtree
+            matches = ref_re.findall(pr["content"])
+            if not matches:
+                continue
+            for m in set(matches):
+                snippet = pr["content"]
+                if len(snippet) > 100:
+                    idx = snippet.find(f"[{m}")
+                    start = max(0, (idx if idx >= 0 else 0) - 30)
+                    snippet = ("…" if start > 0 else "") + snippet[start:start + 100] + ("…" if start + 100 < len(pr["content"]) else "")
+                usages_out.append({
+                    "prompt_id": pr["id"],
+                    "content_snippet": snippet,
+                    "entry_name": pr["entry_name"],
+                    "entry_full_path": pr["entry_full_path"],
+                    "matched_ref": m,
+                })
+
+        return {"entries": entries_out, "usages": usages_out}
+    finally:
+        conn.close()
+
+
+def strip_refs(refs: List[str]) -> int:
+    """Remove all references to the given ref strings from ALL prompts in the library.
+
+    Uses Python regex to cleanly remove ``[ref]`` and ``[ref.sub_path]`` tokens.
+    Returns the number of prompts updated.
+    """
+    if not refs:
+        return 0
+    import re
+    conn = _db.connect_write(_db_path())
+    total = 0
+    try:
+        escaped = [re.escape(r) for r in refs]
+        ref_re = re.compile(r'\[(' + '|'.join(escaped) + r')(?:\.[^\]]+)?\]')
+
+        with conn:
+            patterns = []
+            params = []
+            for r in refs:
+                patterns.append("(content LIKE ? OR content LIKE ?)")
+                params.extend([f"%[{r}]%", f"%[{r}.%"])
+            where = " OR ".join(patterns)
+
+            rows = conn.execute(
+                f"SELECT id, content FROM prompts WHERE enabled = 1 AND ({where})",
+                params,
+            ).fetchall()
+
+            for row in rows:
+                new_content = ref_re.sub('', row["content"])
+                # Clean up: collapse consecutive delimiters, trim stray delimiters at ends
+                new_content = re.sub(r',\s*,', ', ', new_content)
+                new_content = re.sub(r'\|\s*\|', '|', new_content)
+                new_content = re.sub(r'^\s*[,|]\s*', '', new_content)
+                new_content = re.sub(r'\s*[,|]\s*$', '', new_content)
+                new_content = new_content.strip()
+                if new_content != row["content"]:
+                    conn.execute(
+                        "UPDATE prompts SET content = ?, updated_at = ? WHERE id = ?",
+                        (new_content, _now(), row["id"]),
+                    )
+                    total += 1
+    finally:
+        conn.close()
+    return total

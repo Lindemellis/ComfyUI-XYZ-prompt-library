@@ -20,9 +20,9 @@ let _delimiters  = [];
 
 let _activePanel = 'prompts';   // 'prompts' | 'subentries'
 let _layout      = 'vertical';  // 'vertical' | 'compact'
-let _activeFirst = true;
 let _negAutoInsert = true;       // also insert the _neg sub-entry when inserting this entry
 let _syncLock    = false;
+let _dragSrcId   = null;         // prompt id being dragged
 
 // DOM refs
 let _detail         = null;
@@ -177,6 +177,7 @@ async function _syncTextToList() {
   _renderListBody();
   if (changed) _syncListToText();   // rewrite the textarea without dupes / with normalised text
   _syncLock = false;
+  _notifyEditorIfReferenced();
 }
 
 function _syncListToText() {
@@ -184,6 +185,30 @@ function _syncListToText() {
   _syncLock = true;
   _promptTextarea.value = _buildText();
   _syncLock = false;
+}
+
+function _isReferencedByEditor() {
+  const data = window.plv2Editor?.getPreviewData?.();
+  if (!data || !_node) return false;
+  const templates = [data.pos, data.neg].filter(Boolean);
+  if (!templates.length) return false;
+  const refs = new Set();
+  if (_node.full_path) refs.add(_node.full_path);
+  if (_node.auto_trigger) refs.add(_node.auto_trigger);
+  if (_node.name) refs.add(_node.name);
+  for (const t of _triggers) { if (t.trigger_text) refs.add(t.trigger_text); }
+  for (const ref of refs) {
+    for (const tpl of templates) {
+      if (tpl.includes(`[${ref}]`) || tpl.includes(`[${ref}.`)) return true;
+    }
+  }
+  return false;
+}
+
+function _notifyEditorIfReferenced() {
+  if (_isReferencedByEditor()) {
+    document.dispatchEvent(new CustomEvent('plv2:editor-changed', { detail: { immediate: true } }));
+  }
 }
 
 // ─── Delimiter change ─────────────────────────────────────────────────────────
@@ -197,6 +222,7 @@ async function _onDelimChange() {
   // current text — it was joined with the *old* delimiter, so splitting by the new
   // one would corrupt the list.)
   _syncListToText();
+  _notifyEditorIfReferenced();
 }
 
 // ─── Render ───────────────────────────────────────────────────────────────────
@@ -302,7 +328,7 @@ function _render() {
     if (v) { const o = document.createElement('option'); o.value = v; fmtList.appendChild(o); }
   }
   fmtIn.addEventListener('change', () => {
-    _api().updateNode(_node.id, { format: fmtIn.value }).then(() => { _node.format = fmtIn.value; });
+    _api().updateNode(_node.id, { format: fmtIn.value }).then(() => { _node.format = fmtIn.value; _notifyEditorIfReferenced(); });
   });
   fmtGrp.append(fmtList, fmtIn);
 
@@ -310,7 +336,7 @@ function _render() {
   const shuffleChk = document.createElement('input');
   shuffleChk.type = 'checkbox'; shuffleChk.checked = !!_node.shuffle;
   shuffleChk.style.cssText = 'cursor:pointer;accent-color:#cba6f7;margin:0;';
-  shuffleChk.addEventListener('change', () => _api().updateNode(_node.id, { shuffle: shuffleChk.checked }).then(() => { _node.shuffle = shuffleChk.checked; }));
+  shuffleChk.addEventListener('change', () => _api().updateNode(_node.id, { shuffle: shuffleChk.checked }).then(() => { _node.shuffle = shuffleChk.checked; _notifyEditorIfReferenced(); }));
   shuffleGrp.appendChild(shuffleChk);
   cfgRow.append(delimGrp, fmtGrp, shuffleGrp);
 
@@ -435,13 +461,183 @@ function _customTriggerPill(t) {
   del.title = 'Delete trigger';
   del.addEventListener('click', async e => {
     e.stopPropagation();
-    await _api().deleteTrigger(t.id);
-    _triggers = _triggers.filter(x => x.id !== t.id);
-    _renderInsertRow();
+    await _deleteTriggerWithUsageCheck(t);
   });
 
   pill.append(lbl, del);
   return pill;
+}
+
+async function _deleteTriggerWithUsageCheck(t) {
+  const autoTrigger = _triggers.find(x => x.is_auto)?.trigger_text ?? _node.full_path;
+  const triggerText = t.trigger_text;
+
+  // Gather usages
+  const usages = [];
+
+  // 1) Library prompts
+  try {
+    const u = await _api().getUsages(_node.id);
+    if (u?.usages) {
+      for (const item of u.usages) {
+        if (item.matched_ref === triggerText || item.matched_ref.startsWith(triggerText + '.')) {
+          usages.push({ source: item.entry_full_path, ref: item.matched_ref, snippet: item.content_snippet });
+        }
+      }
+    }
+  } catch {}
+
+  // 2) Text editor
+  try {
+    const data = window.plv2Editor?.getPreviewData?.();
+    const templates = [data?.pos, data?.neg].filter(Boolean);
+    const re = new RegExp(`\\[${triggerText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:\\.[^\\]]+)?\\]`, 'g');
+    for (const tpl of templates) {
+      for (const m of tpl.matchAll(re)) {
+        usages.push({ source: 'Text Editor', ref: m[0].slice(1, -1), snippet: tpl.slice(Math.max(0, m.index - 20), m.index + m[0].length + 20) });
+      }
+    }
+  } catch {}
+
+  // 3) Workflow nodes
+  try {
+    const types = ['XYZ Prompt Library V2 Positive', 'XYZ Prompt Library V2 Negative'];
+    const re = new RegExp(`\\[${triggerText.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:\\.[^\\]]+)?\\]`, 'g');
+    for (const gn of (app.graph?._nodes ?? [])) {
+      if (!types.includes(gn.comfyClass)) continue;
+      const w = gn.widgets?.find(x => x.name === 'prompt_template');
+      if (!w?.value) continue;
+      for (const m of w.value.matchAll(re)) {
+        usages.push({ source: `Node ${gn.id} (${gn.title || gn.comfyClass})`, ref: m[0].slice(1, -1), snippet: w.value.slice(Math.max(0, m.index - 20), m.index + m[0].length + 20) });
+      }
+    }
+  } catch {}
+
+  // Deduplicate by source+ref
+  const seen = new Set();
+  const unique = usages.filter(u => { const k = u.source + '|' + u.ref; if (seen.has(k)) return false; seen.add(k); return true; });
+
+  if (unique.length === 0) {
+    // No usages — delete immediately
+    await _api().deleteTrigger(t.id);
+    _triggers = _triggers.filter(x => x.id !== t.id);
+    _renderInsertRow();
+    return;
+  }
+
+  // Show dialog
+  _showTriggerDeleteDialog(t, triggerText, autoTrigger, unique);
+}
+
+function _showTriggerDeleteDialog(t, triggerText, autoTrigger, usages) {
+  const overlay = document.createElement('div');
+  overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.6);z-index:99999;display:flex;align-items:center;justify-content:center;';
+  const box = document.createElement('div');
+  box.style.cssText = 'background:#1e1e2e;border:1px solid #45475a;border-radius:8px;padding:16px;min-width:420px;max-width:560px;max-height:75vh;display:flex;flex-direction:column;gap:10px;box-shadow:0 8px 32px rgba(0,0,0,0.5);';
+
+  const title = document.createElement('div');
+  title.style.cssText = 'font-size:14px;font-weight:600;color:#cdd6f4;';
+  title.innerHTML = `Delete custom trigger "<b style="color:#f38ba8">${triggerText}</b>" ?`;
+
+  const body = document.createElement('div');
+  body.style.cssText = 'font-size:12px;color:#a6adc8;line-height:1.5;overflow-y:auto;max-height:250px;';
+  body.innerHTML = `<div style="color:#f38ba8;margin-bottom:6px;">⚠ This trigger is referenced in ${usages.length} place(s):</div>`;
+
+  const maxShow = 6;
+  for (const u of usages.slice(0, maxShow)) {
+    const item = document.createElement('div');
+    item.style.cssText = 'margin-bottom:3px;padding:3px 8px;background:#1a1426;border:1px solid #313244;border-radius:3px;font-size:11px;';
+    item.innerHTML = `<span style="color:#cba6f7">${u.source}</span>  <span style="color:#6c7086">[${u.ref}]</span>`;
+    body.appendChild(item);
+  }
+  if (usages.length > maxShow) {
+    const more = document.createElement('div');
+    more.style.cssText = 'color:#6c7086;font-size:11px;padding:2px 8px;';
+    more.textContent = `… and ${usages.length - maxShow} more`;
+    body.appendChild(more);
+  }
+
+  const question = document.createElement('div');
+  question.style.cssText = 'color:#cdd6f4;font-size:12px;margin-top:4px;';
+  question.textContent = 'What should happen to these references?';
+
+  const btnRow = document.createElement('div');
+  btnRow.style.cssText = 'display:flex;gap:8px;justify-content:flex-end;margin-top:4px;';
+
+  const cancelBtn = document.createElement('button');
+  cancelBtn.textContent = 'Cancel';
+  Object.assign(cancelBtn.style, { background:'#313244',border:'1px solid #45475a',borderRadius:'4px',color:'#cdd6f4',cursor:'pointer',padding:'5px 14px',fontSize:'12px' });
+  cancelBtn.addEventListener('click', () => overlay.remove());
+
+  const removeBtn = document.createElement('button');
+  removeBtn.textContent = `🗑 Remove all & delete trigger`;
+  Object.assign(removeBtn.style, { background:'#f38ba8',border:'none',borderRadius:'4px',color:'#1e1e2e',cursor:'pointer',padding:'5px 14px',fontSize:'12px',fontWeight:'600' });
+  removeBtn.addEventListener('click', () => _executeTriggerDelete(t, triggerText, null, usages, overlay));
+
+  const replaceBtn = document.createElement('button');
+  replaceBtn.textContent = `Replace → [${autoTrigger}] & delete`;
+  Object.assign(replaceBtn.style, { background:'#a6e3a1',border:'none',borderRadius:'4px',color:'#1e1e2e',cursor:'pointer',padding:'5px 14px',fontSize:'12px',fontWeight:'600' });
+  replaceBtn.addEventListener('click', () => _executeTriggerDelete(t, triggerText, autoTrigger, usages, overlay));
+
+  btnRow.append(cancelBtn, removeBtn, replaceBtn);
+  box.append(title, body, question, btnRow);
+  overlay.appendChild(box);
+  overlay.addEventListener('click', e => { if (e.target === overlay) overlay.remove(); });
+  document.body.appendChild(overlay);
+}
+
+async function _executeTriggerDelete(t, oldTrigger, newTrigger, usages, overlay) {
+  overlay.querySelectorAll('button').forEach(b => { b.disabled = true; b.textContent = '…'; });
+
+  try {
+    if (newTrigger) {
+      // Replace: [oldTrigger] → [newTrigger], [oldTrigger.sub] → [newTrigger.sub]
+      await _api().replaceRefs(_node.id, { replacements: [{ old: oldTrigger, new: newTrigger }] });
+      _updateWorkflowRefs([{ old: oldTrigger, new: newTrigger }]);
+    } else {
+      // Remove: strip [oldTrigger] and [oldTrigger.sub] from library + workflow
+      await _api().stripRefs(_node.id, { refs: [oldTrigger] });
+      _stripWorkflowRefs([oldTrigger]);
+    }
+  } catch(e) { console.error('[PLv2] trigger delete cleanup failed', e); }
+
+  // Delete the trigger
+  await _api().deleteTrigger(t.id);
+  _triggers = _triggers.filter(x => x.id !== t.id);
+  _renderInsertRow();
+
+  // Update editor/preview
+  document.dispatchEvent(new CustomEvent('plv2:editor-changed', { detail: { immediate: true } }));
+
+  overlay.remove();
+}
+
+function _stripWorkflowRefs(refs) {
+  if (!app?.graph) return;
+  const types = ['XYZ Prompt Library V2 Positive', 'XYZ Prompt Library V2 Negative'];
+  for (const gn of (app.graph?._nodes ?? [])) {
+    if (!types.includes(gn.comfyClass)) continue;
+    const w = gn.widgets?.find(x => x.name === 'prompt_template');
+    if (!w) continue;
+    let v = w.value;
+    let changed = false;
+    for (const ref of refs) {
+      const re = new RegExp(`\\[${ref.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:\\.[^\\]]+)?\\]`, 'g');
+      const before = v;
+      v = v.replace(re, '');
+      if (v !== before) {
+        v = v.replace(/,\s*,/g, ', ').replace(/\|\s*\|/g, '|').replace(/^\s*[,|]\s*/, '').replace(/\s*[,|]\s*$/, '').trim();
+        changed = true;
+      }
+    }
+    if (changed) {
+      w.value = v;
+      if (w.inputEl && w.inputEl.value !== v) w.inputEl.value = v;
+      gn.onWidgetChanged?.(w.name, v, v, w);
+      app.graph.setDirtyCanvas(true, true);
+      document.dispatchEvent(new CustomEvent('plv2:node-edited', { detail: { nodeId: gn.id, value: v } }));
+    }
+  }
 }
 
 function _renderInsertRow() {
@@ -557,15 +753,7 @@ function _buildPromptsPanel() {
     _renderListBody();
   });
 
-  const afBtn = document.createElement('button');
-  afBtn.textContent = _activeFirst ? '⬆ Active first' : '⬆ By order';
-  _styleToggleBtn(afBtn);
-  afBtn.addEventListener('click', () => {
-    _activeFirst = !_activeFirst;
-    afBtn.textContent = _activeFirst ? '⬆ Active first' : '⬆ By order';
-    _renderListBody();
-  });
-  toolbar.append(layoutBtn, afBtn);
+  toolbar.append(layoutBtn);
 
   // Add row
   const addRow = _row('4px 12px');
@@ -585,6 +773,7 @@ function _buildPromptsPanel() {
         dup.order_index = Math.max(-1, ..._prompts.filter(p => p.enabled && p.id !== dup.id).map(p => p.order_index ?? -1)) + 1;
         await _api().updatePrompt(dup.id, { enabled: true, order_index: dup.order_index });
         _syncListToText(); _renderListBody();
+        _notifyEditorIfReferenced();
       }
       return;
     }
@@ -596,6 +785,7 @@ function _buildPromptsPanel() {
       addInput.value = '';
       _syncListToText();
       _renderListBody();
+      _notifyEditorIfReferenced();
     } catch(e) { console.error('[PLv2]', e); }
   });
   addRow.append(addInput, addBtn);
@@ -621,6 +811,98 @@ function _renderListBody() {
   } else {
     const wrap = document.createElement('div');
     wrap.style.cssText = 'display:flex;flex-wrap:wrap;gap:5px;padding:8px 12px;';
+
+    // Drag-and-drop reorder for compact mode — caret indicator between chips
+    const caret = document.createElement('div');
+    caret.style.cssText = 'display:none;position:absolute;width:2px;height:24px;background:#cba6f7;border-radius:1px;pointer-events:none;z-index:10;';
+    wrap.style.position = 'relative';
+    wrap.appendChild(caret);
+
+    let _dragTgtIdx = -1;
+    wrap.addEventListener('dragover', e => {
+      e.preventDefault();
+      const chip = e.target.closest('.plv2-chip');
+      if (!chip || !chip.dataset.promptId) { caret.style.display = 'none'; return; }
+      const targetId = parseInt(chip.dataset.promptId);
+      if (targetId === _dragSrcId) { caret.style.display = 'none'; return; }
+      const enabled = _prompts.filter(p => p.enabled);
+      const chipIdx = enabled.findIndex(p => p.id === targetId);
+      if (chipIdx < 0) { caret.style.display = 'none'; return; }
+
+      // Determine insertion side based on cursor position relative to chip center
+      const rect = chip.getBoundingClientRect();
+      const midX = rect.left + rect.width / 2;
+      const insertBefore = e.clientX < midX;
+      _dragTgtIdx = insertBefore ? chipIdx : chipIdx + 1;
+      // Clamp to enabled range
+      if (_dragTgtIdx < 0) _dragTgtIdx = 0;
+      if (_dragTgtIdx > enabled.length) _dragTgtIdx = enabled.length;
+
+      // Position caret
+      caret.style.display = 'block';
+      const wrapRect = wrap.getBoundingClientRect();
+      if (_dragTgtIdx >= enabled.length) {
+        // After last enabled chip
+        const lastChip = wrap.querySelectorAll('.plv2-chip[data-prompt-id]');
+        const lastEnabled = [...lastChip].filter(c => {
+          const pid = parseInt(c.dataset.promptId);
+          return enabled.some(p => p.id === pid);
+        }).pop();
+        if (lastEnabled) {
+          const lr = lastEnabled.getBoundingClientRect();
+          caret.style.left = (lr.right - wrapRect.left + 3) + 'px';
+          caret.style.top = (lr.top - wrapRect.top) + 'px';
+        }
+      } else {
+        const targetChip = [...wrap.querySelectorAll('.plv2-chip[data-prompt-id]')].find(c => parseInt(c.dataset.promptId) === enabled[_dragTgtIdx]?.id);
+        if (targetChip) {
+          const tr = targetChip.getBoundingClientRect();
+          if (insertBefore) {
+            caret.style.left = (tr.left - wrapRect.left - 3) + 'px';
+          } else {
+            caret.style.left = (tr.right - wrapRect.left + 3) + 'px';
+          }
+          caret.style.top = (tr.top - wrapRect.top) + 'px';
+        }
+      }
+    });
+    wrap.addEventListener('dragleave', () => {
+      caret.style.display = 'none';
+      _dragTgtIdx = -1;
+    });
+    wrap.addEventListener('drop', async e => {
+      e.preventDefault();
+      caret.style.display = 'none';
+      if (!_dragSrcId || _dragTgtIdx < 0) { _dragSrcId = null; _dragTgtIdx = -1; return; }
+
+      const enabled = _prompts.filter(p => p.enabled);
+      const srcIdx = enabled.findIndex(p => p.id === _dragSrcId);
+      if (srcIdx < 0) { _dragSrcId = null; _dragTgtIdx = -1; return; }
+
+      // Adjust target if source was before target
+      let tgt = _dragTgtIdx;
+      if (srcIdx < tgt) tgt--;
+
+      if (srcIdx !== tgt) {
+        const [moved] = enabled.splice(srcIdx, 1);
+        enabled.splice(tgt, 0, moved);
+
+        const ops = [];
+        enabled.forEach((p, i) => {
+          if (p.order_index !== i) {
+            ops.push(_api().updatePrompt(p.id, { order_index: i }));
+            p.order_index = i;
+          }
+        });
+        await Promise.all(ops);
+        _syncListToText();
+        _renderListBody();
+        _notifyEditorIfReferenced();
+      }
+      _dragSrcId = null;
+      _dragTgtIdx = -1;
+    });
+
     for (const p of sorted) wrap.appendChild(_compactChip(p));
     _listBody.appendChild(wrap);
   }
@@ -628,15 +910,11 @@ function _renderListBody() {
 
 function _sortedPrompts() {
   const copy = [..._prompts];
-  if (_activeFirst) {
-    copy.sort((a, b) => {
-      if (a.enabled !== b.enabled) return a.enabled ? -1 : 1;
-      if (a.enabled)  return (a.order_index ?? 999) - (b.order_index ?? 999);
-      return a.content.localeCompare(b.content);  // inactive: alphabetical
-    });
-  } else {
-    copy.sort((a, b) => (a.order_index ?? 999) - (b.order_index ?? 999));
-  }
+  // Match _buildText() order: enabled first by order_index, then disabled
+  copy.sort((a, b) => {
+    if (a.enabled !== b.enabled) return a.enabled ? -1 : 1;
+    return (a.order_index ?? 0) - (b.order_index ?? 0);
+  });
   return copy;
 }
 
@@ -658,6 +936,7 @@ function _verticalRow(p) {
     await _api().updatePrompt(p.id, { enabled: p.enabled, order_index: newOrder });
     _syncListToText();
     _renderListBody();
+    document.dispatchEvent(new CustomEvent('plv2:editor-changed', { detail: { immediate: true } }));
   });
 
   const contentIn = document.createElement('input');
@@ -673,6 +952,7 @@ function _verticalRow(p) {
     contentIn.value = v;
     await _api().updatePrompt(p.id, { content: v });
     _syncListToText();
+    _notifyEditorIfReferenced();
   });
 
   const weightIn = document.createElement('input');
@@ -682,6 +962,8 @@ function _verticalRow(p) {
   weightIn.addEventListener('change', async () => {
     p.weight = parseFloat(weightIn.value) || 1;
     await _api().updatePrompt(p.id, { weight: p.weight });
+    _syncListToText();
+    _notifyEditorIfReferenced();
   });
 
   const delBtn = _iconBtn('×', 'Delete prompt', async () => {
@@ -689,6 +971,7 @@ function _verticalRow(p) {
     _prompts = _prompts.filter(q => q.id !== p.id);
     _syncListToText();
     _renderListBody();
+    _notifyEditorIfReferenced();
   }, { color: '#f38ba8', fontSize: '14px' });
 
   row.append(toggle, contentIn, weightIn, delBtn);
@@ -696,24 +979,57 @@ function _verticalRow(p) {
 }
 
 function _compactChip(p) {
-  // Compact chips are quick enable/disable toggles only — edit/delete live in the
-  // vertical layout. (Hover-revealed icons here caused the chip to resize/jitter.)
   const chip = document.createElement('div');
-  chip.style.cssText = `display:inline-flex;align-items:center;padding:3px 9px;border-radius:12px;cursor:pointer;font-size:11px;user-select:none;background:${p.enabled ? '#2d1b5e' : '#252536'};color:${p.enabled ? '#cba6f7' : '#6c7086'};border:1px solid ${p.enabled ? '#7c3aed55' : '#313244'};`;
+  chip.className = 'plv2-chip';
+  chip.dataset.promptId = p.id;
+  chip.style.cssText = `display:inline-flex;align-items:center;gap:4px;padding:3px 9px;border-radius:12px;cursor:pointer;font-size:11px;user-select:none;background:${p.enabled ? '#2d1b5e' : '#252536'};color:${p.enabled ? '#cba6f7' : '#6c7086'};border:1px solid ${p.enabled ? '#7c3aed55' : '#313244'};`;
   chip.title = p.enabled ? 'Click to disable' : 'Click to enable';
-  chip.appendChild(_span(p.content));
 
-  chip.addEventListener('click', async () => {
-    p.enabled = !p.enabled;
-    let newOrder = p.order_index;
-    if (p.enabled) {
-      newOrder = Math.max(-1, ..._prompts.filter(q => q.enabled && q.id !== p.id).map(q => q.order_index ?? -1)) + 1;
-      p.order_index = newOrder;
-    }
-    await _api().updatePrompt(p.id, { enabled: p.enabled, order_index: newOrder });
-    _syncListToText(); _renderListBody();
-  });
+  // Drag handle for enabled prompts
+  if (p.enabled) {
+    const handle = document.createElement('span');
+    handle.textContent = '⋮⋮';
+    handle.style.cssText = 'cursor:grab;color:#7c3aed;font-size:11px;line-height:1;letter-spacing:-2px;flex-shrink:0;';
+    handle.addEventListener('mousedown', e => { e.stopPropagation(); });
+    handle.addEventListener('dragstart', e => { e.stopPropagation(); });
+    chip.appendChild(handle);
+    chip.draggable = true;
+    chip.addEventListener('dragstart', e => {
+      _dragSrcId = p.id;
+      chip.style.opacity = '0.5';
+      e.dataTransfer.effectAllowed = 'move';
+      e.dataTransfer.setData('text/plain', String(p.id));
+    });
+    chip.addEventListener('dragend', () => {
+      _dragSrcId = null;
+      chip.style.opacity = '1';
+    });
+    // Prevent click-to-toggle when dragging
+    let _dragged = false;
+    chip.addEventListener('dragstart', () => { _dragged = true; });
+    chip.addEventListener('dragend', () => { setTimeout(() => { _dragged = false; }, 0); });
+    chip.addEventListener('click', (e) => {
+      if (_dragged) return;
+      _togglePrompt(p, chip);
+    });
+  } else {
+    chip.addEventListener('click', () => _togglePrompt(p, chip));
+  }
+
+  chip.appendChild(_span(p.content));
   return chip;
+}
+
+async function _togglePrompt(p, chip) {
+  p.enabled = !p.enabled;
+  let newOrder = p.order_index;
+  if (p.enabled) {
+    newOrder = Math.max(-1, ..._prompts.filter(q => q.enabled && q.id !== p.id).map(q => q.order_index ?? -1)) + 1;
+    p.order_index = newOrder;
+  }
+  await _api().updatePrompt(p.id, { enabled: p.enabled, order_index: newOrder });
+  _syncListToText(); _renderListBody();
+  document.dispatchEvent(new CustomEvent('plv2:editor-changed', { detail: { immediate: true } }));
 }
 
 // ─── Sub entry panel ──────────────────────────────────────────────────────────
@@ -849,6 +1165,8 @@ function _goBack() {
 async function _saveName() {
   const newName = _nameInput?.value?.trim();
   if (!newName || newName === _node.name) return;
+  const oldFullPath = _node.full_path;
+  const oldAutoTrigger = _triggers.find(t => t.is_auto)?.trigger_text ?? null;
   try {
     const r = await _api().updateNode(_node.id, { name: newName });
     _node.name      = r?.node?.name      ?? newName;
@@ -856,6 +1174,77 @@ async function _saveName() {
   } catch(e) {
     console.error('[PLv2]', e);
     if (_nameInput) _nameInput.value = _node.name;
+    return;
+  }
+  await _afterPathChange(_node, oldFullPath, oldAutoTrigger);
+}
+
+/**
+ * Called after a node's full_path or auto_trigger may have changed (rename / move).
+ * @param node  The node object (must have id, full_path fields)
+ * @param oldFullPath   The full_path before the change
+ * @param oldAutoTrigger  The auto_trigger before the change (null if unknown)
+ * @param updateDetailUI  Whether to refresh the entry detail if this node is open
+ */
+async function _afterPathChange(node, oldFullPath, oldAutoTrigger, updateDetailUI = true) {
+  const tr = await _api().getTriggers(node.id);
+  const newTriggers = tr?.triggers ?? [];
+  const newAutoTrigger = newTriggers.find(t => t.is_auto)?.trigger_text ?? null;
+  const newFullPath = node.full_path;
+
+  const reps = [];
+  if (oldFullPath && newFullPath && oldFullPath !== newFullPath) {
+    reps.push({ old: oldFullPath, new: newFullPath });
+  }
+  if (oldAutoTrigger && newAutoTrigger && oldAutoTrigger !== newAutoTrigger) {
+    reps.push({ old: oldAutoTrigger, new: newAutoTrigger });
+  }
+
+  if (reps.length) {
+    try { await _api().replaceRefs(node.id, { replacements: reps }); } catch(e) { console.error('[PLv2] replaceRefs failed', e); }
+    _updateWorkflowRefs(reps);
+    _notifyEditorIfReferenced();
+  }
+
+  if (updateDetailUI && _node && _node.id === node.id) {
+    // Apply ref replacements to in-memory prompts before syncing to textarea
+    for (const { old: o, new: n } of reps) {
+      const ob = `[${o}]`; const nb = `[${n}]`;
+      const od = `[${o}.`; const nd = `[${n}.`;
+      for (const p of _prompts) {
+        while (p.content.includes(od)) p.content = p.content.replace(od, nd);
+        while (p.content.includes(ob)) p.content = p.content.replace(ob, nb);
+      }
+    }
+    _node = { ..._node, full_path: newFullPath };
+    _triggers = newTriggers;
+    if (_triggerWrap) _renderInsertRow();
+    _syncListToText();
+  }
+}
+
+function _updateWorkflowRefs(reps) {
+  if (!app?.graph) return;
+  const types = ['XYZ Prompt Library V2 Positive', 'XYZ Prompt Library V2 Negative'];
+  for (const node of app.graph._nodes) {
+    if (!types.includes(node.comfyClass)) continue;
+    const w = node.widgets?.find(x => x.name === 'prompt_template');
+    if (!w) continue;
+    let v = w.value;
+    let changed = false;
+    for (const { old: o, new: n } of reps) {
+      const ob = `[${o}]`; const nb = `[${n}]`;
+      const od = `[${o}.`; const nd = `[${n}.`;
+      while (v.includes(od)) { v = v.replace(od, nd); changed = true; }
+      while (v.includes(ob)) { v = v.replace(ob, nb); changed = true; }
+    }
+    if (changed) {
+      w.value = v;
+      if (w.inputEl && w.inputEl.value !== v) w.inputEl.value = v;
+      node.onWidgetChanged?.(w.name, v, v, w);
+      app.graph.setDirtyCanvas(true, true);
+      document.dispatchEvent(new CustomEvent('plv2:node-edited', { detail: { nodeId: node.id, value: v } }));
+    }
   }
 }
 
@@ -981,6 +1370,6 @@ app.registerExtension({
     });
 
     // Expose for programmatic opening.
-    window.plv2Entry = { showEntry, getLastEntryId };
+    window.plv2Entry = { showEntry, getLastEntryId, afterPathChange: _afterPathChange };
   },
 });

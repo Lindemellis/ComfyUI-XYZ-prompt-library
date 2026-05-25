@@ -662,6 +662,7 @@ async def _handle_related(request: web.Request) -> web.Response:
     related = [{
         "name": r["related_tag"], "category": r["category"],
         "cosine": r["cosine"], "jaccard": r["jaccard"], "overlap": r["overlap"],
+        "frequency": r.get("frequency"),
     } for r in rows]
     return _ok({"query": q, "related": related, "synced_at": int(now), "stale": False})
 

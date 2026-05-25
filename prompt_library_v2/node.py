@@ -12,8 +12,8 @@ class _PLv2Base:
 
     CATEGORY = "XYZNodes/Prompt"
     FUNCTION = "execute"
-    RETURN_TYPES = ("STRING",)
-    RETURN_NAMES = ("prompt",)
+    RETURN_TYPES = ("STRING", "STRING")
+    RETURN_NAMES = ("resolved_prompt", "raw_template")
 
     pos_neg: str = "both"
 
@@ -36,14 +36,14 @@ class _PLv2Base:
 
     def execute(self, prompt_template: str, seed: int, node_id: str = "") -> tuple:
         if not prompt_template or not prompt_template.strip():
-            return ("",)
+            return ("", "")
         try:
             from .engine import resolve_template
             text = resolve_template(prompt_template, seed)
         except Exception as exc:
             print(f"[PLv2] resolve_template error: {exc}")
             text = prompt_template
-        return (text,)
+        return (text, prompt_template)
 
 
 class PromptLibraryV2PositiveNode(_PLv2Base):

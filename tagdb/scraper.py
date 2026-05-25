@@ -359,6 +359,7 @@ def fetch_related(
             "cosine": item.get("cosine_similarity"),
             "jaccard": item.get("jaccard_similarity"),
             "overlap": item.get("overlap_coefficient"),
+            "frequency": item.get("frequency"),
             "rank": rank,
         })
     return out

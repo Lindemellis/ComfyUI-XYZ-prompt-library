@@ -54,12 +54,58 @@ let _nodeSig = '', _pollTimer = null;
 
 // ─── Syntax highlight ─────────────────────────────────────────────────────────
 
+let _refValid  = new Map();   // ref string → boolean (true = valid, false = unresolvable)
+let _refTimer  = null;
+let _refVer    = 0;           // version counter for stale-result rejection
+
 function _hlInner(text) {
   return text
     .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    .replace(/\[([^\]\n]*)\]/g, '<span style="background:#2d1b5e;color:#cba6f7;border-radius:2px">[$1]</span>');
+    .replace(/\[([^\]\n]*)\]/g, (_match, inner) => {
+      const resolved = _refValid.get(inner);
+      if (resolved === false) {
+        return `<span style="background:#3d1520;color:#f38ba8;border-radius:2px;text-decoration:underline wavy #f38ba888" title="Unresolvable reference">[${inner}]</span>`;
+      }
+      return `<span style="background:#2d1b5e;color:#cba6f7;border-radius:2px">[${inner}]</span>`;
+    });
 }
 function _highlight(text) { return _hlInner(text) + '\n'; }
+
+async function _resolveRefsBackdrop() {
+  // Collect all unique refs from all panes
+  const refs = new Set();
+  for (const p of _panes) {
+    const text = p.textarea?.value ?? '';
+    for (const m of text.matchAll(/\[([^\]\n]*)\]/g)) {
+      const inner = m[1].trim();
+      if (inner) refs.add(inner);
+    }
+  }
+  if (refs.size === 0) { _refValid.clear(); return; }
+
+  const ver = ++_refVer;
+  const results = await Promise.all(
+    [...refs].map(async ref => {
+      try {
+        const node = (await window.plv2?.api?.resolveRef(ref))?.node;
+        return { ref, valid: !!node };
+      } catch { return { ref, valid: false }; }
+    })
+  );
+  // Discard stale results if a newer resolution started
+  if (ver !== _refVer) return;
+
+  _refValid.clear();
+  for (const { ref, valid } of results) { _refValid.set(ref, valid); }
+
+  // Re-render all visible pane backdrops
+  for (const p of _panes) { p.updateBackdrop(); }
+}
+
+function _scheduleRefResolve() {
+  clearTimeout(_refTimer);
+  _refTimer = setTimeout(_resolveRefsBackdrop, 300);
+}
 
 // Highlight + mark a selection range (the "find in selection" scope — #2).
 function _highlightWithSel(text, s, e) {
@@ -133,7 +179,7 @@ function _makePane(tab, withHeader) {
 
   textarea.addEventListener('focus', () => _setActive(pane));
   textarea.addEventListener('scroll', () => { backdrop.scrollTop = textarea.scrollTop; });
-  textarea.addEventListener('input', () => { pane.updateBackdrop(); pane.syncToNode(); pane.ckptRecord(); _emitChanged(); });
+  textarea.addEventListener('input', () => { pane.updateBackdrop(); pane.syncToNode(); pane.ckptRecord(); _emitChanged(); _scheduleRefResolve(); });
   textarea.addEventListener('keydown', _onKeydown);
   textarea.addEventListener('contextmenu', _onContextMenu);
   // Normalise the template when editing finishes (skips [refs]/{patterns}).
@@ -512,6 +558,7 @@ async function _insertIntoPane(pane, text, D) {
   pane.textarea.focus();
   pane.updateBackdrop(); pane.syncToNode(); pane.ckptRecord(true);
   _emitChanged();
+  _scheduleRefResolve();
 }
 
 /** Plain caret insert into the active pane (back-compat, no delimiter logic). */
@@ -525,6 +572,7 @@ function insertText(text) {
   t.focus();
   _active.updateBackdrop(); _active.syncToNode(); _active.ckptRecord(true);
   _emitChanged();
+  _scheduleRefResolve();
 }
 
 /** Insert a [ref] / prompt block into the node matching `posNeg`. */
@@ -859,6 +907,7 @@ function _refresh() {
   if (_orientation === 'single') _applySingleTabStyle();
   _setActive(_active && _panes.includes(_active) ? _active : _panes[0]);
   _startPoll();
+  _resolveRefsBackdrop();
 }
 
 // ─── Register ─────────────────────────────────────────────────────────────────
@@ -892,7 +941,7 @@ app.registerExtension({
           touched = true;
         }
       }
-      if (touched) _emitChanged();
+      if (touched) { _emitChanged(); _scheduleRefResolve(); }
     });
 
     window.plv2Editor = { getEditorText, insertText, insertRef, getPreviewData };
