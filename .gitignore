@@ -7,6 +7,11 @@ __pycache__/
 CLAUDE.md
 HANDOFF.md
 skills-lock.json
+AI_RULES.md
+ARCHITECTURE.md
+PROJECT_SPEC.md
+PROJECT_STATE.md
+TASKS.md
 
 # Local gallery index (SQLite WAL, thumbs, config with folder roots — do not publish)
 gallery_data/
