@@ -21,7 +21,7 @@
 
 2. 克隆本仓库：
    ```bash
-   git clone https://github.com/zhupeter010903/ComfyUI-XYZ-prompt-library.git
+   git clone https://github.com/Lindemellis/ComfyUI-XYZ-prompt-library.git
    ```
 
 3. 安装依赖：

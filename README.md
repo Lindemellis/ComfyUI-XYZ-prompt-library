@@ -21,7 +21,7 @@ Plus 4 lightweight utility nodes for string concatenation, text replacement, CLI
 
 2. Clone this repository:
    ```bash
-   git clone https://github.com/zhupeter010903/ComfyUI-XYZ-prompt-library.git
+   git clone https://github.com/Lindemellis/ComfyUI-XYZ-prompt-library.git
    ```
 
 3. Install dependencies:
