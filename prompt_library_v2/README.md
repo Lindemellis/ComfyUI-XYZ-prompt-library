@@ -1,108 +1,98 @@
 # Prompt Library V2
 
-Hierarchical prompt library with templates, references, and trigger aliases. Edited via floating windows inside ComfyUI.
+**English** | [中文](README_zh.md) · [← Back to main README](../README.md)
 
-## Quick Start
+A SQLite-backed hierarchical prompt library. You build a tree of folders and entries in floating windows, then reference them from a node's template, which is resolved at execution time.
 
-1. Add **XYZ Prompt Library V2 Positive** (or **Negative**) node to your workflow
-2. Click the **Library** button on the node to open the library window
-3. Click the **Editor** button to open the template editor
-4. Type template text — the node resolves it on execution
+## The nodes
 
-### Node I/O
+Two nodes (positive / negative variants — the polarity only filters which entries the folder tree shows):
+
+- **XYZ Prompt Library V2 Positive**
+- **XYZ Prompt Library V2 Negative**
 
 | Port | Type | Description |
 |---|---|---|
-| `prompt_template` | STRING | Template text with the syntax below |
-| `seed` | INT | Controls random mode outcomes |
-| `resolved_prompt` | STRING | Fully resolved output |
-| `raw_template` | STRING | Raw template (for chaining) |
+| `prompt_template` (input) | STRING (multiline) | Template text using the syntax below |
+| `seed` (input) | INT | Drives entry random modes (select / dropout / shuffle) |
+| `resolved_prompt` (output) | STRING | The fully resolved text |
+| `raw_template` (output) | STRING | The unmodified template (handy for chaining/debugging) |
 
-## Template Syntax
+The node re-resolves on every run (the library in the DB may have changed between runs).
 
-### `[ref]` — Entry References
+## Opening the windows
 
-Reference existing library entries:
+- Each node has **Library**, **Editor**, and **Preview** buttons.
+- Or use the top-bar **XYZ Tools** menu → *Prompt Library V2 — Library* / *— Text Editor*.
 
-```
-[character_name]           ← shortest unique trigger
-[character_name.expression] ← dot-path to child entry
-```
+## Template syntax
 
-### `{a|b|c}` — Alternation
+### `[ref]` — entry references
 
-Works with ComfyUI batch count — each execution picks the next option:
+Insert the resolved text of another entry:
 
 ```
-{masterpiece|sketch|doodle}
+[character_name]            ← by trigger name (shortest unique alias) or full path
+[character_name.expression] ← dot-path into a child entry
 ```
 
-Batch 0 → `masterpiece`, batch 1 → `sketch`, out of range → empty.
+A reference resolves to exactly one entry: an exact full path wins over a trigger alias; multi-segment refs take the longest matching prefix and treat the rest as a sub-path. Unknown references resolve to empty. Cycles are detected and skipped.
 
-### `(text:1.3)` — Weight Wrapping
+### `(text:1.2)` — weights
 
-Prompts with weight ≠ 1.0 are auto-wrapped: `(glowing eyes:1.3)`.
+Prompts whose weight ≠ 1.0 are emitted wrapped, e.g. `(glowing eyes:1.3)`.
 
-### Auto-Cleanup
+### `{a|b|c}` — options
 
-After resolution: merges duplicate commas, strips leading/trailing delimiters, collapses extra whitespace.
+> **Current behaviour:** the node always resolves `{a|b|c}` to the **first** option (`a`). The per-batch selection is not wired into the node. For variation, use an entry's **random mode** (below) driven by the node's `seed` instead.
 
-## Library Window
+### Auto-cleanup
 
-### Folder Tree
+After resolving, the engine collapses runs of consecutive delimiters (e.g. left by an empty `[ref]`), drops delimiters stranded at the start of a line or the very end, and collapses repeated spaces. **Newlines are preserved** as your paragraph structure.
 
-- Create folders and entries
-- Drag to reorder
-- Right-click menu: rename, move, delete, new
-- Filter: positive / negative / all
-- Collapse/expand all
+## Library window
 
-### Entry Editor
+### Folder tree
 
-- Name and polarity (positive / negative / both)
-- Trigger aliases — shortcut names for `[ref]`
-- Prompt list: add, edit, drag-reorder
-- Random mode: none / select N / dropout
-- Prompt format: `{prompt}` or custom
-- Inter-prompt delimiter
+- Create / rename / move / delete folders and entries (right-click menu), drag to reorder.
+- Independent **polarity** filter (positive / negative / all) and **in-use** filter.
+- Collapse / expand all.
 
-### Child Entries
+### Entry detail
 
-Entries can have children. Child prompts are inherited. `_neg` children auto-insert into negative output.
+- **Name** and a **positive / negative** badge.
+- **Trigger aliases** — short names you can use in `[ref]`. Add your own with **+ alias**; each entry also has an automatic trigger (the shortest unique suffix of its path).
+- **Prompt list** — vertical or compact layout. Toggle each prompt on/off, set a weight, drag to reorder. Enabled prompts come first in prompt-text order; disabled prompts are listed alphabetically.
+- **Mode** — `off`, `select` (a random count between min/max), or `dropout` (drop each prompt at a probability), plus a **Shuffle** toggle. All driven by the node `seed`.
+- **Format** — wrap each prompt, e.g. `art by {prompt}` (`{prompt}` and `{p}` are placeholders).
+- **Delimiter** — what joins this entry's prompts (`, `, ` | `, newline, …).
+- **Sub-entries** — child entries (own / inherited from a `_template` / overriding). A `_neg` child can be auto-inserted into the negative node when you insert the parent. Each sub-entry row has: **⤴** add a reference into *this* entry's prompts, **＋** insert a reference into the text editor, **→** open it.
 
-## Text Editor Window
+## Text editor window
 
-- **Single / Split panes**: tabs or top-bottom split for editing positive and negative together
-- **Syntax highlighting**: valid `[ref]` in purple, invalid with red underline
-- **Undo/redo** per pane
-- **Find/replace** with case, word, selection modes
-- **Smart insert** — cursor-context-aware delimiter insertion
-- **Right-click menu** — add to entry, create entry, open in detail
+- **Single / split** panes — edit positive and negative together with a draggable divider.
+- `[ref]` **highlighting** — valid references are tinted; the backdrop tracks the text.
+- **Undo / redo** per pane, **find / replace** (case / word / selection), and **smart insert** that adds delimiters based on the cursor context.
+- **Right-click** — add selection to an entry, create a new entry from it, or open the referenced entry in detail.
 
-## Normalization Settings
+### Autocomplete in the editor
 
-Configured in **XYZ Prompt Tools → Insertion**:
+- Type `[` to get entry/trigger suggestions; choosing one inserts `[name]` (a reference).
+- Type `/name` to insert the entry's **resolved text** instead of a reference.
+- (Toggles live in **XYZ Prompt Tools → Library**.)
+
+## Insertion / normalization
+
+Configured in **XYZ Prompt Tools → Insertion** (these apply to both the library and tag autocomplete):
 
 | Setting | Effect |
 |---|---|
-| Replace `_` with space | `blue_eyes` → `blue eyes` |
-| Auto comma | Append `, ` after insert |
-| Escape brackets | `()` → `\(\)` |
-| Full-width → half-width | `，` → `,` |
+| Replace `_` with space | insert `blue eyes` instead of `blue_eyes` |
+| Auto comma | append `, ` after an inserted tag |
+| Escape brackets / backslash | turn non-weight `()` into `\(\)` so they are literal |
+| Full-width → half-width | convert `（）`, `，` … to ASCII |
 
-## Common Tasks
+## Naming rules
 
-**Switch between positive/negative editing?** Click tabs at the top of the editor, or use the split button.
-
-**Insert an entry reference in the editor?** Type `[` to trigger entry autocomplete, or right-click in the tree → insert reference.
-
-**Save text to the library?** Select text in the editor → right-click → add to entry / create entry.
-
-**Inherit child entries?** `_neg` children auto-insert. `_template` children define the entry's default template. No manual reference needed.
-
-## Naming Rules
-
-- Entry/folder names cannot contain: `.` `,` `|` `/` `\` `[` `]`
-- Trigger names cannot contain: space `,` `|` `/` `\` `[` `]`
-
-[中文版 (Chinese)](README_zh.md)
+- **Entry / folder names** may not contain: `.` `,` `|` `/` `\` `[` `]`
+- **Trigger names** may not contain spaces or `,` `|` `/` `\` `[` `]` (a `.` is allowed — it acts as a path separator)

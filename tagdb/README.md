@@ -1,62 +1,77 @@
-# Tag Database
+# Tag Autocomplete & Dataset
 
-Danbooru tag autocomplete. For user documentation, see the [main README](../README.md#tag-database-autocomplete).
+**English** | [中文](README_zh.md) · [← Back to main README](../README.md)
 
-## Architecture
+Danbooru tag autocomplete backed by a versioned local SQLite dataset. As you type in any prompt box you get tag suggestions ordered by post count; the dataset is downloaded prebuilt and can be updated, snapshotted, and rolled back to a past date.
+
+## Getting a dataset
+
+On first run the plugin downloads the author's prebuilt dataset (~66 MB, ~118K tags with post-count ≥ 50) in the background — autocomplete works as soon as it finishes. Nothing is scraped automatically.
+
+If the download fails (offline, none published yet), open **XYZ Prompt Tools → Tag dataset** and either retry **Download / Update**, or build your own (needs a free Danbooru login + API key).
+
+### Data layout (`tagdb_data/`, gitignored)
 
 ```
-tagdb/                     ← Package code (committed to git)
-├── official_manifest.json ← Prebuilt dataset manifest
-
-tagdb_data/                ← Runtime data (gitignored)
-├── tagdb.sqlite           ← Working DB (mutable)
-├── settings.json          ← Danbooru credentials
+tagdb_data/
+├── tagdb.sqlite          ← working DB (autocomplete reads this by default)
+├── settings.json         ← Danbooru credentials + preferences
 └── snapshots/
-    ├── official/          ← Read-only copies from GitHub Release
-    └── local/             ← Backups and reconstruction snapshots
+    ├── official/         ← prebuilt copies from the GitHub Release (read-only)
+    └── local/            ← your exports + reconstruction results (read-only)
 ```
 
-## HTTP API
+## Using autocomplete
 
-| Method | Path | Purpose |
-|---|---|---|
-| GET | `/xyz/tagdb/search?q=&limit=` | Tag autocomplete |
-| GET | `/xyz/tagdb/related?q=&limit=&max_age_days=` | Related tags |
-| GET | `/xyz/tagdb/artist_posts?name=&limit=` | Artist posts |
-| GET | `/xyz/tagdb/tag_preview?name=&limit=` | Tag preview images |
-| GET | `/xyz/tagdb/preview_image?url=` | Proxy CDN images |
-| GET | `/xyz/tagdb/snapshots` | List snapshots |
-| GET / POST | `/xyz/tagdb/snapshots/active` | Get/set active snapshot |
-| POST | `/xyz/tagdb/snapshots/export` | Export working DB |
-| DELETE | `/xyz/tagdb/snapshots` | Delete a snapshot file |
-| GET / POST | `/xyz/tagdb/settings` | Danbooru credentials |
-| GET | `/xyz/tagdb/official/check` | Check for updates |
-| POST | `/xyz/tagdb/official/download` | Download prebuilt dataset |
-| POST | `/xyz/tagdb/maintain` | Start maintenance (full / incremental) |
-| GET | `/xyz/tagdb/maintain/status` | Maintenance progress |
-| POST | `/xyz/tagdb/maintain/cancel` | Cancel maintenance |
-| POST | `/xyz/tagdb/reconstruct` | Time-machine reconstruction |
+- Type in any ComfyUI prompt textarea (and in the Prompt Library editors). Use ↑/↓ to move, Enter/Tab to accept, Esc to dismiss.
+- Tag names are stored with underscores; with **Replace `_` with space** on, they are inserted with spaces.
+- Relevant settings (**XYZ Prompt Tools → …**):
+  - **Autocomplete**: enable on/off, max suggestions (default 15), hide rare tags (skip below a post count; default 0 = show all).
+  - **Insertion**: underscore→space, auto comma, escape brackets, full-width→half-width.
+  - **Library**: also suggest your own Prompt Library prompts / entry references.
+  - **Related**: click a tag in the rich editor / entry text view to see related tags (one request per lookup; cached).
+  - **Preview**: hover the 🖼 icon for an artist-works popup or a tag preview image. **Both are off by default**; fetched on demand from Danbooru, cached in memory.
 
-## Building Datasets
+## Tag dataset manager
 
-Author-only CLI:
+**XYZ Prompt Tools → Tag dataset**:
+
+| Action | What it does |
+|---|---|
+| **Download / Update** | Download the author's prebuilt dataset from the GitHub Release. Replaces the working DB. |
+| **Incremental** | Apply new/changed tag events since your last sync and refresh post counts. Needs a Danbooru login + API key. |
+| **Full re-scrape** | Rebuild the dataset from scratch from Danbooru. Needs credentials; takes a while. |
+| **Snapshots → Use** | Point autocomplete at a snapshot **without** changing the working DB. |
+| **Snapshots → Export / Delete** | Save the working DB as a local checkpoint, or remove a snapshot file. |
+| **Reconstruct & use** | "Time machine" — rebuild the tag vocabulary as of a past date. |
+
+### Danbooru credentials
+
+Your login and API key are stored in plaintext in `tagdb_data/settings.json` (gitignored) and used only for your own Incremental / Full updates. A free Danbooru account can generate an API key in its profile settings.
+
+### Time machine (Reconstruct)
+
+Rebuilds tag existence, category, and names as of a chosen date — including rolling artist names back along their rename history, so searching any historical name finds the artist. Requires the version history that the official releases include. The result is saved to `snapshots/local/` and activated; switch back via **Snapshots → Use** on `tagdb.sqlite`.
+
+## FAQ
+
+**Typing Japanese/Chinese finds nothing.** The dataset has no wiki translations — search matches English tag names and artists' former names only.
+
+**Tag count doesn't match the release.** Releases use `min_post_count = 50`. Your own update with a lower threshold yields more tags.
+
+**Tag count dropped.** You probably switched the active snapshot — **Snapshots → Use** on `tagdb.sqlite` to switch back.
+
+---
+
+## Building your own dataset (advanced)
+
+The author CLI runs standalone (no ComfyUI). It needs `curl_cffi` and Danbooru credentials:
 
 ```bash
 python -m tagdb.build_dataset --full --min-post-count 50 --with-versions --with-artists --zip \
-    --login myuser --api-key abc123
+    --login YOUR_LOGIN --api-key YOUR_API_KEY
 ```
 
-Outputs `.sqlite` + `.zip` to `dist/` and prints a manifest entry.
+It writes a `.sqlite` (and `.zip` with `--zip`) to `dist/` and prints a manifest entry. `--with-versions` enables time-machine reconstruction; `--with-artists` adds artist data. To publish, upload the `.zip` to a GitHub Release and update `tagdb/official_manifest.json`.
 
-## Maintainer Reference
-
-- `db.py` — SQLite schema + FTS5 index
-- `scraper.py` — Danbooru API client (curl_cffi for Cloudflare)
-- `updater.py` — Full/incremental update + reconstruction logic
-- `distribution.py` — Prebuilt dataset download/verify/seed
-- `repo.py` — Search and data access
-- `routes.py` — HTTP API
-
-See the project root `CLAUDE.md` for detailed architecture notes.
-
-[中文版 (Chinese)](README_zh.md)
+For backend/architecture notes see the project root `CLAUDE.md`.

@@ -205,5 +205,10 @@ def seed_working_db_from_official(official_path: Path, working_path: Path,
             "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             (version,),
         )
+        # Rebuild the contentless FTS5 index locally. This self-heals a shipped
+        # dataset whose index has stale/doubled postings (search would otherwise
+        # return tags that don't contain the query). Cheap: ~1s for ~120k rows.
+        from .snapshots import rebuild_fts
+        rebuild_fts(conn)
     finally:
         conn.close()

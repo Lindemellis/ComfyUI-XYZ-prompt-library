@@ -22,6 +22,10 @@ let _activePanel = 'prompts';   // 'prompts' | 'subentries'
 let _layout      = 'vertical';  // 'vertical' | 'compact'
 let _negAutoInsert = true;       // also insert the _neg sub-entry when inserting this entry
 let _syncLock    = false;
+let _blurTimer    = null;  // debounce timer for blur-triggered sync
+let _caretBeforeClick = null; // textarea caret captured at pointerdown (capture phase),
+                              // before the click can move focus to a button; null when the
+                              // textarea wasn't focused as the click began (clicked elsewhere)
 let _dragSrcId   = null;         // prompt id being dragged
 
 // DOM refs
@@ -397,7 +401,10 @@ function _render() {
   _promptTextarea.placeholder = 'Active prompts joined by delimiter…';
   // Entry text view = related-capable (req #1), uses entry's own delimiter.
   window.xyzTagAC?.attach(_promptTextarea, { related: true, getDelimiter: () => _delim() });
-  _promptTextarea.addEventListener('blur', _syncTextToList);
+  _promptTextarea.addEventListener('blur', () => {
+    clearTimeout(_blurTimer);
+    _blurTimer = setTimeout(_syncTextToList, 80);
+  });
   textSection.appendChild(_promptTextarea);
 
   // ── Tab toggle ──
@@ -910,10 +917,17 @@ function _renderListBody() {
 
 function _sortedPrompts() {
   const copy = [..._prompts];
-  // Match _buildText() order: enabled first by order_index, then disabled
+  // Display order: enabled first (in prompt-text order, by order_index), then
+  // disabled (alphabetical). NOTE: `enabled` is a MIX of 1/0 (numbers, from the
+  // server) and true/false (booleans, set in-memory on create/toggle). A raw
+  // `a.enabled !== b.enabled` treats 1 and true as different → a non-transitive
+  // comparator that flings the just-touched prompt to the front. Normalise to a
+  // real boolean first.
   copy.sort((a, b) => {
-    if (a.enabled !== b.enabled) return a.enabled ? -1 : 1;
-    return (a.order_index ?? 0) - (b.order_index ?? 0);
+    const ea = !!a.enabled, eb = !!b.enabled;
+    if (ea !== eb) return ea ? -1 : 1;
+    if (ea) return (a.order_index ?? 0) - (b.order_index ?? 0);   // enabled → text order
+    return String(a.content).localeCompare(String(b.content));    // disabled → alphabetical
   });
   return copy;
 }
@@ -1107,7 +1121,7 @@ function _subEntryRow(child, kind = 'own') {
 
   // ⤴ — add reference to THIS entry's prompt list (uses this entry's delimiter)
   hdr.append(_iconBtn('⤴', "Add reference to this entry's prompts",
-    () => _addRefToPromptBox(childRef)));
+    () => _addRefToPromptBox(childRef, child)));
   // ＋ — insert reference into the text editor (routed by the sub-entry's polarity)
   hdr.append(_iconBtn('＋', 'Insert reference into the text editor',
     () => _emitInsert(childRef, child.pos_neg ?? 'positive', child.delimiter)));
@@ -1252,16 +1266,43 @@ function _emitInsert(text, posNeg, delimiter) {
   document.dispatchEvent(new CustomEvent('plv2:insert', { detail: { text, posNeg, delimiter } }));
 }
 
-/** Add `ref` to the current entry's prompt textarea at the caret (#2b). */
-function _addRefToPromptBox(ref) {
+/** Add `ref` to the current entry's prompt textarea (#2b). */
+function _addRefToPromptBox(ref, child) {
   if (!_promptTextarea) return;
+
+  // Cancel the blur-triggered sync — we sync ourselves after inserting.
+  clearTimeout(_blurTimer);
+
+  // Guard: skip if a reference to this child already exists in the textarea.
+  const childPath = child?.full_path;
+  const childAuto = child?.auto_trigger;
+  const refRe = /\[([^\]]+)\]/g;
+  let m;
+  while ((m = refRe.exec(_promptTextarea.value)) !== null) {
+    const inner = m[1];
+    if (childPath && (inner === childPath || inner.startsWith(childPath + '.'))) return;
+    if (childAuto && (inner === childAuto || inner.startsWith(childAuto + '.'))) return;
+  }
+
+  // Insert position:
+  //   still focused                    → current selectionStart
+  //   focused when this click began    → caret captured at pointerdown (before focus left)
+  //   blurred earlier (clicked elsewhere first) → append to end
   const D = _delim();
-  const pos = _promptTextarea.selectionStart ?? _promptTextarea.value.length;
+  const pos = document.activeElement === _promptTextarea
+    ? (_promptTextarea.selectionStart ?? _promptTextarea.value.length)
+    : (_caretBeforeClick != null
+        ? Math.min(_caretBeforeClick, _promptTextarea.value.length)
+        : _promptTextarea.value.length);
+
   const plan = window.plv2.insert.plan(_promptTextarea.value, pos);
   const { value, caret } = window.plv2.insert.assemble(plan, ref, D, D);
   _promptTextarea.value = value;
   _promptTextarea.selectionStart = _promptTextarea.selectionEnd = caret;
   _promptTextarea.focus();
+
+  // Sync to prompt list. The blur-debounce timer was cancelled above, so there
+  // is no race — this is the only sync that will run for this change.
   _syncTextToList();
 }
 
@@ -1345,6 +1386,17 @@ app.registerExtension({
 
     _detail = window.plv2.panel.detail;
     window.plv2.windows.library.onHide(closeDetail);
+
+    // Capture the prompt textarea's caret at the START of every click, before the
+    // click can shift focus to a button. `_addRefToPromptBox` reads this so the "⤴"
+    // sub-entry buttons insert at the caret when the textarea was focused, and append
+    // to the end when it wasn't (user clicked elsewhere first). Capture phase runs
+    // before the focus shift, so document.activeElement is still the textarea here.
+    document.addEventListener('pointerdown', () => {
+      _caretBeforeClick = (_promptTextarea && document.activeElement === _promptTextarea)
+        ? _promptTextarea.selectionStart
+        : null;
+    }, true);
 
     const tryReg = () => {
       if (window.plv2Tree?.onSelectEntry) {

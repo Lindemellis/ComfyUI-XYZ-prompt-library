@@ -1,73 +1,66 @@
 # Image Gallery
 
-Browse and manage ComfyUI output images. Auto-indexing, tag management, bulk operations, metadata viewing.
+**English** | [中文](README_zh.md) · [← Back to main README](../README.md)
+
+Browse and manage your ComfyUI images — auto-indexed, with filtering, tagging, bulk operations, and metadata viewing.
 
 ## Opening
 
-Click the **Gallery** button in ComfyUI's top bar, or navigate to `/xyz/gallery`.
+Click **Open XYZ Gallery** (the image icon) in the ComfyUI top bar. On first open it scans your `output` and `input` directories and builds a thumbnail index in the background.
 
-On first open, the gallery automatically scans your `output` and `input` directories.
+## Browsing
 
-## Browsing Images
-
-### Filters
-
-The left panel provides filter controls:
+### Filters (left panel)
 
 | Filter | Description |
 |---|---|
-| Folder | Select a folder, optionally include subfolders |
-| Favorites | Only show favorited images |
-| Tags | Images with specific tags (multiple supported) |
+| Folder | Pick a folder, optionally including subfolders |
+| Favorites | Only favorited images |
+| Tags | Images carrying specific tags (autocompletes from your library) |
 | Model | Filter by checkpoint model |
-| Prompt | Search for keywords in prompts |
+| Prompt | Keyword search within prompts |
 | Date range | Filter by file modification time |
 
-### Sorting
+Sort by time, filename, size, or folder (ascending / descending).
 
-By time, filename, file size, or folder, ascending or descending.
+### View modes
 
-### View Modes
-
-- **Grid view**: Thumbnail cards for quick browsing
-- **Compact view**: Dense thumbnails for many images
-- **Line view**: Grouped by size/date/first letter
-- **Detail view**: Full metadata for a single image
+- **Grid** — thumbnail cards.
+- **Compact** — dense thumbnails for many images.
+- **Line** — grouped rows (by size / date / first letter).
+- **Detail** — full metadata for a single image (open by clicking an image).
 
 ## Tags
 
-- Add/remove tags on the image detail page
-- Bulk tag operations on selected images
-- Settings → Tag management to rename, delete, or clean up tags
+- Add / remove tags on the detail page.
+- Bulk-tag selected images.
+- Favorites and tags are mirrored into the PNG's metadata so they travel with the file.
 
-## Bulk Operations
+## Bulk operations
 
-1. Select multiple images
-2. Choose operation: move, delete, favorite, tag
-3. System runs a preflight check (disk space, name conflicts)
-4. Confirm to execute
+1. Select multiple images.
+2. Choose an operation from the bulk bar: move, delete, favorite, or tag.
+3. The gallery runs a preflight check (e.g. name conflicts) and shows progress.
+4. Confirm to execute.
 
 ## Settings
 
-Settings panel inside the Gallery page:
+In the gallery's **Settings** view:
 
-- **Theme**: dark / light
-- **Download mode**: original / with metadata
-- **Filter visibility**: choose which filters to show
-- **Developer mode**: extra debug info
+- **Theme** — dark / light.
+- **Download** — choose what to include when downloading (e.g. with metadata) via the download picker.
+- **Filters** — choose which filter controls are shown.
+- **Developer mode** — extra debug information.
 
-## Folder Management
+## Folders
 
-- Default folders: ComfyUI `output` and `input`
-- Add custom folders
-- Create subfolders, rename, move
+- Default roots are ComfyUI's `output` and `input`.
+- Add custom folders; create subfolders, rename, and move within the tree.
 
 ## FAQ
 
-**Images not appearing?** Check folder settings, or manually click Rescan.
+**Images not appearing?** Check your folder settings, or trigger a rescan.
 
-**Thumbnails loading slowly?** First visit generates thumbnails — cached after that.
+**Thumbnails slow at first?** They are generated on first view, then cached as `.webp`.
 
-**Tags written back to files?** Favorites and tags auto-write to PNG metadata chunks.
-
-[中文版 (Chinese)](README_zh.md)
+**Where is the data?** In `gallery_data/` (gitignored): the index DB and thumbnail cache. Your original images are never modified except for the favorite/tag metadata mirror.

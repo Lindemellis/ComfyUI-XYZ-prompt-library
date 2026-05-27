@@ -1,136 +1,93 @@
 # ComfyUI-XYZNodes
 
-A ComfyUI custom node pack — **Danbooru tag autocomplete**, **hierarchical prompt library**, **image gallery**, plus 4 lightweight text processing nodes.
+**English** | [中文](README_zh.md)
+
+A ComfyUI custom-node pack with three larger tools — **Danbooru tag autocomplete**, a **hierarchical prompt library (V2)**, and an **image gallery** — plus a few small text/prompt utility nodes.
+
+Each tool has its own manual:
+
+- 📖 [Tag Autocomplete & Dataset](tagdb/README.md)
+- 📖 [Prompt Library V2](prompt_library_v2/README.md)
+- 📖 [Image Gallery](gallery/README.md)
 
 ## Installation
 
-1. Navigate to ComfyUI's `custom_nodes` directory:
+1. Go to your ComfyUI `custom_nodes` directory:
    ```bash
    cd ComfyUI/custom_nodes/
    ```
-2. Clone the repository:
+2. Clone this repository:
    ```bash
    git clone https://github.com/Lindemellis/ComfyUI-XYZ-prompt-library.git
    ```
-3. Optional dependency (only needed if you plan to scrape Danbooru yourself):
+3. *(Optional)* Install `curl_cffi` — **only** needed if you want to scrape/update the tag dataset from Danbooru yourself. Downloading the prebuilt dataset does not need it:
    ```bash
    pip install curl_cffi>=0.7.0
    ```
 4. Restart ComfyUI.
 
-On first startup, a prebuilt tag dataset downloads automatically in the background. Autocomplete is ready when it finishes.
+On the **first run**, the prebuilt Danbooru tag dataset (~66 MB, ~118K tags with post-count ≥ 50) downloads automatically in the background. Tag autocomplete becomes ready once it finishes. Nothing is scraped automatically — if the download fails (offline, etc.), open the Tag dataset panel to retry.
 
-## Tag Database (Autocomplete)
+## Features
 
-Type in any ComfyUI prompt textarea to get tag suggestions.
-
-### Managing Your Dataset
-
-The plugin needs a Danbooru tag database. Open **XYZ Prompt Tools → Tag dataset** to manage it:
-
-| Action | Button | Description |
+| Tool | What it does | Manual |
 |---|---|---|
-| Download official dataset | Download / Update | Downloads the author's prebuilt dataset from GitHub Release (~65 MB, 118K tags, post_count ≥ 50) |
-| Local incremental update | Incremental | Sync new/changed tags from Danbooru + refresh all post_counts (~3–5 min, needs Danbooru account) |
-| Local full rebuild | Full | Rebuild the entire dataset from Danbooru (~90 min, needs Danbooru account) |
-| Time travel | Reconstruct | Rebuild the tag vocabulary as of a historical date, with artist name rollback |
+| **Tag autocomplete** | Danbooru tag suggestions as you type in any prompt box, with a versioned local dataset, updates, snapshots, and date-based "time-machine" reconstruction. | [tagdb](tagdb/README.md) |
+| **Prompt Library V2** | A SQLite-backed hierarchical prompt library with `[ref]` references, trigger aliases, weights, random modes, and a floating text editor. Resolved by two nodes at execution time. | [plv2](prompt_library_v2/README.md) |
+| **Image Gallery** | Browse and manage ComfyUI output/input images — filters, tags, bulk operations, and metadata viewing. | [gallery](gallery/README.md) |
+| **Utility nodes** | Small text/prompt helpers (see the table below). | — |
 
-### Dataset Files Explained
+## Where things live
 
-```
-tagdb_data/
-├── tagdb.sqlite        ← Working DB (mutable, autocomplete reads from here by default)
-├── snapshots/
-│   ├── official/       ← Prebuilt copies downloaded from Release (read-only)
-│   └── local/          ← Local backups and time-machine snapshots (read-only)
-```
+After restarting ComfyUI, two buttons appear in the top bar:
 
-- **tagdb.sqlite**: Your local dataset. Incremental/Full maintenance writes here. Downloading a release with "replace" overwrites this.
-- **official/**: Frozen prebuilt copies. The "Use" button switches autocomplete to read from one without modifying the working DB.
-- **local/**: Auto-backups before maintenance, time-machine reconstruction results.
+- **Open XYZ Gallery** (image icon) — opens the gallery.
+- **XYZ Tools** (menu) — opens:
+  - *Prompt Library V2 — Library*
+  - *Prompt Library V2 — Text Editor*
+  - *Prompt Library V1 Manager* (legacy)
+  - *XYZ Prompt Tools Settings*
 
-**Note**: Switching to a snapshot with "Use" does NOT change the working DB's tag count. It only changes where autocomplete reads from.
+The **settings window** (also reachable from the ComfyUI command palette: *"Open XYZ Prompt Tools settings"*) has these tabs:
 
-### Choosing a Data Source
+| Tab | Controls |
+|---|---|
+| Autocomplete | Enable on/off, max suggestions, hide rare tags |
+| Insertion | Underscore→space, auto comma, escape brackets, full-width→half-width |
+| Library | Use your prompt library as autocomplete sources; entry-ref suggestions |
+| Related | Click-a-tag related lookups + cache freshness |
+| Preview | Artist-works / tag preview images on hover (both **off** by default) |
+| Tag dataset | Danbooru credentials, prebuilt dataset, updates, snapshots, reconstruct |
+| About | Version / info |
 
-| Source | Tag Count | Freshness | Network | Action |
-|---|---|---|---|---|
-| Download Release (recommended) | 118K tags | As of release | Download once | Download / Update |
-| Your own Incremental | Based on your threshold | Live | Danbooru account, ~3 min each | Incremental |
-| Your own Full rebuild | Based on your threshold | Live | Danbooru account, ~90 min | Full |
+Each Prompt Library V2 node also has its own **Library / Editor / Preview** buttons.
 
-### Time Machine (Reconstruct)
-
-Rebuild the tag state as of any past date, including artist name rollback.
-
-- Requires `tag_versions` and `artist_versions` data (included in official releases)
-- Result saved to `local/recon_YYYY-MM-DD.sqlite` and auto-activated
-- Artist names are rolled back along their rename timeline: e.g. `range_murata → murata_renji → murata_range`, searching any historical name finds the artist
-
-### Settings
-
-Open **XYZ Prompt Tools → Autocomplete**:
-
-| Setting | Description | Default |
-|---|---|---|
-| Enable autocomplete | Global on/off | On |
-| Max suggestions | Dropdown max items | 15 |
-| Hide rare tags | Skip tags below this post_count (0 = show all) | 0 |
-| Show artist preview | Show recent works on artist tag hover | On |
-| Show tag preview | Show sample image on tag hover | On |
-| Scrape threshold | Only fetch tags ≥ this post_count during maintenance | 50 |
-
-Additional panels (Insertion, Library, Related, Preview) control insertion behavior, library sources, and related-tag caching. Settings save to browser localStorage.
-
-## Prompt Library V2
-
-Hierarchical prompt library with templates and references. Two nodes:
-
-- **XYZ Prompt Library V2 Positive** — positive prompts
-- **XYZ Prompt Library V2 Negative** — negative prompts
-
-### Quick Start
-
-1. Add the node to your workflow
-2. Click the **Library** button on the node to open the library window
-3. Browse the folder tree, create entries
-4. Syntax support: `[ref]` references, `{a|b}` random choice, `(text:1.2)` weights
-5. Double-click entries or type `/trigger_name` to insert into the editor
-
-See [Prompt Library V2 docs](prompt_library_v2/README.md) for details.
-
-## Image Gallery
-
-Browse and manage ComfyUI output images with tags, bulk operations, and metadata viewing.
-
-See [Gallery docs](gallery/README.md) for details.
-
-## Core Nodes
+## Nodes
 
 | Node | Category | Purpose |
 |---|---|---|
-| XYZ Multi Text Concatenate | XYZ Node | Join text inputs with delimiter, prefix, suffix |
-| XYZ Multi Text Replace | XYZ Node | Template replacement with `[N]` placeholders |
-| XYZ Multi Clip Encoder | XYZ Node | Batch CLIP encoding for multiple prompts |
-| XYZ Random String Picker | XYZ Node | Random selection from `;`-separated tagged items |
+| XYZ Multi Text Concatenate | `XYZ Node` | Join several text inputs with a delimiter, prefix, and suffix |
+| XYZ Multi Text Replace | `XYZ Node` | Template replacement using `[N]` placeholders |
+| XYZ Multi Clip Encoder | `XYZ Node` | Batch CLIP text encoding for multiple prompts |
+| XYZ Random String Picker | `XYZ Node` | Random pick from `;`-separated tagged items |
+| XYZ Prompt Library V2 Positive | `XYZNodes/Prompt` | Resolve a positive prompt template against the library |
+| XYZ Prompt Library V2 Negative | `XYZNodes/Prompt` | Resolve a negative prompt template against the library |
+| XYZ Prompt Library | `XYZNodes/Prompt` | Legacy V1 prompt library node (kept for backward compatibility) |
 
 ## FAQ
 
-**Q: Can't find tags by typing Japanese/Chinese?**
-The plugin does not include wiki translations. Search matches English tag names and artist former names only.
+**Can't find a tag by typing Japanese/Chinese?**
+The dataset does not include wiki translations. Search matches English tag names and artists' former names only.
 
-**Q: How do I switch back to my working database?**
-Tag dataset → Snapshots → click "Use" on the tagdb.sqlite row.
+**Do I need a Danbooru account?**
+No, for downloading the prebuilt dataset. Yes (a free login + API key) only if you run your own Incremental / Full update or build a dataset.
 
-**Q: Do I need a Danbooru account?**
-No for downloading releases. Yes (free API key) for running your own Incremental/Full maintenance.
+**Tag count doesn't match the release number?**
+The release is built with `min_post_count = 50`. If you run your own update with a lower threshold you'll get more tags.
 
-**Q: Tag count doesn't match what the release says?**
-Releases use min_post_count=50. Your own maintenance may use a lower threshold, yielding more tags.
-
-**Q: Tag count dropped suddenly?**
-Check if you've activated a smaller snapshot (marked "active" in the list). Click "Use" on the working DB to switch back.
+**Tag count dropped suddenly?**
+You may have switched the active snapshot. In *Tag dataset → Snapshots*, click **Use** on the working DB (`tagdb.sqlite`) to switch back.
 
 ---
 
-[中文版 (Chinese)](README_zh.md)
+Data directories (`tagdb_data/`, `prompt_library_v2_data/`, `gallery_data/`, `prompt_library/`) are created at runtime and are gitignored.
