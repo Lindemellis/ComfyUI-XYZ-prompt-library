@@ -53,12 +53,19 @@ const api = {
     if (!r.ok) throw new Error(`${url} → HTTP ${r.status}`);
     return r.json();
   },
+  async delJSON(url, body) {
+    const r = await fetch(url, {
+      method: 'DELETE',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body || {}),
+    });
+    if (!r.ok) throw new Error(`${url} → HTTP ${r.status}`);
+    return r.json();
+  },
   settings:        () => api.getJSON('/xyz/tagdb/settings'),
   saveSettings:    (b) => api.postJSON('/xyz/tagdb/settings', b),
   officialCheck:   () => api.getJSON('/xyz/tagdb/official/check'),
   officialDownload:(b) => api.postJSON('/xyz/tagdb/official/download', b),
-  translationsCheck:    () => api.getJSON('/xyz/tagdb/translations/check'),
-  translationsDownload: () => api.postJSON('/xyz/tagdb/translations/download', {}),
   maintain:        (b) => api.postJSON('/xyz/tagdb/maintain', b),
   maintainStatus:  () => api.getJSON('/xyz/tagdb/maintain/status'),
   maintainCancel:  () => api.postJSON('/xyz/tagdb/maintain/cancel', {}),
@@ -66,6 +73,7 @@ const api = {
   activeInfo:      () => api.getJSON('/xyz/tagdb/snapshots/active'),
   setActive:       (b) => api.postJSON('/xyz/tagdb/snapshots/active', b),
   exportWorking:   () => api.postJSON('/xyz/tagdb/snapshots/export', {}),
+  deleteSnapshot:  (b) => api.delJSON('/xyz/tagdb/snapshots', b),
   reconstruct:     (b) => api.postJSON('/xyz/tagdb/reconstruct', b),
 };
 
@@ -250,24 +258,13 @@ class TagDBManager {
   // ── official dataset ──
   _sectionOfficial() {
     this.els.official = el('div', { style: { fontSize: '12px', marginBottom: '6px' } }, '—');
-    this.els.trStatus = el('div', { style: { fontSize: '11px', color: '#999', margin: '4px 0' } }, '');
-    this.els.inclTr = el('input', { type: 'checkbox' });
     return this._section('Prebuilt dataset (from the node author’s GitHub release)',
       this.els.official,
       el('div', {},
         this._btn('Check for updates', () => this._checkOfficial()),
         this._btn('Download / Update', () => this._downloadOfficial(), { primary: true }),
       ),
-      el('label', { style: { fontSize: '12px', display: 'block', marginTop: '8px' } },
-        this.els.inclTr, ' also fetch the translations add-on (JP/CN names + artist former names)'),
-      this.els.trStatus,
-      el('div', {}, this._btn('Download translations add-on only', () => this._downloadTranslations())),
     );
-  }
-
-  async _downloadTranslations() {
-    try { await api.translationsDownload(); this._toast('Translations download started'); }
-    catch (e) { this._toast(e.message.includes('400') ? 'Download the base dataset first' : 'Error: ' + e.message); }
   }
 
   // ── update ──
@@ -279,7 +276,7 @@ class TagDBManager {
     }}, '');
     return this._section('Update from danbooru',
       el('div', { style: { fontSize: '12px', marginBottom: '6px', color: '#fb8' } },
-        'Incremental: only new/changed tags, versions, aliases — does NOT refresh post counts or related tags of unchanged tags. Full: re-scrape everything (~15–20 min).'),
+        'Incremental: new events + full post_count refresh + artist translations. Full: re-scrape everything from scratch (~15–20 min).'),
       el('label', { style: { fontSize: '12px' } }, 'only scrape tags with post count ≥ '), this.els.minCount,
       el('div', { style: { fontSize: '11px', color: '#888', margin: '2px 0' } },
         'Default is set in ComfyUI Settings → XYZ Tag Autocomplete; change here for a one-off run.'),
@@ -297,7 +294,9 @@ class TagDBManager {
     this.els.snaps = el('div', {});
     this.els.reconDate = el('input', { type: 'date',
       style: { ...this._inputStyle(), width: '150px', display: 'inline-block' } });
-    return this._section('Snapshots (switch time node)',
+    return this._section('Snapshots (switch read source)',
+      el('div', { style: { fontSize: '11px', color: '#999', marginBottom: '8px' } },
+        '"Use" switches autocomplete to read from that snapshot. The working DB is not modified. Run Maintain to update the working DB.'),
       el('div', { style: { marginBottom: '6px' } },
         el('span', { style: { fontSize: '12px' } }, 'Reconstruct vocabulary as of '),
         this.els.reconDate,
@@ -349,13 +348,6 @@ class TagDBManager {
         `latest: <b>${info.latest || '—'}</b> · installed: <b>${info.installed || 'none'}</b>` +
         (info.update_available ? ' · <span style="color:#6f6">update available</span>' : ' · up to date');
       if (!silent) this._toast(`Prebuilt dataset: ${status} (latest ${info.latest || '—'}, installed ${info.installed || 'none'})`);
-      try {
-        const t = await api.translationsCheck();
-        this.els.trStatus.textContent = t.available
-          ? (t.installed ? 'Translations add-on: installed ✓'
-                         : `Translations add-on: available (${Math.round((t.size_bytes || 0) / 1e6)} MB) — not installed`)
-          : 'Translations add-on: none published';
-      } catch {}
     } catch (e) {
       this.els.official.textContent = 'check failed: ' + e.message;
       if (!silent) this._toast('Check failed: ' + e.message);
@@ -367,8 +359,7 @@ class TagDBManager {
       // If a working DB exists, replace it (the backend exports it to local/ first).
       const snaps = await api.snapshots();
       const hasWorking = snaps.some((s) => s.kind === 'working');
-      await api.officialDownload({ replace_working: hasWorking,
-                                   include_translations: this.els.inclTr?.checked });
+      await api.officialDownload({ replace_working: hasWorking });
       this._toast('Download started');
     } catch (e) { this._toast('Download error: ' + e.message); }
   }
@@ -409,14 +400,27 @@ class TagDBManager {
           el('div', {}, badge,
             el('span', { title: `structure→${fmtEpoch(s.structure_synced_through)}, counts→${fmtEpoch(s.full_count_synced_at)}` },
               `${s.filename} (${s.tag_count.toLocaleString()} tags)`)),
-          s.filename === this._activeFilename
-            ? el('span', { style: { color: '#6f6', fontSize: '11px' } }, 'active')
-            : this._btn('Use', async () => {
-                await api.setActive({ filename: s.filename });
-                await this._refreshActiveInfo();
-                this._loadSnapshots();
-                this._toast('Switched');
-              }),
+          el('span', { style: { display: 'inline-flex', gap: '4px', flexShrink: '0', minWidth: '110px', justifyContent: 'flex-end' } },
+            s.filename === this._activeFilename
+              ? el('span', { style: { color: '#6f6', fontSize: '11px', padding: '5px 8px' } }, 'active')
+              : this._btn('Use', async () => {
+                  await api.setActive({ filename: s.filename });
+                  await this._refreshActiveInfo();
+                  this._loadSnapshots();
+                  this._toast('Switched to ' + s.filename);
+                }),
+            s.kind !== 'working'
+              ? this._btn('Del', async () => {
+                  if (!confirm(`Delete ${s.filename}?\n\nThis snapshot will be removed from disk.`)) return;
+                  try {
+                    const r = await api.deleteSnapshot({ filename: s.filename });
+                    await this._refreshActiveInfo();
+                    this._loadSnapshots();
+                    this._toast(r.deleted + ' deleted');
+                  } catch (e) { this._toast('Delete failed: ' + e.message); }
+                })
+              : null,
+          ),
         );
         this.els.snaps.append(row);
       }

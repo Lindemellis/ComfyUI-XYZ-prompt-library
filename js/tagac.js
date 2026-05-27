@@ -950,9 +950,9 @@ class TagAutocompleteUI {
       });
       if (tag.aliases && tag.aliases.length) {
         aliasSpan.textContent = tag.aliases[0]; aliasSpan.title = tag.aliases.join(', ');
-      } else if (tag.translations && tag.translations.length) {
-        aliasSpan.textContent = tag.translations[0]; aliasSpan.title = tag.translations.join(', ');
-        aliasSpan.style.color = '#caa';
+        } else if (tag.translations && tag.translations.length) {
+          aliasSpan.textContent = tag.translations[0]; aliasSpan.title = tag.translations.join(', ');
+          aliasSpan.style.color = '#caa';
       }
       row.appendChild(aliasSpan);
     }
