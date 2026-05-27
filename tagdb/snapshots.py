@@ -154,13 +154,13 @@ def rebuild_fts(conn) -> None:
     conn.execute("BEGIN")
     # Contentless FTS5 (content='') forbids plain DELETE; use the delete-all directive.
     conn.execute("INSERT INTO tags_fts(tags_fts) VALUES('delete-all')")
-    # aliases_text indexes aliases + wiki other_names (translations), so a tag is
-    # findable by its alternate/translated names too.
+    # aliases_text indexes aliases + artist other_names so a tag is
+    # findable by its alternate/former names. Wiki translations are excluded.
     rows = conn.execute("""
         SELECT t.id, t.name,
                TRIM(COALESCE(GROUP_CONCAT(a.alias, ' '), '') || ' ' ||
                     COALESCE((SELECT GROUP_CONCAT(tr.text, ' ') FROM translations tr
-                              WHERE tr.tag = t.name), '')) AS aliases_text
+                              WHERE tr.tag = t.name AND tr.lang = 'artist'), '')) AS aliases_text
         FROM tags t
         LEFT JOIN aliases a ON a.canonical = t.name
         GROUP BY t.id

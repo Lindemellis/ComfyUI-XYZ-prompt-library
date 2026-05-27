@@ -180,7 +180,6 @@ def run_full_update(
     label: str = "danbooru",
     login: Optional[str] = None,
     api_key: Optional[str] = None,
-    with_translations: bool = False,
     with_versions: bool = False,
     with_artist_names: bool = False,
     with_artist_versions: bool = False,
@@ -199,6 +198,9 @@ def run_full_update(
     conn = _db.connect_write(db_path)
     try:
         _db.migrate(conn)
+
+        # Purge wiki translations — no longer scraped, ensure clean state on rebuild
+        conn.execute("DELETE FROM translations WHERE lang = 'other'")
 
         _progress(progress_cb, f"[Full] Scraping tags (post_count>={min_post_count})...")
         tag_count = 0
@@ -235,27 +237,6 @@ def run_full_update(
         conn.execute("COMMIT")
         _progress(progress_cb, f"[Full] Aliases done: {alias_count:,}")
 
-        if with_translations:
-            _progress(progress_cb, "[Full] Scraping wiki other_names (translations)...")
-            tr_count = 0
-            conn.execute("BEGIN")
-            for w in _sc.scrape_wiki_other_names(login=login, api_key=api_key,
-                                                 stop_event=stop_event):
-                if stop_event and stop_event.is_set():
-                    conn.execute("ROLLBACK")
-                    _progress(progress_cb, "[Full] Cancelled during translations scrape")
-                    return {"mode": "full", "cancelled": True}
-                conn.execute(
-                    "INSERT OR REPLACE INTO translations(tag, lang, text) VALUES (?, 'other', ?)",
-                    (w["tag"], " ".join(w["other_names"])),
-                )
-                tr_count += 1
-                if tr_count % _BATCH == 0:
-                    conn.execute("COMMIT"); conn.execute("BEGIN")
-                    _progress(progress_cb, f"[Full] Translations: {tr_count:,}")
-            conn.execute("COMMIT")
-            _progress(progress_cb, f"[Full] Translations done: {tr_count:,}")
-
         if with_artist_names:
             _progress(progress_cb, "[Full] Scraping artist other_names (handles / former names)...")
             an_count = 0
@@ -291,6 +272,18 @@ def run_full_update(
 
         _progress(progress_cb, "[Full] Rebuilding FTS index...")
         rebuild_fts(conn)
+
+        # Prune artist_versions: keep only rows linked to tags that exist
+        # (post_count filter may have excluded most artists).
+        # SQLite DELETE with composite subquery may not report rowcount; use changes().
+        conn.execute(
+            "WITH linked AS (SELECT DISTINCT av.artist_id FROM artist_versions av "
+            "JOIN tags t ON t.name = av.name) "
+            "DELETE FROM artist_versions WHERE artist_id NOT IN linked"
+        )
+        deleted = conn.execute("SELECT changes()").fetchone()[0]
+        if deleted:
+            _progress(progress_cb, f"[Full] Pruned {deleted:,} artist_versions (no matching tag)")
 
         conn.execute("BEGIN")
         # A full read observed current truth for every tag → all clocks = now.
@@ -481,12 +474,12 @@ def run_incremental_update(
     progress_cb: Optional[Callable[[str], None]] = None,
     stop_event=None,
 ) -> Dict[str, Any]:
-    """Apply only events created at/after the structure watermark.
+    """Apply events created since the structure watermark + refresh post_count.
 
-    Does NOT refresh post_count or related_tags of unchanged tags (no incremental
-    count feed exists). Advances structure_synced_through only to the max event
-    time actually consumed; a cancelled run leaves the watermark untouched so it
-    is safe to re-run. Returns a summary incl. staleness of the count clock.
+    Refreshs post_count of ALL tags (full tag scrape, ~2 min) and updates artist
+    other_names for any artist tags touched by the delta. Structure watermarks
+    advance only to the max event time actually consumed; a cancelled run leaves
+    them untouched so it is safe to re-run.
     """
     db_path = Path(db_path)
     now = _now()
@@ -591,36 +584,83 @@ def run_incremental_update(
         conn.execute("COMMIT")
         _progress(progress_cb, f"[Incr] New aliases: {aliases:,}")
 
-        # 5) Refresh FTS if any tag name/alias set changed. (Category/deprecation
-        # changes don't affect the index, which only covers name + alias text;
-        # contentless FTS5 can't do targeted row deletes, so rebuild wholesale.)
-        if affected_names:
-            rebuild_fts(conn)  # manages its own BEGIN/COMMIT (delete-all + reinsert)
+        # 5) Refresh post_count of ALL tags (not just new ones).
+        # Danbooru has no incremental count feed — the only way is a full tag scrape.
+        _progress(progress_cb, f"[Incr] Refreshing post_count (full tag scrape)...")
+        count_refreshed = 0
+        conn.execute("BEGIN")
+        for t in _sc.scrape_tags(min_post_count=min_post_count, login=login,
+                                 api_key=api_key, stop_event=stop_event):
+            if stop_event and stop_event.is_set():
+                conn.execute("ROLLBACK")
+                _progress(progress_cb, "[Incr] Cancelled during post_count refresh")
+                return {"mode": "incremental", "cancelled": True}
+            conn.execute(_UPSERT_TAG_FULL, (
+                t["name"], t["category"], t["post_count"], t["is_deprecated"],
+                t["danbooru_id"], t["created_at"], now, now,
+            ))
+            count_refreshed += 1
+        conn.execute("COMMIT")
+        _progress(progress_cb, f"[Incr] post_count refreshed for {count_refreshed:,} tags")
 
-        # 6) Advance watermarks — never ahead of a consumed event, never past now.
+        # 6) Refresh artist translations (other_names) for affected artists.
+        # Collect artist-tag names that were touched by the incremental delta
+        # (new tags, structure changes, or artist-version events).
+        tr_refreshed = 0
+        artist_names_to_refresh: set[str] = set()
+        for n in affected_names:
+            row = conn.execute("SELECT category FROM tags WHERE name=?", (n,)).fetchone()
+            if row and row[0] == 1:  # category 1 = artist
+                artist_names_to_refresh.add(n)
+        if artist_names_to_refresh:
+            _progress(progress_cb,
+                      f"[Incr] Refreshing artist other_names for {len(artist_names_to_refresh)} artists...")
+            tr_refreshed = 0
+            conn.execute("BEGIN")
+            for a in _sc.scrape_artist_other_names_for(artist_names_to_refresh,
+                                                       login=login, api_key=api_key,
+                                                       stop_event=stop_event):
+                if stop_event and stop_event.is_set():
+                    conn.execute("ROLLBACK")
+                    _progress(progress_cb, "[Incr] Cancelled during artist translations refresh")
+                    return {"mode": "incremental", "cancelled": True}
+                conn.execute(
+                    "INSERT OR REPLACE INTO translations(tag, lang, text) VALUES (?, 'artist', ?)",
+                    (a["tag"], " ".join(a["other_names"])),
+                )
+                tr_refreshed += 1
+            conn.execute("COMMIT")
+            _progress(progress_cb, f"[Incr] Artist other_names refreshed: {tr_refreshed:,}")
+            affected_names.update(artist_names_to_refresh)
+
+        # 7) Rebuild FTS if tag names, aliases, or artist translations changed.
+        if affected_names:
+            rebuild_fts(conn)
+
+        # 8) Advance watermarks. full_count_synced_at = now because we refresh
+        # post_count of ALL tags in every incremental run.
         new_wm = min(now, max(wm, max_event))
         conn.execute("BEGIN")
         _set_meta(conn, "structure_synced_through", new_wm)
         _set_meta(conn, "aliases_synced_through", new_wm)
+        _set_meta(conn, "full_count_synced_at", now)
         _set_meta(conn, "tag_count",
                   conn.execute("SELECT COUNT(*) FROM tags").fetchone()[0])
         _set_meta(conn, "alias_count",
                   conn.execute("SELECT COUNT(*) FROM aliases").fetchone()[0])
         conn.execute("COMMIT")
 
-        full_sync = _get_meta_int(conn, "full_count_synced_at", 0)
-        age_days = round((now - full_sync) / 86400.0, 1) if full_sync else None
         _progress(
             progress_cb,
-            f"[Incr] Done. Structure now current to {_sc.epoch_to_iso(new_wm)}. "
-            f"NOTE: post_count/related of unchanged tags NOT refreshed "
-            f"(counts last fully refreshed {age_days} days ago — run Full to refresh).",
+            f"[Incr] Done. Structure + post_count current to {_sc.epoch_to_iso(new_wm)}. "
+            f"Tags: {count_refreshed:,}, new_tags: {new_tags}, tag_versions: {versions}, "
+            f"artist_versions: {artists}, aliases: {aliases}, artist_translations: {tr_refreshed}",
         )
         return {
             "mode": "incremental", "new_tags": new_tags, "tag_versions": versions,
             "artist_versions": artists, "aliases": aliases,
-            "structure_synced_through": new_wm, "full_count_synced_at": full_sync,
-            "full_count_age_days": age_days,
+            "structure_synced_through": new_wm, "full_count_synced_at": now,
+            "full_count_age_days": 0.0,
         }
     except Exception:
         logger.exception("Incremental update failed")

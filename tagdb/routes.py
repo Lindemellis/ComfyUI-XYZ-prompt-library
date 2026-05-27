@@ -221,6 +221,32 @@ async def _handle_snapshots_set_active(request: web.Request) -> web.Response:
     return _ok({"ok": True, "active": filename})
 
 
+async def _handle_snapshots_delete(request: web.Request) -> web.Response:
+    try:
+        body = await request.json()
+    except Exception:
+        return _err(400, "invalid JSON body")
+    filename = (body.get("filename") or "").strip()
+    if not filename:
+        return _err(400, "filename required")
+    p = _resolve_snapshot_path(filename)
+    if p is None:
+        return _err(404, f"snapshot not found: {filename}")
+    if p == _working_db_path:
+        return _err(400, "cannot delete the working DB — switch to a snapshot first")
+    if p == _active_snapshot_path:
+        return _err(400, "cannot delete the active snapshot — switch to another first")
+    try:
+        p.unlink()
+        for suffix in ("-wal", "-shm"):
+            side = Path(str(p) + suffix)
+            if side.exists():
+                side.unlink(missing_ok=True)
+    except OSError as exc:
+        return _err(500, f"delete failed: {exc}")
+    return _ok({"ok": True, "deleted": filename})
+
+
 async def _handle_settings_get(request: web.Request) -> web.Response:
     s = _load_settings()
     has_key = bool(s.get("danbooru_api_key"))
@@ -290,14 +316,11 @@ async def _handle_maintain_start(request: web.Request) -> web.Response:
         log = _maintain_log.append
         try:
             with _maintain_lock:
+                # Incremental now refreshes post_count + artist translations.
                 if mode == "full":
-                    # Include reconstruction data (tag_versions) + translations +
-                    # artist other_names so a full rebuild stays self-sufficient.
-                    # (artist_versions — millions of rows — is left to the prebuilt
-                    # dataset + incrementals to avoid a ~45min routine refresh.)
                     _up.run_full_update(working, min_post_count=min_post_count,
                                         login=login, api_key=api_key,
-                                        with_translations=True, with_versions=True,
+                                        with_versions=True,
                                         with_artist_names=True,
                                         progress_cb=log, stop_event=stop_ev)
                 else:
@@ -506,17 +529,21 @@ async def _handle_official_download(request: web.Request) -> web.Response:
         body = {}
     version = body.get("version") or None
     replace_working = bool(body.get("replace_working", False))
-    include_translations = bool(body.get("include_translations", False))
     manifest_url = _load_settings().get("manifest_url") or None
     working = _working_db_path
     data_dir = _data_dir
 
     def _run() -> None:
-        global _maintain_running
+        global _maintain_running, _search_conn
         from . import distribution as _dist
         log = _maintain_log.append
         try:
             with _maintain_lock:
+                # Close cached read conn so Windows can overwrite the file
+                if _search_conn is not None:
+                    try: _search_conn.close()
+                    except Exception: pass
+                    _search_conn = None
                 if working.exists() and not replace_working:
                     log("A working DB already exists. Pass replace_working=true to "
                         "re-seed from the prebuilt dataset (your current working DB "
@@ -529,10 +556,6 @@ async def _handle_official_download(request: web.Request) -> web.Response:
                                               stop_event=_maintain_stop_event)
                 ver = path.name.split("_danbooru.sqlite")[0]
                 _dist.seed_working_db_from_official(path, working, version=ver)
-                if include_translations and _dist.translations_available(manifest_url):
-                    _dist.download_translations(data_dir, working, version=version,
-                                               manifest_url=manifest_url, progress_cb=log,
-                                               stop_event=_maintain_stop_event)
             _adopt_working_db()
             log("Prebuilt dataset installed and active.")
         except Exception as exc:
@@ -545,46 +568,6 @@ async def _handle_official_download(request: web.Request) -> web.Response:
                            "[download] fetching official dataset...", threading.Event())
     return _ok({"ok": True, "message": "download started"})
 
-
-async def _handle_translations_check(request: web.Request) -> web.Response:
-    from . import distribution as _dist
-    manifest_url = _load_settings().get("manifest_url") or None
-    tr = _dist.translations_available(manifest_url)
-    return _ok({
-        "available": bool(tr),
-        "installed": _dist.translations_installed(_working_db_path) if _working_db_path else False,
-        "size_bytes": (tr or {}).get("size_bytes"),
-    })
-
-
-async def _handle_translations_download(request: web.Request) -> web.Response:
-    if _maintain_running:
-        return _err(409, "a maintenance task is already running")
-    if not _data_dir or not _working_db_path or not _working_db_path.exists():
-        return _err(400, "download/seed the base dataset first")
-    manifest_url = _load_settings().get("manifest_url") or None
-    working = _working_db_path
-    data_dir = _data_dir
-
-    def _run() -> None:
-        global _maintain_running, _search_conn
-        from . import distribution as _dist
-        log = _maintain_log.append
-        try:
-            with _maintain_lock:
-                _dist.download_translations(data_dir, working, manifest_url=manifest_url,
-                                           progress_cb=log, stop_event=_maintain_stop_event)
-            _search_conn = None  # FTS changed — drop cached read conn so it reopens
-            log("Translations add-on installed.")
-        except Exception as exc:
-            log(f"Error: {exc}")
-            logger.exception("Translations download failed")
-        finally:
-            _maintain_running = False
-
-    _start_maintain_thread("tagdb-translations", _run, "translations",
-                           "[translations] downloading add-on...", threading.Event())
-    return _ok({"ok": True, "message": "translations download started"})
 
 
 def _export_working_to_local(log) -> Optional[Path]:
@@ -704,12 +687,11 @@ def register(server: Any, data_dir: Path) -> None:
     r.get("/xyz/tagdb/snapshots/active")(_handle_snapshots_get_active)
     r.post("/xyz/tagdb/snapshots/active")(_handle_snapshots_set_active)
     r.post("/xyz/tagdb/snapshots/export")(_handle_snapshots_export)
+    r.delete("/xyz/tagdb/snapshots")(_handle_snapshots_delete)
     r.get("/xyz/tagdb/settings")(_handle_settings_get)
     r.post("/xyz/tagdb/settings")(_handle_settings_post)
     r.get("/xyz/tagdb/official/check")(_handle_official_check)
     r.post("/xyz/tagdb/official/download")(_handle_official_download)
-    r.get("/xyz/tagdb/translations/check")(_handle_translations_check)
-    r.post("/xyz/tagdb/translations/download")(_handle_translations_download)
     r.post("/xyz/tagdb/maintain")(_handle_maintain_start)
     r.get("/xyz/tagdb/maintain/status")(_handle_maintain_status)
     r.post("/xyz/tagdb/maintain/cancel")(_handle_maintain_cancel)

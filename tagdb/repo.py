@@ -79,7 +79,7 @@ def _search_fts(conn: Any, q: str, limit: int) -> Optional[List[Dict[str, Any]]]
     sql = """
         SELECT t.name, t.category, t.post_count, t.is_deprecated,
                COALESCE(GROUP_CONCAT(a.alias, ','), '') AS aliases,
-               (SELECT text FROM translations tr WHERE tr.tag = t.name) AS translations
+               (SELECT text FROM translations tr WHERE tr.tag = t.name AND tr.lang = 'artist') AS translations
         FROM tags_fts f
         JOIN tags t ON t.id = f.rowid
         LEFT JOIN aliases a ON a.canonical = t.name
@@ -108,13 +108,12 @@ def _search_like(conn: Any, q: str, limit: int) -> List[Dict[str, Any]]:
         rows = conn.execute("""
             SELECT t.name, t.category, t.post_count, t.is_deprecated,
                    COALESCE(GROUP_CONCAT(a.alias, ','), '') AS aliases,
-                   (SELECT text FROM translations tr WHERE tr.tag = t.name) AS translations
+                   (SELECT text FROM translations tr WHERE tr.tag = t.name AND tr.lang = 'artist') AS translations
             FROM tags t
             LEFT JOIN aliases a ON a.canonical = t.name
             WHERE t.name LIKE ? OR a.alias LIKE ?
-               OR t.name IN (SELECT tag FROM translations WHERE text LIKE ?)
             GROUP BY t.id ORDER BY t.post_count DESC LIMIT ?
-        """, (pat, pat, pat, limit)).fetchall()
+        """, (pat, pat, limit)).fetchall()
         return [_row_to_dict(r) for r in rows]
 
     prefix = f"{q}%"
@@ -134,7 +133,7 @@ def _search_like(conn: Any, q: str, limit: int) -> List[Dict[str, Any]]:
         amap[row[0]] = row[1]
     tmap: Dict[str, str] = {}
     for row in conn.execute(
-        f"SELECT tag, text FROM translations WHERE tag IN ({qmarks})", names):
+        f"SELECT tag, text FROM translations WHERE tag IN ({qmarks}) AND lang = 'artist'", names):
         tmap[row[0]] = row[1]
     out: List[Dict[str, Any]] = []
     for r in base:

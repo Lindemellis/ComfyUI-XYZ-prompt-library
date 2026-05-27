@@ -28,7 +28,7 @@ import logging
 import time
 import urllib.parse
 from datetime import datetime, timezone
-from typing import Any, Dict, Generator, List, Optional
+from typing import Any, Dict, Generator, Iterable, List, Optional
 
 logger = logging.getLogger("xyz.tagdb.scraper")
 
@@ -444,6 +444,41 @@ def scrape_artist_other_names(
         name = a.get("name")
         if name and names:
             yield {"tag": name, "other_names": names}
+
+
+def scrape_artist_other_names_for(
+    names: Iterable[str],
+    rate_delay: float = DEFAULT_RATE_DELAY,
+    login: Optional[str] = None,
+    api_key: Optional[str] = None,
+    stop_event=None,
+) -> Generator[Dict[str, Any], None, None]:
+    """Yield {tag, other_names:[...]} for specific artists by name.
+
+    Fetches individual artist entries via ``artists.json?search[name]=...``,
+    one request per artist. Much cheaper than ``scrape_artist_other_names``
+    (which scans ALL artists), useful for refreshing translations of only the
+    artists that were affected by an incremental update.
+    """
+    auth = _build_auth_params(login, api_key)
+    session = _make_session()
+    for name in names:
+        if stop_event and stop_event.is_set():
+            break
+        url = f"{_BASE}/artists.json?search[name]={urllib.parse.quote(name)}{auth}"
+        try:
+            resp = session.get(url, timeout=30)
+            resp.raise_for_status()
+            data = resp.json()
+        except Exception:
+            continue
+        if not isinstance(data, list) or len(data) == 0:
+            continue
+        a = data[0]
+        other = a.get("other_names") or []
+        if other:
+            yield {"tag": a.get("name", name), "other_names": other}
+        time.sleep(rate_delay)
 
 
 def scrape_wiki_other_names(

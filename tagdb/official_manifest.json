@@ -1,7 +1,20 @@
 {
   "_comment": "Author-maintained pointer to prebuilt TagDB datasets on GitHub Releases. Build with `python -m tagdb.build_dataset --full --with-versions --with-artists --zip` (base, no translations) and `--translations-dlc` (the optional translations add-on). Upload both .zip to a Release; paste the printed entries here. The .zip lives on the Release, NOT in git.",
-  "latest": "2026-05-24",
+  "latest": "2026-05-26",
   "datasets": [
+    {
+      "version": "2026-05-26",
+      "min_post_count": 50,
+      "tag_count": 118262,
+      "alias_count": 39049,
+      "schema_version": 2,
+      "structure_synced_through": 1779841797,
+      "full_count_synced_at": 1779841797,
+      "url": "https://github.com/Lindemellis/ComfyUI-XYZ-prompt-library/releases/download/tagdb-2026-05-26/danbooru_2026-05-26.sqlite.zip",
+      "sha256": "febbff8c21ce77f045081af5e32f245d66fc2f50b65f660d512810ffab33620c",
+      "size_bytes": 66681936,
+      "compression": "zip"
+    },
     {
       "version": "2026-05-24",
       "min_post_count": 50,
@@ -10,12 +23,12 @@
       "schema_version": 2,
       "structure_synced_through": 1779666111,
       "full_count_synced_at": 1779666111,
-      "url": "https://github.com/zhupeter010903/ComfyUI-XYZ-prompt-library/releases/download/tagdb-2026-05-24/danbooru_2026-05-24.sqlite.zip",
+      "url": "https://github.com/Lindemellis/ComfyUI-XYZ-prompt-library/releases/download/tagdb-2026-05-24/danbooru_2026-05-24.sqlite.zip",
       "sha256": "ca4135c68c77b752a4a44fc60be03483d9eff6ad867e0e9c61c190d6213e0735",
       "size_bytes": 40298356,
       "compression": "zip",
       "translations": {
-        "url": "https://github.com/zhupeter010903/ComfyUI-XYZ-prompt-library/releases/download/tagdb-2026-05-24/translations_2026-05-24.sqlite.zip",
+        "url": "https://github.com/Lindemellis/ComfyUI-XYZ-prompt-library/releases/download/tagdb-2026-05-24/translations_2026-05-24.sqlite.zip",
         "sha256": "8071c8f6445ed277d810b0b13f7813cc060038d93f6550dfe8f45a75b4ee9da5",
         "size_bytes": 4906827,
         "compression": "zip"
