@@ -513,9 +513,13 @@ function getCaretCoordinates(el) {
 
   const rect = el.getBoundingClientRect();
   const lineH = parseFloat(computed.lineHeight) || parseFloat(computed.fontSize) * 1.2;
+  // Viewport caret position = textarea's viewport top/left + the caret's offset
+  // inside the (unscrolled) mirror content, MINUS the textarea's own scroll. The
+  // scroll term must be subtracted; adding it pushed the dropdown far off in a
+  // scrolled multiline box, where the flip-above fallback then covered the line.
   const coords = {
-    top:  rect.top  + el.scrollTop  + span.offsetTop  + (parseInt(computed.borderTopWidth)  || 0),
-    left: rect.left + el.scrollLeft + span.offsetLeft + (parseInt(computed.borderLeftWidth) || 0),
+    top:  rect.top  - el.scrollTop  + span.offsetTop  + (parseInt(computed.borderTopWidth)  || 0),
+    left: rect.left - el.scrollLeft + span.offsetLeft + (parseInt(computed.borderLeftWidth) || 0),
     lineHeight: lineH,
   };
   document.body.removeChild(div);
@@ -734,6 +738,14 @@ class TagAutocompleteUI {
     const tags = _applyMinCount(tagsRaw).map((t) => ({ ...t, kind: 'tag' }));
     const results = _mergeTagSources(tags, libRaw);
     if (!results.length) { this.hide(); return; }
+    // Exact match first: if a candidate's name equals what the user typed, surface
+    // it as the top option (e.g. typing "iumu" puts the "iumu" tag first, ahead of
+    // higher-post-count tags like "maki_(natoriumu)" that merely contain it).
+    const qc = _canonicalName(info.query);
+    if (qc) {
+      const i = results.findIndex((c) => _canonicalName(c.name) === qc);
+      if (i > 0) results.unshift(results.splice(i, 1)[0]);
+    }
     this._open(el, results, info.rangeStart);
   }
 
@@ -849,6 +861,10 @@ class TagAutocompleteUI {
     } else {
       core = _normalizeTagInsert(cand.name);
     }
+
+    // The splice below dispatches a trusted `input` event; tell the handler to
+    // ignore that one so the dropdown doesn't reopen on what we just inserted.
+    if (this._handler) this._handler._suppressInput = true;
 
     if (this._isRelated && cand.kind === 'tag' && !cand._isSelf) {
       // Related-tag insertion: insert AFTER the original clicked token.
@@ -1256,6 +1272,13 @@ class TagAutocompleteUI {
   // Position the dropdown.
   // Autocomplete mode: below the textarea (near where the user is typing).
   // Info mode (related/entries/ref): to the right/left of the textarea.
+  //
+  // IMPORTANT: ComfyUI's canvas applies a CSS transform scale on the node container.
+  // getBoundingClientRect() already accounts for this transform (viewport coords),
+  // but getCaretCoordinates uses a mirror div in document.body (un-transformed),
+  // so its span.offsetTop/offsetLeft are in LOCAL (unscaled) space. We must scale
+  // the local caret offset to match the viewport – otherwise the dropdown drifts
+  // and covers the text being typed when the canvas is zoomed in/out.
   _position(el) {
     const rect = el.getBoundingClientRect();
     const rootH = this._root.offsetHeight || 200;
@@ -1263,6 +1286,7 @@ class TagAutocompleteUI {
     const vH = window.innerHeight;
     const vW = window.innerWidth;
     const gap = 4;
+    const scale = window.app?.canvas?.ds?.scale ?? 1.0;
     let t, l;
 
     if (this._isInfo) {
@@ -1273,11 +1297,18 @@ class TagAutocompleteUI {
       t = rect.top;
       if (t + rootH > vH - 8) t = Math.max(4, vH - rootH - 8);
     } else {
-      // Autocomplete: below the text cursor (caret), aligned to caret horizontal
-      const { top, left, lineHeight } = getCaretCoordinates(el);
-      t = top + lineHeight + gap;
-      l = left;
-      if (t + rootH > vH - 8) t = top - rootH - gap;
+      // Autocomplete: below the text cursor (caret), aligned to caret horizontal.
+      // getCaretCoordinates mixes viewport element position with local caret
+      // offset (from an un-transformed mirror div), so decompose and re-scale.
+      const { top: ct, left: cl, lineHeight: clh } = getCaretCoordinates(el);
+      const localY = ct - rect.top;   // caret offset from element top (unscaled)
+      const localX = cl - rect.left;  // caret offset from element left (unscaled)
+      const sy = localY * scale;
+      const sx = localX * scale;
+      const slh = clh * scale;
+      t = rect.top + sy + slh + gap;
+      l = rect.left + sx;
+      if (t + rootH > vH - 8) t = rect.top + sy - rootH - gap;
       if (t < 4) t = 4;
       if (l + rootW > vW - 8) l = vW - rootW - 8;
       if (l < 4) l = 4;
@@ -1302,6 +1333,11 @@ class TagACHandler {
     this.ui        = new TagAutocompleteUI();
     this._timer    = null;
     this._keyMods  = new Map();  // key → had-modifier
+    // Set by the UI just before an insertion. Committing a candidate dispatches a
+    // trusted `input` event (execCommand insertText); without this guard that event
+    // would re-open the dropdown right after a selection (and after a related-tag
+    // insert). One-shot: consumed by the input event the insertion itself fires.
+    this._suppressInput = false;
   }
 
   _debounce(el) {
@@ -1322,6 +1358,13 @@ class TagACHandler {
 
   handleInput(e) {
     if (!settings.enabled || !e.isTrusted) return;
+    // A just-committed insertion fired this event — swallow it so the dropdown
+    // doesn't reopen on the candidate we just chose.
+    if (this._suppressInput) {
+      this._suppressInput = false;
+      clearTimeout(this._timer);
+      return;
+    }
     this._debounce(e.target);
   }
 
@@ -1415,6 +1458,7 @@ class TagACHandler {
 // ─── Extension registration ───────────────────────────────────────────────────
 
 const handler = new TagACHandler();
+handler.ui._handler = handler;   // let the UI suppress the re-trigger after a commit
 
 // opts.related  — this textarea supports click-a-token → related tags
 // opts.getDelimiter — function returning the delimiter to use for insertions
