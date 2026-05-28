@@ -93,9 +93,12 @@ const state = {
 
 // ─── Persistence ────────────────────────────────────────────────────────────
 
-const EDITOR_KEY  = 'plv2_win_editor_v1';
-const LIBRARY_KEY = 'plv2_win_library_v1';
-const SNAP_KEY    = 'plv2_snap_v1';
+// v2: v1 entries may hold corrupted {0,0,0,0} geometry saved while a window was hidden
+// (see _saveGeom guard). Bumping the keys gives those users a clean default on first launch.
+const EDITOR_KEY  = 'plv2_win_editor_v2';
+const LIBRARY_KEY = 'plv2_win_library_v2';
+const PREVIEW_KEY = 'plv2_win_preview_v2';
+const SNAP_KEY    = 'plv2_snap_v2';
 
 const EDITOR_DEFS  = { x: 60,  y: 80, w: 520, h: 560 };
 const LIBRARY_DEFS = { x: 600, y: 80, w: 620, h: 560, treeW: 250 };
@@ -105,12 +108,21 @@ function _loadGeom(key, defs) {
   catch { return { ...defs }; }
 }
 function _saveGeom(key, el, extra = {}) {
-  if (!el) return;
+  if (!el || !key) return;
+  // A hidden (display:none) window reports offsetWidth/Height/Left/Top = 0. The
+  // ResizeObserver fires on the hide transition, so without this guard closing a window
+  // would persist {0,0,0,0} and clobber the real geometry — the window then "forgets"
+  // its position/size on the next launch. Only persist a laid-out, non-zero box.
+  if (el.offsetWidth === 0 || el.offsetHeight === 0) return;
   try {
     localStorage.setItem(key, JSON.stringify({
       x: el.offsetLeft, y: el.offsetTop, w: el.offsetWidth, h: el.offsetHeight, ...extra,
     }));
   } catch {}
+}
+
+function _hasSavedGeom(key) {
+  try { return !!localStorage.getItem(key); } catch { return false; }
 }
 function _winKey(w) { return w === libraryWin ? 'library' : w === previewWin ? 'preview' : null; }
 function _winFromKey(k) { return k === 'library' ? libraryWin : k === 'preview' ? previewWin : null; }
@@ -170,6 +182,11 @@ const VIEW_MARGIN    = 64;  // min px of a window kept on-screen so it stays gra
 let _snapHL = null;         // blue highlight bar
 let _composBg = null;       // shared backdrop that casts the composite's unified shadow
 let _reflowing = false;     // guard against ResizeObserver feedback loops
+// Composite resize model: internal seams are draggable splitters (reallocate width
+// between the two adjacent windows); only the rightmost window has a corner resize
+// handle, which scales ALL snapped windows proportionally + the shared height.
+let _seamHandles = [];      // vertical splitter handles, one per internal seam
+let _compResize = null;     // bottom-right corner handle on the rightmost composite window
 
 // ── Viewport clamping (keep windows reachable) ──────────────────────────────
 
@@ -219,30 +236,35 @@ function _ensureComposBg() {
 }
 function _updateComposBg() {
   const comp = _orderedComposite();
-  if (comp.length < 2) { if (_composBg) _composBg.style.display = 'none'; return; }
+  if (comp.length < 2) { if (_composBg) _composBg.style.display = 'none'; _hideCompHandles(); return; }
   const bg = _ensureComposBg();
   const first = comp[0].el, last = comp[comp.length - 1].el;
   const left = first.offsetLeft, right = last.offsetLeft + last.offsetWidth;
-  const zMin = Math.min(...comp.map(w => parseInt(w.el.style.zIndex) || _zTop));
+  const zs = comp.map(w => parseInt(w.el.style.zIndex) || _zTop);
+  const zMin = Math.min(...zs), zMax = Math.max(...zs);
   Object.assign(bg.style, {
     left: left + 'px', top: editorWin.el.offsetTop + 'px',
     width: (right - left) + 'px', height: editorWin.el.offsetHeight + 'px',
     zIndex: String(zMin - 1), display: 'block',
   });
+  // Seam splitters + the rightmost corner handle ride above the composite windows.
+  _positionCompHandles(comp, zMax);
 }
 function _applySnapStyles() {
-  // Reset every window to its standalone look first.
+  // Reset every window to its standalone look first (incl. its own native resize grip).
   for (const w of [editorWin, libraryWin, previewWin]) {
     if (!w || !w.el) continue;
     w.el.style.boxShadow = '0 8px 32px rgba(0,0,0,.65)';
     w.el.style.borderRadius = '8px';
     w.el.style.borderRight = '1px solid #45475a';
+    w.el.style.resize = 'both';
   }
   const comp = _orderedComposite();
-  if (comp.length < 2) { if (_composBg) _composBg.style.display = 'none'; _setHandles(); return; }
+  if (comp.length < 2) { if (_composBg) _composBg.style.display = 'none'; _hideCompHandles(); _setHandles(); return; }
   comp.forEach((w, i) => {
     const s = w.el.style;
     s.boxShadow = 'none';
+    s.resize = 'none';   // snapped: sized via seam splitters + the rightmost corner handle
     const first = i === 0, last = i === comp.length - 1;
     s.borderTopLeftRadius = s.borderBottomLeftRadius = first ? '8px' : '0';
     s.borderTopRightRadius = s.borderBottomRightRadius = last ? '8px' : '0';
@@ -259,6 +281,7 @@ function _focus(win) {
     if (_composBg) _composBg.style.zIndex = String(z);
     for (const w of _orderedComposite()) w.el.style.zIndex = String(z + 1);
     _zTop = z + 1;
+    _updateComposBg();   // keep seam/corner handles above the freshly-raised composite
   } else if (win.el) {
     win.el.style.zIndex = String(++_zTop);
   }
@@ -271,7 +294,7 @@ function _attach(w, side) {
   if (attach.left === w) attach.left = null;
   if (attach.right === w) attach.right = null;
   attach[side] = w;
-  _reflowComposite(true);
+  _reflowComposite();
   _applySnapStyles();
   _clampComposite(); _updateComposBg(); _focus(editorWin);
   _saveSnap();
@@ -289,21 +312,134 @@ function _detach(w) {
   if (previewWin && previewWin.isVisible()) _renderPreview();
 }
 
-/** Re-impose composite geometry: editor anchors, attached windows flush + locked. */
-// `src` is the window that was just resized (its height becomes the shared
-// height); the editor stays the horizontal anchor. So resizing ANY snapped
-// window adjusts the whole composite's height (#1).
-function _reflowComposite(src) {
-  if (!_snapActive()) return;
+/** Lay the ordered composite out flush from `left`/`top`, applying per-window `widths`
+ *  and a shared `height`. The single source of truth for composite geometry. */
+function _applyWidths(comp, widths, left, top, height) {
   _reflowing = true;
-  const ev = editorWin.el;
-  const top = ev.offsetTop;
-  const H = ((src && src.el) ? src.el : ev).offsetHeight;
-  for (const w of _orderedComposite()) { w.el.style.top = top + 'px'; w.el.style.height = H + 'px'; }
-  if (attach.left)  attach.left.el.style.left  = (ev.offsetLeft - attach.left.el.offsetWidth) + 'px';
-  if (attach.right) attach.right.el.style.left = (ev.offsetLeft + ev.offsetWidth) + 'px';
+  let x = left;
+  comp.forEach((w, i) => {
+    const s = w.el.style;
+    s.width = Math.round(widths[i]) + 'px';
+    s.height = Math.round(height) + 'px';
+    s.top = Math.round(top) + 'px';
+    s.left = Math.round(x) + 'px';
+    x += Math.round(widths[i]);
+  });
   _updateComposBg();
   requestAnimationFrame(() => { _reflowing = false; });
+}
+
+/** Re-impose composite geometry keeping the EDITOR anchored horizontally (used on
+ *  attach / snap-restore). Each window keeps its current width; height = editor's. */
+function _reflowComposite() {
+  if (!_snapActive()) return;
+  const comp = _orderedComposite();
+  const ev = editorWin.el;
+  const left = ev.offsetLeft - (attach.left ? attach.left.el.offsetWidth : 0);
+  _applyWidths(comp, comp.map(w => w.el.offsetWidth), left, ev.offsetTop, ev.offsetHeight);
+}
+
+function _minW(w) { return parseInt(w.el.style.minWidth) || 320; }
+
+/** Drag a seam splitter at internal-seam index `i` (between comp[i] and comp[i+1]):
+ *  reallocate width between the two neighbours; total composite width is unchanged. */
+function _startSeamDrag(e, i) {
+  if (e.button !== 0) return;
+  e.preventDefault(); e.stopPropagation();
+  _focus(editorWin);
+  const comp = _orderedComposite();
+  if (i + 1 >= comp.length) return;
+  const a = comp[i], b = comp[i + 1];
+  const wa0 = a.el.offsetWidth, wb0 = b.el.offsetWidth;
+  const minA = _minW(a), minB = _minW(b);
+  const left0 = comp[0].el.offsetLeft, top0 = editorWin.el.offsetTop, H = editorWin.el.offsetHeight;
+  const sx = e.clientX;
+  document.body.style.cursor = 'col-resize'; document.body.style.userSelect = 'none';
+  const move = ev => {
+    let dx = ev.clientX - sx;
+    dx = Math.max(dx, minA - wa0);   // keep a ≥ minA
+    dx = Math.min(dx, wb0 - minB);   // keep b ≥ minB
+    const widths = comp.map(w => w.el.offsetWidth);
+    widths[i] = wa0 + dx; widths[i + 1] = wb0 - dx;
+    _applyWidths(comp, widths, left0, top0, H);
+  };
+  const up = () => {
+    document.body.style.cursor = ''; document.body.style.userSelect = '';
+    document.removeEventListener('mousemove', move);
+    document.removeEventListener('mouseup', up);
+    for (const w of comp) w.save();
+  };
+  document.addEventListener('mousemove', move);
+  document.addEventListener('mouseup', up);
+}
+
+/** Drag the rightmost window's corner handle: scale ALL widths proportionally and set
+ *  the shared height. The composite's top-left stays fixed; bottom-right follows. */
+function _startCompResize(e) {
+  if (e.button !== 0) return;
+  e.preventDefault(); e.stopPropagation();
+  _focus(editorWin);
+  const comp = _orderedComposite();
+  const widths0 = comp.map(w => w.el.offsetWidth);
+  const W0 = widths0.reduce((a, b) => a + b, 0);
+  const H0 = editorWin.el.offsetHeight;
+  const left0 = comp[0].el.offsetLeft, top0 = editorWin.el.offsetTop;
+  const minRatio = Math.max(...comp.map((w, i) => _minW(w) / widths0[i]));
+  const sx = e.clientX, sy = e.clientY;
+  document.body.style.cursor = 'nwse-resize'; document.body.style.userSelect = 'none';
+  const move = ev => {
+    const ratio = Math.max(minRatio, (W0 + (ev.clientX - sx)) / W0);
+    const widths = widths0.map(w => w * ratio);
+    const H = Math.max(320, H0 + (ev.clientY - sy));
+    _applyWidths(comp, widths, left0, top0, H);
+  };
+  const up = () => {
+    document.body.style.cursor = ''; document.body.style.userSelect = '';
+    document.removeEventListener('mousemove', move);
+    document.removeEventListener('mouseup', up);
+    for (const w of comp) w.save();
+  };
+  document.addEventListener('mousemove', move);
+  document.addEventListener('mouseup', up);
+}
+
+function _hideCompHandles() {
+  for (const h of _seamHandles) h.style.display = 'none';
+  if (_compResize) _compResize.style.display = 'none';
+}
+
+/** Position the seam splitters + the rightmost corner handle over the composite. */
+function _positionCompHandles(comp, zMax) {
+  const top = editorWin.el.offsetTop, H = editorWin.el.offsetHeight;
+  const z = String((zMax || _zTop) + 1);
+  const nSeams = comp.length - 1;
+  let x = comp[0].el.offsetLeft;
+  for (let i = 0; i < nSeams; i++) {
+    x += comp[i].el.offsetWidth;
+    let h = _seamHandles[i];
+    if (!h) {
+      h = _div('position:fixed;width:9px;cursor:col-resize;z-index:100000;');
+      const idx = i;
+      h.addEventListener('mousedown', ev => _startSeamDrag(ev, idx));
+      document.body.appendChild(h);
+      _seamHandles[i] = h;
+    }
+    Object.assign(h.style, { left: (x - 4) + 'px', top: top + 'px', height: H + 'px', display: 'block', zIndex: z });
+  }
+  for (let i = nSeams; i < _seamHandles.length; i++) _seamHandles[i].style.display = 'none';
+
+  if (!_compResize) {
+    _compResize = _div('position:fixed;width:18px;height:18px;cursor:nwse-resize;z-index:100000;'
+      + 'background:linear-gradient(135deg,transparent 45%,#6c7086 45%,#6c7086 55%,transparent 55%,transparent 70%,#6c7086 70%,#6c7086 80%,transparent 80%);');
+    _compResize.addEventListener('mousedown', _startCompResize);
+    document.body.appendChild(_compResize);
+  }
+  const last = comp[comp.length - 1].el;
+  Object.assign(_compResize.style, {
+    left: (last.offsetLeft + last.offsetWidth - 18) + 'px',
+    top: (last.offsetTop + last.offsetHeight - 18) + 'px',
+    display: 'block', zIndex: z,
+  });
 }
 
 /** Pick the side opposite the library (or a free side) for an auto-snap. */
@@ -525,6 +661,7 @@ function _makeWindow({ key, title, defs, minW, buildBody, openOtherLabel, openOt
       display: 'none', flexDirection: 'column', zIndex: String(++_zTop),
       background: '#1e1e2e', border: '1px solid #45475a', borderRadius: '8px',
       boxShadow: '0 8px 32px rgba(0,0,0,.65)', overflow: 'hidden', resize: 'both',
+      boxSizing: 'border-box',   // so style.width === offsetWidth for exact composite math
       fontFamily: 'ui-sans-serif,system-ui,sans-serif', fontSize: '13px', color: '#cdd6f4',
       minWidth: (minW || 320) + 'px', minHeight: '320px',
     });
@@ -568,11 +705,12 @@ function _makeWindow({ key, title, defs, minW, buildBody, openOtherLabel, openOt
     win.el = el; win.body = body; win.dragHandle = handle;
     if (buildBody) buildBody(body, win);
 
-    // Persist + keep composite glued on resize.
+    // Persist geometry on native (standalone) resize. While snapped, native resize is
+    // disabled and the composite is sized via the seam/corner handles, so this only
+    // fires for free-floating windows (and is guarded against the programmatic reflow).
     win._ro = new ResizeObserver(() => {
       if (_reflowing) return;
       win.save();
-      if (_isSnapped(win)) _reflowComposite(win);   // resized window drives the shared height (#1)
     });
     win._ro.observe(el);
   }
@@ -629,7 +767,7 @@ let _pvLayoutKey = '';      // current DOM layout signature (rebuild only when i
 let _pvOuts = {};           // section key → output <div> (reused in place to avoid flicker)
 
 const previewWin = _makeWindow({
-  key: 'plv2_win_preview_v1', title: 'Preview', defs: { x: 1180, y: 80, w: 380, h: 520 }, minW: 240,
+  key: PREVIEW_KEY, title: 'Preview', defs: { x: 1180, y: 80, w: 380, h: 520 }, minW: 240,
   buildBody(body) {
     body.style.flexDirection = 'column';
     _previewBody = _div('flex:1;display:flex;flex-direction:column;min-height:0;overflow:hidden;');
@@ -724,7 +862,14 @@ previewWin.showNode = (nodeId) => {
   _renderPreview();
 };
 
-previewWin.onShow(() => { if (!_isSnapped(previewWin) && _pvSource !== 'node') _positionPreview(); _renderPreview(); });
+previewWin.onShow(() => {
+  // Auto-place next to the editor only on first use; once a geometry has been saved
+  // (user moved/resized it, or a prior auto-placement), respect the remembered one.
+  if (!_isSnapped(previewWin) && _pvSource !== 'node' && !_hasSavedGeom(PREVIEW_KEY)) {
+    _positionPreview();
+  }
+  _renderPreview();
+});
 
 let _previewTimer = null;
 document.addEventListener('plv2:editor-changed', e => {
