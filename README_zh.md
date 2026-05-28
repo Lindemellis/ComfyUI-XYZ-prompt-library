@@ -2,7 +2,7 @@
 
 [English](README.md) | **中文**
 
-一个 ComfyUI 自定义节点包，包含三个较大的工具——**Danbooru 标签自动补全**、**分层提示词库（V2）**、**图片画廊**——以及若干小型文本/提示词工具节点。
+一个 ComfyUI 自定义节点包，包含三个较大的工具——**Danbooru（+ 可选 Gelbooru）标签自动补全**、**分层提示词库（V2）**、**图片画廊**——以及若干小型文本/提示词工具节点。
 
 每个工具都有独立手册：
 
@@ -52,12 +52,12 @@
 
 | 标签页 | 控制项 |
 |---|---|
-| Autocomplete | 总开关、最大建议条数、隐藏冷门标签 |
+| Autocomplete | 总开关、最大建议条数、隐藏冷门标签、**Danbooru / Gelbooru 来源** |
 | Insertion | 下划线→空格、自动逗号、转义括号、全角→半角 |
 | Library | 把你的提示词库作为补全来源；条目引用建议 |
 | Related | 点击标签查相关标签 + 缓存有效期 |
 | Preview | 悬停显示画师作品 / 标签预览图（默认均**关闭**） |
-| Tag dataset | Danbooru 凭据、预构建数据集、更新、快照、重建 |
+| Tag dataset | **Danbooru / Gelbooru 两个分页**：凭据、预构建数据集、更新、快照、重建 |
 | About | 版本 / 信息 |
 
 每个 Prompt Library V2 节点上也有各自的 **Library / Editor / Preview** 按钮。
@@ -86,7 +86,10 @@
 Release 以 `min_post_count = 50` 构建。如果你用更低阈值自己更新，会得到更多标签。
 
 **标签数量突然变少？**
-可能是切换了活动快照。在 *Tag dataset → Snapshots* 里，点工作库（`tagdb.sqlite`）那一行的 **Use** 切回去。
+可能是切换了活动快照。在 *Tag dataset → Snapshots* 里，点工作库（`danbooru.sqlite`）那一行的 **Use** 切回去。
+
+**Gelbooru 来源是什么？**
+可选的第二套标签集。在 *设置 → Autocomplete → Gelbooru tags* 启用，在 *Tag dataset → Gelbooru* 安装数据集。两个来源都开启时，建议会合并去重，每行显示可点击的 **D**/**G** 角标（Danbooru wiki / Gelbooru 帖子）。冲突时以 Danbooru 为准；Gelbooru 仅当前快照（无时间回溯）。详见[标签手册](tagdb/README_zh.md#gelbooru第二来源)。
 
 ---
 

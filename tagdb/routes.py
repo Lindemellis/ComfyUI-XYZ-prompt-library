@@ -32,8 +32,16 @@ _registered = False
 
 _data_dir: Optional[Path] = None
 _active_snapshot_path: Optional[Path] = None   # DB that search reads (defaults to working)
-_working_db_path: Optional[Path] = None        # the mutable working DB
+_working_db_path: Optional[Path] = None        # the mutable working DB (danbooru)
 _settings_path: Optional[Path] = None
+
+# Gelbooru is a second, independent source kept in its own file (gelbooru.sqlite).
+# It is "current-only" (no time machine) — there is just one gelbooru working DB,
+# auto-active whenever the file is present. See the gelbooru plan.
+_gelbooru_db_path: Optional[Path] = None        # gelbooru.sqlite working DB (None if not installed)
+_gelbooru_active_snapshot_path: Optional[Path] = None  # selected gelbooru snapshot (else working)
+_gelbooru_search_conn = None
+_gelbooru_search_conn_path: Optional[Path] = None
 
 # Maintain task state
 _maintain_thread: Optional[threading.Thread] = None
@@ -95,8 +103,11 @@ def _resolve_snapshot_path(filename: str) -> Optional[Path]:
     """Resolve a snapshot filename to a path, searching working/official/local/flat."""
     if not _data_dir:
         return None
-    if filename in ("tagdb.sqlite", "working") and _working_db_path:
+    # "working" / the working filename (and the legacy "tagdb.sqlite" name) → working DB.
+    if filename in ("danbooru.sqlite", "tagdb.sqlite", "working") and _working_db_path:
         return _working_db_path if _working_db_path.exists() else None
+    if filename == "gelbooru.sqlite" and _gelbooru_db_path:
+        return _gelbooru_db_path if _gelbooru_db_path.exists() else None
     snap_dir = _data_dir / "snapshots"
     for cand in (snap_dir / "official" / filename,
                  snap_dir / "local" / filename,
@@ -107,12 +118,55 @@ def _resolve_snapshot_path(filename: str) -> Optional[Path]:
 
 
 def _active_db() -> Optional[Path]:
-    """The DB search reads: the explicit active snapshot, else the working DB."""
+    """The danbooru DB search reads: the explicit active snapshot, else the working DB."""
     if _active_snapshot_path and _active_snapshot_path.exists():
         return _active_snapshot_path
     if _working_db_path and _working_db_path.exists():
         return _working_db_path
     return None
+
+
+def _gelbooru_active_db() -> Optional[Path]:
+    """The gelbooru DB search reads: the selected gelbooru snapshot, else the working DB."""
+    if _gelbooru_active_snapshot_path and _gelbooru_active_snapshot_path.exists():
+        return _gelbooru_active_snapshot_path
+    if _gelbooru_db_path and _gelbooru_db_path.exists():
+        return _gelbooru_db_path
+    return None
+
+
+def _gelbooru_search_connection():
+    """Return (conn, path) reusing a cached gelbooru read connection; reopen on switch."""
+    global _gelbooru_search_conn, _gelbooru_search_conn_path
+    active = _gelbooru_active_db()
+    if active is None:
+        return None, None
+    if _gelbooru_search_conn is None or _gelbooru_search_conn_path != active:
+        if _gelbooru_search_conn is not None:
+            try:
+                _gelbooru_search_conn.close()
+            except Exception:
+                pass
+        from . import db as _db
+        _gelbooru_search_conn = _db.connect_read(active)
+        _gelbooru_search_conn_path = active
+    return _gelbooru_search_conn, active
+
+
+def _enabled_sources(request: web.Request) -> List[str]:
+    """Sources to search, from the ?source= filter intersected with what's installed.
+
+    `?source=danbooru,gelbooru` (or a single value); absent → all installed sources.
+    Danbooru is always listed first so it stays authoritative in the merge.
+    """
+    raw = request.rel_url.query.get("source", "").strip().lower()
+    requested = {s.strip() for s in raw.split(",") if s.strip()} if raw else None
+    out: List[str] = []
+    if _active_db() is not None and (requested is None or "danbooru" in requested):
+        out.append("danbooru")
+    if _gelbooru_active_db() is not None and (requested is None or "gelbooru" in requested):
+        out.append("gelbooru")
+    return out
 
 
 def _adopt_working_db() -> None:
@@ -167,12 +221,15 @@ def _get_credentials() -> tuple[Optional[str], Optional[str]]:
     return s.get("danbooru_login") or None, s.get("danbooru_api_key") or None
 
 
+def _get_gelbooru_credentials() -> tuple[Optional[str], Optional[str]]:
+    """Return (api_key, user_id) from persisted settings, or (None, None)."""
+    s = _load_settings()
+    return s.get("gelbooru_api_key") or None, s.get("gelbooru_user_id") or None
+
+
 # ─── Route handlers ───────────────────────────────────────────────────────────
 
 async def _handle_search(request: web.Request) -> web.Response:
-    conn, active = _search_connection()
-    if not active:
-        return _ok([])
     q = request.rel_url.query.get("q", "").strip()
     if not q:
         return _ok([])
@@ -183,8 +240,34 @@ async def _handle_search(request: web.Request) -> web.Response:
         limit = 20
 
     from . import repo as _repo
-    results = _repo.search_tags(q, active, limit=limit, conn=conn)
-    return _ok(results)
+    sources = _enabled_sources(request)
+    if not sources:
+        return _ok([])
+
+    # Single source → the legacy single-source payload (rendered identically), but each
+    # row is stamped with its `sources` so the frontend can pick the correct jump-link;
+    # the badge UI only renders when ≥2 sources are present, so the look is unchanged.
+    if len(sources) == 1:
+        if sources[0] == "danbooru":
+            conn, active = _search_connection()
+        else:
+            conn, active = _gelbooru_search_connection()
+        if not active:
+            return _ok([])
+        rows = _repo.search_tags(q, active, limit=limit, conn=conn)
+        for r in rows:
+            r["sources"] = sources
+        return _ok(rows)
+
+    tuples = []
+    for src in sources:  # danbooru first → authoritative in the merge
+        if src == "danbooru":
+            conn, active = _search_connection()
+        else:
+            conn, active = _gelbooru_search_connection()
+        if active:
+            tuples.append((src, active, conn))
+    return _ok(_repo.search_tags_multi(tuples, q, limit=limit))
 
 
 async def _handle_snapshots_list(request: web.Request) -> web.Response:
@@ -200,7 +283,7 @@ async def _handle_snapshots_get_active(request: web.Request) -> web.Response:
 
 
 async def _handle_snapshots_set_active(request: web.Request) -> web.Response:
-    global _active_snapshot_path
+    global _active_snapshot_path, _gelbooru_active_snapshot_path
     try:
         body = await request.json()
     except Exception:
@@ -214,11 +297,20 @@ async def _handle_snapshots_set_active(request: web.Request) -> web.Response:
     if p is None:
         return _err(404, f"snapshot not found: {filename}")
 
-    _active_snapshot_path = p
+    # Route by the snapshot's source: gelbooru files set the gelbooru active path,
+    # everything else (danbooru/recon/legacy) sets the danbooru active path.
+    from . import repo as _repo
+    source = (_repo.get_snapshot_meta(p).get("source") or "").lower()
     settings = _load_settings()
-    settings["active_snapshot"] = filename
+    if source == "gelbooru":
+        _gelbooru_active_snapshot_path = p
+        _reset_gelbooru_conn()
+        settings["active_gelbooru_snapshot"] = filename
+    else:
+        _active_snapshot_path = p
+        settings["active_snapshot"] = filename
     _save_settings(settings)
-    return _ok({"ok": True, "active": filename})
+    return _ok({"ok": True, "active": filename, "source": source or "danbooru"})
 
 
 async def _handle_snapshots_delete(request: web.Request) -> web.Response:
@@ -232,9 +324,9 @@ async def _handle_snapshots_delete(request: web.Request) -> web.Response:
     p = _resolve_snapshot_path(filename)
     if p is None:
         return _err(404, f"snapshot not found: {filename}")
-    if p == _working_db_path:
+    if p in (_working_db_path, _gelbooru_db_path):
         return _err(400, "cannot delete the working DB — switch to a snapshot first")
-    if p == _active_snapshot_path:
+    if p in (_active_snapshot_path, _gelbooru_active_snapshot_path):
         return _err(400, "cannot delete the active snapshot — switch to another first")
     try:
         p.unlink()
@@ -250,6 +342,7 @@ async def _handle_snapshots_delete(request: web.Request) -> web.Response:
 async def _handle_settings_get(request: web.Request) -> web.Response:
     s = _load_settings()
     has_key = bool(s.get("danbooru_api_key"))
+    has_gel_key = bool(s.get("gelbooru_api_key"))
     # api_key is masked by default; ?reveal=1 returns the real value so the panel's
     # "Show" button can display the user's own stored key (localhost, single user).
     reveal = request.rel_url.query.get("reveal") in ("1", "true")
@@ -257,6 +350,10 @@ async def _handle_settings_get(request: web.Request) -> web.Response:
         "danbooru_login":   s.get("danbooru_login", ""),
         "danbooru_api_key": (s.get("danbooru_api_key", "") if reveal else ("***" if has_key else "")),
         "has_credentials":  bool(s.get("danbooru_login") and has_key),
+        "gelbooru_user_id": s.get("gelbooru_user_id", ""),
+        "gelbooru_api_key": (s.get("gelbooru_api_key", "") if reveal else ("***" if has_gel_key else "")),
+        "has_gelbooru_credentials": bool(s.get("gelbooru_user_id") and has_gel_key),
+        "gelbooru_installed": bool(_gelbooru_active_db()),
     })
 
 
@@ -271,6 +368,10 @@ async def _handle_settings_post(request: web.Request) -> web.Response:
         settings["danbooru_login"] = str(body["danbooru_login"]).strip()
     if "danbooru_api_key" in body:
         settings["danbooru_api_key"] = str(body["danbooru_api_key"]).strip()
+    if "gelbooru_user_id" in body:
+        settings["gelbooru_user_id"] = str(body["gelbooru_user_id"]).strip()
+    if "gelbooru_api_key" in body:
+        settings["gelbooru_api_key"] = str(body["gelbooru_api_key"]).strip()
     _save_settings(settings)
     return _ok({"ok": True})
 
@@ -570,20 +671,22 @@ async def _handle_official_download(request: web.Request) -> web.Response:
 
 
 
-def _export_working_to_local(log) -> Optional[Path]:
-    """Copy the working DB into snapshots/local/ as a dated checkpoint."""
+def _export_working_to_local(log, working_path: Optional[Path] = None,
+                             default_label: str = "danbooru") -> Optional[Path]:
+    """Copy a working DB into snapshots/local/ as a dated checkpoint (danbooru/gelbooru)."""
     import shutil
     import time as _t
-    if not (_working_db_path and _working_db_path.exists() and _data_dir):
+    wp = working_path or _working_db_path
+    if not (wp and wp.exists() and _data_dir):
         return None
     from . import repo as _repo
-    meta = _repo.get_snapshot_meta(_working_db_path)
-    label = meta.get("label", "danbooru")
+    meta = _repo.get_snapshot_meta(wp)
+    label = meta.get("label", default_label)
     stamp = _t.strftime("%Y-%m-%d_%H%M%S")
     dst = _data_dir / "snapshots" / "local" / f"{stamp}_{label}.sqlite"
     dst.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy(_working_db_path, dst)
-    log(f"Exported current working DB → snapshots/local/{dst.name}")
+    shutil.copy(wp, dst)
+    log(f"Exported {label} working DB → snapshots/local/{dst.name}")
     return dst
 
 
@@ -591,6 +694,14 @@ async def _handle_snapshots_export(request: web.Request) -> web.Response:
     if not _working_db_path or not _working_db_path.exists():
         return _err(404, "no working DB to export")
     dst = _export_working_to_local(lambda m: None)
+    return _ok({"ok": True, "filename": dst.name if dst else None})
+
+
+async def _handle_gelbooru_export(request: web.Request) -> web.Response:
+    if not _gelbooru_db_path or not _gelbooru_db_path.exists():
+        return _err(404, "no gelbooru working DB to export")
+    dst = _export_working_to_local(lambda m: None, working_path=_gelbooru_db_path,
+                                   default_label="gelbooru")
     return _ok({"ok": True, "filename": dst.name if dst else None})
 
 
@@ -650,10 +761,145 @@ async def _handle_related(request: web.Request) -> web.Response:
     return _ok({"query": q, "related": related, "synced_at": int(now), "stale": False})
 
 
+def _reset_gelbooru_conn() -> None:
+    """Drop the cached gelbooru read connection (so the file can be replaced/removed)."""
+    global _gelbooru_search_conn, _gelbooru_search_conn_path
+    if _gelbooru_search_conn is not None:
+        try:
+            _gelbooru_search_conn.close()
+        except Exception:
+            pass
+    _gelbooru_search_conn = None
+    _gelbooru_search_conn_path = None
+
+
+async def _handle_gelbooru_check(request: web.Request) -> web.Response:
+    if not _data_dir:
+        return _err(500, "tagdb data directory not initialized")
+    from . import distribution as _dist
+    manifest_url = _load_settings().get("manifest_url") or None
+    info = _dist.check_gelbooru(_data_dir, manifest_url)
+    # Add the installed gelbooru DB's own meta (tag/alias counts, build date) so the UI
+    # can show real dataset info, parallel to danbooru's active-dataset banner.
+    active = _gelbooru_active_db()
+    if active:
+        from . import repo as _repo
+        meta = _repo.get_snapshot_meta(active)
+        info["working_tag_count"] = int(meta.get("tag_count", 0) or 0)
+        info["working_alias_count"] = int(meta.get("alias_count", 0) or 0)
+        info["working_date"] = meta.get("date", "")
+        info["active_filename"] = active.name
+        info["active_is_working"] = (active == _gelbooru_db_path)
+    return _ok(info)
+
+
+async def _handle_gelbooru_download(request: web.Request) -> web.Response:
+    """Download the prebuilt gelbooru DLC and install it as gelbooru.sqlite."""
+    if _maintain_running:
+        return _err(409, "a maintenance task is already running")
+    if not _data_dir or not _gelbooru_db_path:
+        return _err(500, "tagdb data directory not initialized")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    version = body.get("version") or None
+    manifest_url = _load_settings().get("manifest_url") or None
+    data_dir = _data_dir
+    gel_path = _gelbooru_db_path
+
+    def _run() -> None:
+        global _maintain_running
+        from . import distribution as _dist
+        log = _maintain_log.append
+        try:
+            with _maintain_lock:
+                _reset_gelbooru_conn()  # release the file handle on Windows
+                path = _dist.download_gelbooru(data_dir, version=version,
+                                              manifest_url=manifest_url, progress_cb=log,
+                                              stop_event=_maintain_stop_event)
+                ver = path.name.split("_gelbooru.sqlite")[0]
+                _dist.seed_gelbooru_db_from_official(path, gel_path, version=ver)
+            log("Gelbooru dataset installed and active.")
+        except Exception as exc:
+            log(f"Error: {exc}")
+            logger.exception("Gelbooru download failed")
+        finally:
+            _maintain_running = False
+
+    _start_maintain_thread("tagdb-gelbooru-download", _run, "gelbooru-download",
+                           "[gelbooru] downloading dataset...", threading.Event())
+    return _ok({"ok": True, "message": "gelbooru download started"})
+
+
+async def _handle_gelbooru_build(request: web.Request) -> web.Response:
+    """Build gelbooru.sqlite directly from gelbooru (needs api_key + user_id)."""
+    if _maintain_running:
+        return _err(409, "a maintenance task is already running")
+    if not _data_dir or not _gelbooru_db_path:
+        return _err(500, "tagdb data directory not initialized")
+    try:
+        body = await request.json()
+    except Exception:
+        body = {}
+    min_post_count = int(body.get("min_post_count", 20))
+    api_key, user_id = _get_gelbooru_credentials()
+    if body.get("api_key"):
+        api_key = str(body["api_key"]).strip() or None
+    if body.get("user_id"):
+        user_id = str(body["user_id"]).strip() or None
+    if not (api_key and user_id):
+        return _err(400, "gelbooru build needs api_key + user_id (set them in settings)")
+    data_dir = _data_dir
+    gel_path = _gelbooru_db_path
+
+    def _run() -> None:
+        global _maintain_running
+        from . import snapshots as _snap
+        log = _maintain_log.append
+        try:
+            with _maintain_lock:
+                _reset_gelbooru_conn()
+                _snap.build_gelbooru_snapshot(
+                    data_dir=data_dir, min_post_count=min_post_count,
+                    api_key=api_key, user_id=user_id, progress_cb=log,
+                    stop_event=_maintain_stop_event, out_path=gel_path,
+                )
+            log("Gelbooru dataset built and active.")
+        except Exception as exc:
+            log(f"Error: {exc}")
+            logger.exception("Gelbooru build failed")
+        finally:
+            _maintain_running = False
+
+    _start_maintain_thread("tagdb-gelbooru-build", _run, "gelbooru-build",
+                           f"[gelbooru] building (min_post_count={min_post_count})...",
+                           threading.Event())
+    return _ok({"ok": True, "message": "gelbooru build started"})
+
+
+async def _handle_gelbooru_delete(request: web.Request) -> web.Response:
+    """Remove gelbooru.sqlite to disable the gelbooru source."""
+    if _maintain_running:
+        return _err(409, "a maintenance task is already running")
+    if not _gelbooru_db_path or not _gelbooru_db_path.exists():
+        return _ok({"ok": True, "deleted": False})
+    _reset_gelbooru_conn()
+    try:
+        for suffix in ("", "-wal", "-shm"):
+            side = Path(str(_gelbooru_db_path) + suffix)
+            if side.exists():
+                side.unlink(missing_ok=True)
+    except OSError as exc:
+        return _err(500, f"delete failed: {exc}")
+    return _ok({"ok": True, "deleted": True})
+
+
 # ─── Registration ──────────────────────────────────────────────────────────────
 
 def register(server: Any, data_dir: Path) -> None:
     global _registered, _data_dir, _active_snapshot_path, _working_db_path, _settings_path
+    global _gelbooru_db_path, _gelbooru_active_snapshot_path
 
     if _registered:
         return
@@ -663,7 +909,8 @@ def register(server: Any, data_dir: Path) -> None:
     _data_dir.mkdir(parents=True, exist_ok=True)
     (_data_dir / "snapshots").mkdir(exist_ok=True)
     _settings_path = _data_dir / "settings.json"
-    _working_db_path = _data_dir / "tagdb.sqlite"
+    _working_db_path = _data_dir / "danbooru.sqlite"    # danbooru working DB (was tagdb.sqlite)
+    _gelbooru_db_path = _data_dir / "gelbooru.sqlite"   # second source; present iff installed
 
     # Prefer the working DB; otherwise honour an explicit active snapshot, else newest.
     if _working_db_path.exists():
@@ -675,6 +922,13 @@ def register(server: Any, data_dir: Path) -> None:
             _active_snapshot_path = p
         else:
             _try_auto_activate()
+
+    # Restore a previously-selected gelbooru snapshot (else gelbooru defaults to its working DB).
+    saved_gel = _load_settings().get("active_gelbooru_snapshot", "")
+    if saved_gel:
+        gp = _resolve_snapshot_path(saved_gel)
+        if gp:
+            _gelbooru_active_snapshot_path = gp
 
     r = server.routes
     r.get("/xyz/tagdb/search")(_handle_search)
@@ -692,6 +946,11 @@ def register(server: Any, data_dir: Path) -> None:
     r.post("/xyz/tagdb/settings")(_handle_settings_post)
     r.get("/xyz/tagdb/official/check")(_handle_official_check)
     r.post("/xyz/tagdb/official/download")(_handle_official_download)
+    r.get("/xyz/tagdb/gelbooru/check")(_handle_gelbooru_check)
+    r.post("/xyz/tagdb/gelbooru/download")(_handle_gelbooru_download)
+    r.post("/xyz/tagdb/gelbooru/build")(_handle_gelbooru_build)
+    r.post("/xyz/tagdb/gelbooru/delete")(_handle_gelbooru_delete)
+    r.post("/xyz/tagdb/gelbooru/export")(_handle_gelbooru_export)
     r.post("/xyz/tagdb/maintain")(_handle_maintain_start)
     r.get("/xyz/tagdb/maintain/status")(_handle_maintain_status)
     r.post("/xyz/tagdb/maintain/cancel")(_handle_maintain_cancel)

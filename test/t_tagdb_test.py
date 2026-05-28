@@ -222,6 +222,82 @@ def test_reconstruct_artist_multilevel_rename():
     assert recon(2000) == []                  # before the tag existed
 
 
+# ── gelbooru source: mappers + merged search (network-free) ────────────────────
+
+def _build_source_db(path: Path, source: str, rows) -> Path:
+    """rows: list of (name, category, post_count, is_deprecated). Builds + FTS."""
+    from tagdb.snapshots import rebuild_fts
+    conn = _db.connect_write(path)
+    _db.migrate(conn)
+    conn.execute("BEGIN")
+    for name, cat, pc, dep in rows:
+        conn.execute(
+            "INSERT INTO tags(name,source,category,post_count,is_deprecated) VALUES(?,?,?,?,?)",
+            (name, source, cat, pc, dep),
+        )
+    conn.execute("COMMIT")
+    rebuild_fts(conn)
+    conn.close()
+    return path
+
+
+def test_gelbooru_category_map_and_deprecated():
+    # 0/1/3/4/5 map 1:1; type 6 → general(0) + is_deprecated=1.
+    assert _sc._map_gelbooru_tag({"name": "wlop", "count": 5, "type": 1})["category"] == 1
+    assert _sc._map_gelbooru_tag({"name": "x", "count": 1, "type": 5})["category"] == 5
+    dep = _sc._map_gelbooru_tag({"name": "1firl", "count": 9, "type": 6})
+    assert dep["category"] == 0 and dep["is_deprecated"] == 1
+
+
+def test_gelbooru_alias_page_parse_and_end():
+    row = (
+        '<tr class="even"><td><a href="index.php?page=post&amp;s=list&amp;tags=evangelion">'
+        'evangelion</a> <span class="tag-count">119</span> <b>&rarr;</b> '
+        '<a href="index.php?page=post&amp;s=list&amp;tags=neon_genesis_evangelion">'
+        'neon genesis evangelion</a></td></tr>'
+    )
+    pairs, n = _sc._parse_gelbooru_alias_page('<div id="aliases">' + row)
+    assert pairs == [("evangelion", "neon_genesis_evangelion")] and n == 1
+    # past-the-end page: only the header <tr> (no class) → 0 data rows → terminates.
+    empty = '<div id="aliases"><table><tr><th>Tags</th></tr></table>'
+    pairs2, n2 = _sc._parse_gelbooru_alias_page(empty)
+    assert pairs2 == [] and n2 == 0
+
+
+def test_gelbooru_tags_require_credentials():
+    import pytest
+    with pytest.raises(_sc.ScraperDependencyError):
+        list(_sc.scrape_gelbooru_tags(api_key=None, user_id=None))
+
+
+def test_search_tags_multi_merge_dedupe_and_authority():
+    d = Path(tempfile.mkdtemp())
+    dan = _build_source_db(d / "dan.sqlite", "danbooru", [
+        ("hatsune_miku", 4, 900000, 0),     # character
+        ("dan_only_artist", 1, 5000, 0),
+    ])
+    gel = _build_source_db(d / "gel.sqlite", "gelbooru", [
+        ("hatsune_miku", 0, 800000, 0),     # conflict: gelbooru says general
+        ("gel_only_tag", 0, 42000, 0),
+    ])
+    sources = [("danbooru", dan, None), ("gelbooru", gel, None)]
+
+    rows = {r["name"]: r for r in _repo.search_tags_multi(sources, "miku", 10)}
+    miku = rows["hatsune_miku"]
+    assert miku["sources"] == ["danbooru", "gelbooru"]
+    assert miku["category"] == 4                      # danbooru authoritative
+    assert miku["post_count"] == 900000               # max across sources
+    assert miku["post_counts"] == {"danbooru": 900000, "gelbooru": 800000}
+
+    only = {r["name"]: r["sources"] for r in _repo.search_tags_multi(sources, "only", 10)}
+    assert only["gel_only_tag"] == ["gelbooru"]
+    assert only["dan_only_artist"] == ["danbooru"]
+
+    # single-source result keeps the legacy shape (no `sources` key)
+    legacy = _repo.search_tags("miku", dan, 10)
+    assert legacy and "sources" not in legacy[0]
+
+
 if __name__ == "__main__":
     import pytest
     pytest.main([__file__, "-v"])

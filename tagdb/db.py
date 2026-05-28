@@ -1,8 +1,8 @@
 """Tag DB — SQLite schema, PRAGMAs, and forward-only migrations.
 
-Used for both the mutable working DB (tagdb_data/tagdb.sqlite) and immutable
-snapshot files (tagdb_data/snapshots/{official,local}/*.sqlite); the schema is
-identical, only the meta `schema_kind` differs.
+Used for the working DBs (tagdb_data/danbooru.sqlite, tagdb_data/gelbooru.sqlite)
+and immutable snapshot files (tagdb_data/snapshots/{official,local}/*.sqlite); the
+schema is identical, only the meta `schema_kind`/`source` differ.
 
 Tables:
   meta            — key/value metadata + provenance watermarks (see V2 keys below)

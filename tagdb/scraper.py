@@ -25,6 +25,7 @@ Danbooru category ints: 0=general 1=artist 3=copyright 4=character 5=meta.
 from __future__ import annotations
 
 import logging
+import re
 import time
 import urllib.parse
 from datetime import datetime, timezone
@@ -502,6 +503,196 @@ def scrape_wiki_other_names(
         title = w.get("title")
         if title and names:
             yield {"tag": title, "other_names": names}
+
+
+# ---------------------------------------------------------------------------
+# Gelbooru — second tag source. Verified live 2026-05-27 (see the gelbooru plan
+# Phase 0 findings). Key differences from danbooru:
+#   - The tag dapi REQUIRES api_key + user_id (no creds → HTTP 401, empty body).
+#   - Page size caps at 100; pages by `pid` offset (offset = pid*limit), no
+#     1000-page cap. `orderby=count` desc; there is NO server-side count filter,
+#     so we order by count and stop early once count < min_post_count.
+#   - `type` is an int: 0 general, 1 artist, 3 copyright, 4 character, 5 meta,
+#     6 deprecated. Deprecated tags (typo redirects) keep inflated counts and
+#     dominate the top of count-desc order → flag them, same as danbooru.
+#   - There is NO alias JSON API; aliases live in the HTML list
+#     index.php?page=alias&s=list (parsed below). `pid` there is a ROW offset.
+# ---------------------------------------------------------------------------
+GELBOORU_BASE = "https://gelbooru.com"
+GELBOORU_PAGE_LIMIT = 100          # gelbooru caps s=tag dapi at 100 rows/page
+GELBOORU_ALIAS_PAGE_SIZE = 50      # alias-list HTML shows 50 rows/page (pid = row offset)
+
+# Gelbooru tag `type` int → (our category int, is_deprecated). Our category
+# convention matches danbooru (0 general,1 artist,3 copyright,4 character,5 meta);
+# gelbooru adds 6 = deprecated → keep category general(0) and set is_deprecated=1.
+GELBOORU_CATEGORY_MAP: Dict[int, tuple] = {
+    0: (0, 0), 1: (1, 0), 3: (3, 0), 4: (4, 0), 5: (5, 0), 6: (0, 1),
+}
+
+# Alias-list data rows have class even/odd (the table header <tr> has no class, and
+# is present even on an empty page — so the END signal is "no data rows", NOT "no
+# parsed pairs"). Within a row: two `tags=` links (antecedent, consequent) split by
+# `&rarr;`. We parse per-row so a row the strict pattern would miss is still captured.
+_GELBOORU_ALIAS_DATAROW = re.compile(r'<tr\s+class="(?:even|odd)"', re.IGNORECASE)
+_GELBOORU_TAGS_PARAM = re.compile(r'tags=([^"&]+)"', re.IGNORECASE)
+
+
+def _parse_gelbooru_alias_page(seg: str):
+    """Parse one alias-list page segment → (pairs, data_row_count).
+
+    `pairs` = [(antecedent, consequent)] (url-decoded, underscored). `data_row_count`
+    = number of even/odd table rows (0 ⇒ past the end of the list). Pairs may be fewer
+    than data_row_count if a row lacks the `&rarr;`/two-link shape.
+    """
+    chunks = _GELBOORU_ALIAS_DATAROW.split(seg)[1:]  # drop pre-first-row preamble
+    pairs = []
+    for chunk in chunks:
+        if "&rarr;" not in chunk:
+            continue
+        vals = _GELBOORU_TAGS_PARAM.findall(chunk)
+        if len(vals) >= 2:
+            pairs.append((vals[0], vals[1]))
+    return pairs, len(chunks)
+
+
+def _build_gelbooru_auth(api_key: Optional[str], user_id: Optional[str]) -> str:
+    """Return the gelbooru auth query fragment, or '' if creds are missing."""
+    if api_key and user_id:
+        return "&" + urllib.parse.urlencode({"api_key": api_key, "user_id": user_id})
+    return ""
+
+
+def _map_gelbooru_tag(tag: Dict[str, Any]) -> Dict[str, Any]:
+    cat, dep = GELBOORU_CATEGORY_MAP.get(int(tag.get("type", 0)), (0, 0))
+    return {
+        "name": tag.get("name", ""),
+        "category": cat,
+        "post_count": int(tag.get("count", 0)),
+        "is_deprecated": dep,
+    }
+
+
+def scrape_gelbooru_tags(
+    min_post_count: int = DEFAULT_MIN_POST_COUNT,
+    page_limit: int = GELBOORU_PAGE_LIMIT,
+    rate_delay: float = DEFAULT_RATE_DELAY,
+    api_key: Optional[str] = None,
+    user_id: Optional[str] = None,
+    stop_event=None,
+) -> Generator[Dict[str, Any], None, None]:
+    """Yield gelbooru tag dicts {name, category, post_count, is_deprecated}, count DESC.
+
+    Stops early once a tag's post_count drops below min_post_count (the API returns
+    count-descending and has no server-side count filter). Skips empty names AND
+    deprecated tags (gelbooru type 6 — typo/redirect tags), so every yielded row has
+    is_deprecated=0.
+
+    Requires api_key + user_id (free gelbooru account → My Account → Options →
+    API Access Credentials). Raises ScraperDependencyError if they are missing.
+    """
+    if not (api_key and user_id):
+        raise ScraperDependencyError(
+            "Gelbooru tag reads require api_key + user_id (free account → My Account "
+            "→ Options → API Access Credentials); without them the API returns HTTP 401."
+        )
+    page_limit = min(page_limit, GELBOORU_PAGE_LIMIT)
+    auth = _build_gelbooru_auth(api_key, user_id)
+    session = _make_session()
+    pid = 0
+    while True:
+        if stop_event and stop_event.is_set():
+            logger.info("gelbooru tag scrape cancelled")
+            return
+        url = (
+            f"{GELBOORU_BASE}/index.php?page=dapi&s=tag&q=index&json=1"
+            f"&limit={page_limit}&pid={pid}&orderby=count{auth}"
+        )
+        try:
+            data = _get_json(session, url)
+        except Exception as exc:
+            logger.error("Error fetching gelbooru tags (pid %d): %s", pid, exc)
+            return
+        tags = data.get("tag", []) if isinstance(data, dict) else (data or [])
+        if not tags:
+            break
+        for raw in tags:
+            mapped = _map_gelbooru_tag(raw)
+            if not mapped["name"].strip():
+                continue
+            if mapped["post_count"] < min_post_count:
+                return  # count-desc: everything after this is below the threshold
+            # Skip gelbooru deprecated tags (type 6) entirely — they are typo/redirect
+            # tags that keep inflated counts; excluded from the dataset by design.
+            if mapped["is_deprecated"]:
+                continue
+            yield mapped
+        if len(tags) < page_limit:
+            break
+        pid += 1
+        time.sleep(rate_delay)
+
+
+def scrape_gelbooru_aliases(
+    rate_delay: float = DEFAULT_RATE_DELAY,
+    api_key: Optional[str] = None,
+    user_id: Optional[str] = None,
+    max_rows: Optional[int] = None,
+    stop_event=None,
+) -> Generator[Dict[str, Any], None, None]:
+    """Yield {alias, canonical} from gelbooru's HTML alias list (no JSON API exists).
+
+    Parses index.php?page=alias&s=list, advancing `pid` by GELBOORU_ALIAS_PAGE_SIZE
+    (pid is a row offset; each page shows 50 rows). Names come from the `tags=` query
+    param (canonical underscored form). Stops when a page contains no alias rows, or
+    after `max_rows`. Callers dedupe via the alias primary key.
+
+    NOTE: an alias page past the end still contains the submit-form/header `<tr>`
+    markup, so termination keys off "no alias rows matched" (no `&rarr;` row), NOT the
+    presence of `<tr>`. A hard pid cap is a final guard against any infinite loop.
+    """
+    auth = _build_gelbooru_auth(api_key, user_id)
+    session = _make_session()
+    pid = 0
+    hard_cap = max_rows if max_rows is not None else 2_000_000  # safety vs infinite loop
+    max_retries = 4
+    while pid < hard_cap:
+        if stop_event and stop_event.is_set():
+            logger.info("gelbooru alias scrape cancelled")
+            return
+        url = f"{GELBOORU_BASE}/index.php?page=alias&s=list&pid={pid}{auth}"
+        # Retry transient errors so one hiccup over a ~400-page scrape doesn't abort it.
+        html = None
+        for attempt in range(max_retries):
+            if stop_event and stop_event.is_set():
+                return
+            try:
+                resp = session.get(url, timeout=30)
+                resp.raise_for_status()
+                html = resp.text
+                break
+            except Exception as exc:
+                logger.warning("gelbooru alias fetch pid=%d attempt %d/%d failed: %s",
+                               pid, attempt + 1, max_retries, exc)
+                time.sleep(rate_delay * (attempt + 2))
+        if html is None:
+            logger.error("gelbooru aliases: giving up at pid=%d after %d retries",
+                         pid, max_retries)
+            return
+        i = html.find('<div id="aliases">')
+        seg = html[i:] if i >= 0 else ""
+        pairs, data_rows = _parse_gelbooru_alias_page(seg)
+        # True end of the list: a page past the end has no even/odd data rows (only the
+        # header/form <tr>). Terminate on that, NOT on "no parsed pairs" — a single
+        # unparseable row must not end the whole scrape.
+        if data_rows == 0:
+            break
+        for ant, cons in pairs:
+            alias = urllib.parse.unquote(ant).strip()
+            canonical = urllib.parse.unquote(cons).strip()
+            if alias and canonical and alias != canonical:
+                yield {"alias": alias, "canonical": canonical}
+        pid += GELBOORU_ALIAS_PAGE_SIZE
+        time.sleep(rate_delay)
 
 
 if __name__ == "__main__":

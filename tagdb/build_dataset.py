@@ -25,6 +25,7 @@ from pathlib import Path
 
 from . import db as _db
 from . import scraper as _sc
+from . import snapshots as _snap
 from . import updater as _up
 
 if sys.platform == "win32":
@@ -33,12 +34,24 @@ if sys.platform == "win32":
 
 
 def _load_saved_creds() -> tuple:
-    """Fall back to tagdb_data/settings.json credentials (no ComfyUI needed)."""
+    """Fall back to tagdb_data/settings.json danbooru credentials (no ComfyUI needed)."""
     p = Path(__file__).resolve().parent.parent / "tagdb_data" / "settings.json"
     if p.exists():
         try:
             s = json.loads(p.read_text("utf-8"))
             return s.get("danbooru_login") or None, s.get("danbooru_api_key") or None
+        except Exception:
+            pass
+    return None, None
+
+
+def _load_saved_gelbooru_creds() -> tuple:
+    """Fall back to tagdb_data/settings.json gelbooru credentials (api_key, user_id)."""
+    p = Path(__file__).resolve().parent.parent / "tagdb_data" / "settings.json"
+    if p.exists():
+        try:
+            s = json.loads(p.read_text("utf-8"))
+            return s.get("gelbooru_api_key") or None, s.get("gelbooru_user_id") or None
         except Exception:
             pass
     return None, None
@@ -65,6 +78,10 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     ap = argparse.ArgumentParser(description="Build a TagDB dataset for distribution")
     ap.add_argument("--full", action="store_true", help="full scrape (currently the only mode)")
+    ap.add_argument("--gelbooru", action="store_true",
+                    help="build a gelbooru dataset instead of danbooru (current-only; "
+                         "needs gelbooru api_key + user_id)")
+    ap.add_argument("--user-id", default=None, help="gelbooru user_id (with --gelbooru)")
     ap.add_argument("--min-post-count", type=int, default=50)
     ap.add_argument("--out", default=None, help="output .sqlite path")
     ap.add_argument("--with-versions", action="store_true",
@@ -76,31 +93,60 @@ def main() -> None:
     ap.add_argument("--api-key", default=None)
     args = ap.parse_args()
 
-    login, api_key = args.login, args.api_key
-    if not login:
-        login, api_key = _load_saved_creds()
-        if login:
-            print(f"Using saved danbooru credentials (login: {login}).")
-
     version = date.today().strftime("%Y-%m-%d")
-    out = Path(args.out) if args.out else Path("dist") / f"danbooru_{version}.sqlite"
-    out.parent.mkdir(parents=True, exist_ok=True)
-    if out.exists():
-        out.unlink()
-        print(f"Removed stale {out}")
-
-    print(f"Building {out} (min_post_count={args.min_post_count})...")
     t0 = time.time()
-    summary = _up.run_full_update(
-        out, min_post_count=args.min_post_count, label="danbooru",
-        login=login, api_key=api_key,
-        with_artist_names=args.with_artists, with_artist_versions=args.with_artists,
-        progress_cb=print,
-    )
-    if args.with_versions:
-        print("Backfilling tag_versions event log...")
-        nver = _backfill_tag_versions(out, login, api_key)
-        print(f"  tag_versions backfilled: {nver:,}")
+
+    if args.gelbooru:
+        # --- Gelbooru build (current-only; no version tables, no time machine) ---
+        api_key, user_id = args.api_key, args.user_id
+        if not (api_key and user_id):
+            saved_key, saved_uid = _load_saved_gelbooru_creds()
+            api_key = api_key or saved_key
+            user_id = user_id or saved_uid
+            if api_key and user_id:
+                print(f"Using saved gelbooru credentials (user_id: {user_id}).")
+        if not (api_key and user_id):
+            print("ERROR: gelbooru build needs --api-key and --user-id (or saved "
+                  "gelbooru_api_key / gelbooru_user_id in tagdb_data/settings.json).")
+            sys.exit(2)
+
+        out = Path(args.out) if args.out else Path("dist") / f"gelbooru_{version}.sqlite"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        if out.exists():
+            out.unlink()
+            print(f"Removed stale {out}")
+
+        print(f"Building {out} (gelbooru, min_post_count={args.min_post_count})...")
+        snap = _snap.build_gelbooru_snapshot(
+            data_dir=out.parent, min_post_count=args.min_post_count,
+            api_key=api_key, user_id=user_id, progress_cb=print, out_path=out,
+        )
+        summary = f"gelbooru snapshot → {snap.name}"
+    else:
+        # --- Danbooru build (existing path) ---
+        login, api_key = args.login, args.api_key
+        if not login:
+            login, api_key = _load_saved_creds()
+            if login:
+                print(f"Using saved danbooru credentials (login: {login}).")
+
+        out = Path(args.out) if args.out else Path("dist") / f"danbooru_{version}.sqlite"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        if out.exists():
+            out.unlink()
+            print(f"Removed stale {out}")
+
+        print(f"Building {out} (min_post_count={args.min_post_count})...")
+        summary = _up.run_full_update(
+            out, min_post_count=args.min_post_count, label="danbooru",
+            login=login, api_key=api_key,
+            with_artist_names=args.with_artists, with_artist_versions=args.with_artists,
+            progress_cb=print,
+        )
+        if args.with_versions:
+            print("Backfilling tag_versions event log...")
+            nver = _backfill_tag_versions(out, login, api_key)
+            print(f"  tag_versions backfilled: {nver:,}")
 
     conn = _db.connect_read(out)
     meta = dict(conn.execute("SELECT key, value FROM meta"))
@@ -116,8 +162,10 @@ def main() -> None:
         compression = "zip"
 
     sha = _sha256(asset)
+    source = "gelbooru" if args.gelbooru else "danbooru"
     entry = {
         "version": version,
+        "source": source,
         "min_post_count": args.min_post_count,
         "tag_count": int(meta.get("tag_count", 0)),
         "alias_count": int(meta.get("alias_count", 0)),
@@ -130,7 +178,8 @@ def main() -> None:
         "compression": compression,
     }
     print(f"\nDone in {time.time()-t0:.0f}s. Summary: {summary}")
-    print("\n=== Paste into tagdb/official_manifest.json (datasets[]) and set latest ===")
+    target = "datasets_gelbooru[]" if args.gelbooru else "datasets[]"
+    print(f"\n=== Paste into tagdb/official_manifest.json ({target}) and set latest ===")
     print(json.dumps(entry, indent=2))
 
 

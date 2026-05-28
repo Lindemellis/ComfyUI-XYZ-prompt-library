@@ -14,8 +14,9 @@ If the download fails (offline, none published yet), open **XYZ Prompt Tools →
 
 ```
 tagdb_data/
-├── tagdb.sqlite          ← working DB (autocomplete reads this by default)
-├── settings.json         ← Danbooru credentials + preferences
+├── danbooru.sqlite       ← danbooru working DB (autocomplete reads this by default)
+├── gelbooru.sqlite       ← optional second-source DB (present only if installed)
+├── settings.json         ← Danbooru/Gelbooru credentials + preferences
 └── snapshots/
     ├── official/         ← prebuilt copies from the GitHub Release (read-only)
     └── local/            ← your exports + reconstruction results (read-only)
@@ -51,7 +52,31 @@ Your login and API key are stored in plaintext in `tagdb_data/settings.json` (gi
 
 ### Time machine (Reconstruct)
 
-Rebuilds tag existence, category, and names as of a chosen date — including rolling artist names back along their rename history, so searching any historical name finds the artist. Requires the version history that the official releases include. The result is saved to `snapshots/local/` and activated; switch back via **Snapshots → Use** on `tagdb.sqlite`.
+Rebuilds tag existence, category, and names as of a chosen date — including rolling artist names back along their rename history, so searching any historical name finds the artist. Requires the version history that the official releases include. The result is saved to `snapshots/local/` and activated; switch back via **Snapshots → Use** on `danbooru.sqlite`.
+
+## Gelbooru (second source)
+
+Gelbooru is an **optional second tag set** that lives in its own file (`tagdb_data/gelbooru.sqlite`) alongside the Danbooru working DB. It is independent and **current-only** — there is no time machine for Gelbooru (its API exposes no versioned history). Deprecated Gelbooru tags (typo/redirect tags) are excluded from the dataset.
+
+**Enable it:** *Settings → Autocomplete → Gelbooru tags*. Install/manage it in *Tag dataset → **Gelbooru** tab*.
+
+**How both sources combine** — with Danbooru and Gelbooru both enabled, suggestions are **merged and deduped by name**, and each row shows a clickable source token:
+
+- **`D`** → opens the Danbooru wiki for that tag · **`G`** → opens the tag's posts on gelbooru.com.
+- A tag in both shows **`D G`**; a tag in only one shows just its token.
+- On any disagreement (e.g. different category), **Danbooru is authoritative**. Tags Danbooru has renamed but Gelbooru still keeps live appear as `G`-only rows.
+- Clicking a tag shows its detail panel. Gelbooru has no related-tags API, so a **Gelbooru-only tag shows just its own info** (no related list).
+
+**Get the dataset** (*Tag dataset → Gelbooru*):
+
+| Action | What it does |
+|---|---|
+| **Download dataset** | Fetch the author's prebuilt Gelbooru DLC from the GitHub Release (no credentials needed). |
+| **Build from gelbooru** | Scrape directly from Gelbooru into `gelbooru.sqlite`. Needs a free Gelbooru `api_key` + `user_id` (the tag API returns HTTP 401 without them). |
+| **Gelbooru snapshots → Use** | Switch between Gelbooru datasets scraped at different dates (downloads + exported checkpoints). |
+| **Remove** | Delete `gelbooru.sqlite` and fall back to Danbooru only. |
+
+**Gelbooru credentials:** create a free account → *My Account → Options → API Access Credentials* to get `api_key` + `user_id`. Stored in `tagdb_data/settings.json` (gitignored), used only to build/update directly — downloading the prebuilt DLC needs none.
 
 ## FAQ
 
@@ -59,7 +84,7 @@ Rebuilds tag existence, category, and names as of a chosen date — including ro
 
 **Tag count doesn't match the release.** Releases use `min_post_count = 50`. Your own update with a lower threshold yields more tags.
 
-**Tag count dropped.** You probably switched the active snapshot — **Snapshots → Use** on `tagdb.sqlite` to switch back.
+**Tag count dropped.** You probably switched the active snapshot — **Snapshots → Use** on `danbooru.sqlite` to switch back.
 
 ---
 
@@ -73,5 +98,13 @@ python -m tagdb.build_dataset --full --min-post-count 50 --with-versions --with-
 ```
 
 It writes a `.sqlite` (and `.zip` with `--zip`) to `dist/` and prints a manifest entry. `--with-versions` enables time-machine reconstruction; `--with-artists` adds artist data. To publish, upload the `.zip` to a GitHub Release and update `tagdb/official_manifest.json`.
+
+**Gelbooru** builds use the same CLI with `--gelbooru` (credentials from `settings.json`, or pass `--api-key` + `--user-id`):
+
+```bash
+python -m tagdb.build_dataset --gelbooru --min-post-count 50 --zip
+```
+
+This writes `dist/gelbooru_<date>.sqlite(.zip)` and prints a `datasets_gelbooru[]` entry for the manifest (set `latest_gelbooru`). To audit cross-source name collisions between the two full datasets: `python -m tagdb.audit_sources` (defaults to `tagdb_data/danbooru.sqlite` + `tagdb_data/gelbooru.sqlite`).
 
 For backend/architecture notes see the project root `CLAUDE.md`.

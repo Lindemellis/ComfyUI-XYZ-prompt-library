@@ -1,6 +1,21 @@
 {
-  "_comment": "Author-maintained pointer to prebuilt TagDB datasets on GitHub Releases. Build with `python -m tagdb.build_dataset --full --with-versions --with-artists --zip` (base, no translations) and `--translations-dlc` (the optional translations add-on). Upload both .zip to a Release; paste the printed entries here. The .zip lives on the Release, NOT in git.",
+  "_comment": "Author-maintained pointer to prebuilt TagDB datasets on GitHub Releases. Build danbooru with `python -m tagdb.build_dataset --full --with-versions --with-artists --zip` (base) + `--translations-dlc`; build the gelbooru DLC with `python -m tagdb.build_dataset --gelbooru --zip` and paste its entry into datasets_gelbooru[] + set latest_gelbooru. The .zip lives on the Release, NOT in git.",
   "latest": "2026-05-26",
+  "latest_gelbooru": "2026-05-27",
+  "datasets_gelbooru": [
+    {
+      "version": "2026-05-27",
+      "source": "gelbooru",
+      "min_post_count": 50,
+      "tag_count": 132318,
+      "alias_count": 20807,
+      "schema_version": 2,
+      "url": "https://github.com/Lindemellis/ComfyUI-XYZ-prompt-library/releases/download/tagdb-2026-05-27/gelbooru_2026-05-27.sqlite.zip",
+      "sha256": "68f2b43c6c88b18c8081b1171ee0f03afc62b0eb9f76f29088bcd4af72dcd8a2",
+      "size_bytes": 12165287,
+      "compression": "zip"
+    }
+  ],
   "datasets": [
     {
       "version": "2026-05-26",

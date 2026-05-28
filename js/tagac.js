@@ -60,6 +60,9 @@ const settings = {
   maxRefs: 10,             // cap on ref suggestions
   // Dataset
   scrapeMin: 50,           // default scrape threshold (count >= N)
+  // Tag sources feeding autocomplete (gelbooru only contributes if installed).
+  sourceDanbooru: true,
+  sourceGelbooru: true,
 };
 
 // Single shared settings object. The unified settings page (xyz_settings.js)
@@ -80,12 +83,22 @@ window.xyzAcSettings = settings;
 const _searchCache = new Map();
 const _SEARCH_CACHE_MAX = 300;
 
+// Comma-joined enabled sources for the ?source= filter. Read lazily (settings can
+// change at runtime). gelbooru is silently ignored server-side if not installed.
+function _enabledSourcesParam() {
+  const s = [];
+  if (settings.sourceDanbooru !== false) s.push('danbooru');
+  if (settings.sourceGelbooru !== false) s.push('gelbooru');
+  return s.join(',');
+}
+
 async function searchTags(q, limit) {
-  const key = `${limit}|${q}`;
+  const src = _enabledSourcesParam();
+  const key = `${limit}|${src}|${q}`;   // include sources so toggling re-queries
   const hit = _searchCache.get(key);
   if (hit) return hit;
   try {
-    const r = await fetch(`/xyz/tagdb/search?q=${encodeURIComponent(q)}&limit=${limit}`);
+    const r = await fetch(`/xyz/tagdb/search?q=${encodeURIComponent(q)}&limit=${limit}&source=${encodeURIComponent(src)}`);
     if (!r.ok) return [];
     const data = await r.json();
     if (_searchCache.size >= _SEARCH_CACHE_MAX) _searchCache.clear();
@@ -127,9 +140,12 @@ async function fetchRelated(tag, limit) {
     const r = await fetch(`/xyz/tagdb/related?q=${encodeURIComponent(tag)}&limit=${limit}&max_age_days=${settings.relatedMaxAgeDays}`);
     if (!r.ok) return [];
     const data = await r.json();
+    // Related tags are computed by danbooru → tag them as danbooru-sourced so the row
+    // shows the clickable D token (→ danbooru wiki), consistent with all other rows.
     return (data.related || []).map((x) => ({
       kind: 'tag', name: x.name, category: x.category, aliases: [],
       post_count: x.post_count, frequency: x.frequency, overlap: x.overlap,
+      sources: ['danbooru'],
     }));
   } catch {
     return [];
@@ -789,6 +805,9 @@ class TagAutocompleteUI {
 
   navigate(dir) {
     if (!this._candidates.length) return;
+    // No selectable rows (e.g. a tag-detail panel with only a header + "no related"
+    // note) — keep no selection and bail, so the header-skipping loops below can't spin.
+    if (!this._candidates.some((c) => !c._isSelf)) { this._selIndex = -1; return; }
     if (!this._hasNavigated) {
       this._hasNavigated = true;
       // Find the first selectable index (skip header rows: _isSelf tags / entry refs)
@@ -910,6 +929,7 @@ class TagAutocompleteUI {
       if (cand.kind === 'ref') this._fillRefRow(row, cand);
       else if (cand.kind === 'library') this._fillLibraryRow(row, cand);
       else if (cand.kind === 'plv2_entry') this._fillEntryRow(row, cand);
+      else if (cand.kind === 'note') this._fillNoteRow(row, cand);
       else this._fillTagRow(row, cand);
       frag.appendChild(row);
     }
@@ -936,6 +956,15 @@ class TagAutocompleteUI {
     return s;
   }
 
+  // A non-selectable informational row (e.g. "no related tags" under a tag header).
+  _fillNoteRow(row, cand) {
+    row.style.cursor = 'default';
+    const s = document.createElement('span');
+    Object.assign(s.style, { color: '#888', fontSize: '12px', fontStyle: 'italic', padding: '2px 0' });
+    s.textContent = cand.name;
+    row.appendChild(s);
+  }
+
   _fillTagRow(row, tag) {
     if (tag._isSelf) {
       // Header row for the source tag in the related list — full info, distinct background.
@@ -951,6 +980,10 @@ class TagAutocompleteUI {
     dot.title = CATEGORY_NAMES[tag.category] || 'general';
     row.appendChild(dot);
     row.appendChild(this._nameSpan(settings.replaceUnderscore ? tag.name.replace(/_/g, ' ') : tag.name));
+
+    // Source info is shown via the jump affordance below (the D/G badge IS the link),
+    // so there's no separate badge row here.
+    const srcs = Array.isArray(tag.sources) ? tag.sources : null;
 
     if (tag._isSelf) {
       // Show category + post count inline (header style)
@@ -987,15 +1020,29 @@ class TagAutocompleteUI {
       row.appendChild(infoSpan);
     }
 
-    // Open danbooru wiki (header + regular rows)
-    const jump = document.createElement('span');
-    jump.textContent = '↗'; jump.title = 'Open danbooru wiki';
-    Object.assign(jump.style, { color: '#7af', fontSize: '13px', flexShrink: '0', cursor: 'pointer', padding: '0 2px' });
-    jump.addEventListener('mousedown', (e) => {
-      e.preventDefault(); e.stopPropagation();
-      window.open(`https://danbooru.donmai.us/wiki_pages/${encodeURIComponent(tag.name)}`, '_blank');
-    });
-    row.appendChild(jump);
+    // Jump-to-site affordance: the D/G token IS the link (D → danbooru wiki, G → gelbooru
+    // posts). EVERY source the tag belongs to gets its own clickable token — uniform for
+    // single-source (just its own token) and merged rows alike. Related-list rows carry no
+    // `sources`, so they keep the plain danbooru-wiki ↗.
+    const _danbooruWiki = `https://danbooru.donmai.us/wiki_pages/${encodeURIComponent(tag.name)}`;
+    const _gelbooruSearch = `https://gelbooru.com/index.php?page=post&s=list&tags=${encodeURIComponent(tag.name)}`;
+    const _open = (e, url) => { e.preventDefault(); e.stopPropagation(); window.open(url, '_blank'); };
+    const _jumpBadge = (label, bg, title, url) => {
+      const b = this._badge(label, bg);
+      b.title = title; b.style.cursor = 'pointer';
+      b.addEventListener('mousedown', (e) => _open(e, url));
+      row.appendChild(b);
+    };
+    if (srcs) {
+      if (srcs.includes('danbooru')) _jumpBadge('D', '#6ca6e0', 'danbooru — open wiki', _danbooruWiki);
+      if (srcs.includes('gelbooru')) _jumpBadge('G', '#6cc080', 'gelbooru — open posts', _gelbooruSearch);
+    } else {
+      const j = document.createElement('span');
+      j.textContent = '↗'; j.title = 'Open danbooru wiki';
+      Object.assign(j.style, { color: '#7af', fontSize: '13px', flexShrink: '0', cursor: 'pointer', padding: '0 2px' });
+      j.addEventListener('mousedown', (e) => _open(e, _danbooruWiki));
+      row.appendChild(j);
+    }
 
     // Preview icon (header + regular rows): showArtistPreview → artist tags only; showTagPreview → all tags
     if (!tag._isSelf || settings.showTagPreview || (settings.showArtistPreview && tag.category === 1)) {
@@ -1231,26 +1278,36 @@ class TagAutocompleteUI {
     const tokEnd = getTokenEnd(el);
     this._rangeStart = tokEnd;
 
-    // Fetch self-tag for the header row (fast, from local cache) and related
-    // tags (slower, from network) in parallel.
-    const selfResults = searchTags(name, 1);
-    const relatedPromise = fetchRelated(name, settings.maxSuggestions);
+    // Self-tag (the header) from the merged search. A few results so we can match the
+    // exact name even when a higher-count substring match would otherwise rank first.
+    const selfTag = (await searchTags(name, 5)).find(t => t.name === name);
+    if (!selfTag) { this.hide(); return; }  // tag not in any active dataset → nothing to show
 
-    const selfTag = (await selfResults).find(t => t.name === name);
-    const results = [];
-    if (selfTag) results.push({ ...selfTag, kind: 'tag', _isSelf: true });
+    const sources = Array.isArray(selfTag.sources) ? selfTag.sources : ['danbooru'];
+    const results = [{ ...selfTag, kind: 'tag', _isSelf: true }];
 
-    // Show immediately with the header row
-    if (results.length) {
-      this._open(el, [...results], tokEnd);
+    // Show the header immediately (tag detail), then fill related below it.
+    this._open(el, [...results], tokEnd);
+
+    // Related tags are computed by danbooru only. A gelbooru-only tag has none, so we
+    // skip the (useless) danbooru fetch and just show its info — the user's request.
+    if (sources.includes('danbooru')) {
+      const relatedResults = await fetchRelated(name, settings.maxSuggestions);
+      for (const r of relatedResults) {
+        if (r.name !== name) results.push(r);
+      }
     }
 
-    // Wait for related, filter out the tag itself, and update
-    const relatedResults = await relatedPromise;
-    for (const r of relatedResults) {
-      if (r.name !== name) results.push(r);
+    // Always keep the panel open showing the tag's detail. If there are no related
+    // tags, add a non-selectable note rather than hiding (esp. gelbooru-only tags).
+    if (results.length === 1) {
+      results.push({
+        kind: 'note', _isSelf: true,
+        name: sources.includes('danbooru')
+          ? 'No related tags found'
+          : 'Gelbooru-only tag — no related tags',
+      });
     }
-    if (results.length <= 1) { this.hide(); return; }  // only header, nothing to select
     this._candidates = results;
     if (!this._hasNavigated) this._selIndex = -1;
     this._render();

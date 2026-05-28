@@ -2,7 +2,7 @@
 
 **English** | [中文](README_zh.md)
 
-A ComfyUI custom-node pack with three larger tools — **Danbooru tag autocomplete**, a **hierarchical prompt library (V2)**, and an **image gallery** — plus a few small text/prompt utility nodes.
+A ComfyUI custom-node pack with three larger tools — **Danbooru (+ optional Gelbooru) tag autocomplete**, a **hierarchical prompt library (V2)**, and an **image gallery** — plus a few small text/prompt utility nodes.
 
 Each tool has its own manual:
 
@@ -52,12 +52,12 @@ The **settings window** (also reachable from the ComfyUI command palette: *"Open
 
 | Tab | Controls |
 |---|---|
-| Autocomplete | Enable on/off, max suggestions, hide rare tags |
+| Autocomplete | Enable on/off, max suggestions, hide rare tags, **Danbooru / Gelbooru sources** |
 | Insertion | Underscore→space, auto comma, escape brackets, full-width→half-width |
 | Library | Use your prompt library as autocomplete sources; entry-ref suggestions |
 | Related | Click-a-tag related lookups + cache freshness |
 | Preview | Artist-works / tag preview images on hover (both **off** by default) |
-| Tag dataset | Danbooru credentials, prebuilt dataset, updates, snapshots, reconstruct |
+| Tag dataset | **Danbooru / Gelbooru tabs**: credentials, prebuilt dataset, updates, snapshots, reconstruct |
 | About | Version / info |
 
 Each Prompt Library V2 node also has its own **Library / Editor / Preview** buttons.
@@ -86,7 +86,10 @@ No, for downloading the prebuilt dataset. Yes (a free login + API key) only if y
 The release is built with `min_post_count = 50`. If you run your own update with a lower threshold you'll get more tags.
 
 **Tag count dropped suddenly?**
-You may have switched the active snapshot. In *Tag dataset → Snapshots*, click **Use** on the working DB (`tagdb.sqlite`) to switch back.
+You may have switched the active snapshot. In *Tag dataset → Snapshots*, click **Use** on the working DB (`danbooru.sqlite`) to switch back.
+
+**What's the Gelbooru source?**
+An optional second tag set. Enable it in *Settings → Autocomplete → Gelbooru tags* and install the dataset in *Tag dataset → Gelbooru*. With both sources on, suggestions merge and each row shows a clickable **D**/**G** token (Danbooru wiki / Gelbooru posts). Danbooru wins on any conflict; Gelbooru is current-only (no time machine). See the [tag manual](tagdb/README.md#gelbooru-second-source).
 
 ---
 

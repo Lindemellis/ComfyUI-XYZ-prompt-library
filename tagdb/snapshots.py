@@ -15,11 +15,13 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from . import db as _db
-from .scraper import scrape_tags, scrape_aliases
+from .scraper import (
+    scrape_tags, scrape_aliases, scrape_gelbooru_tags, scrape_gelbooru_aliases,
+)
 
 logger = logging.getLogger("xyz.tagdb.snapshots")
 
-__all__ = ["build_snapshot", "rebuild_fts"]
+__all__ = ["build_snapshot", "build_gelbooru_snapshot", "rebuild_fts"]
 
 _BATCH_SIZE = 500
 
@@ -136,6 +138,130 @@ def build_snapshot(
 
     except Exception:
         logger.exception("Snapshot build failed")
+        try:
+            conn.execute("ROLLBACK")
+        except Exception:
+            pass
+        raise
+    finally:
+        conn.close()
+
+
+def build_gelbooru_snapshot(
+    data_dir: Path,
+    label: str = "gelbooru",
+    min_post_count: int = 5,
+    api_key: Optional[str] = None,
+    user_id: Optional[str] = None,
+    progress_cb: Optional[Callable[[str], None]] = None,
+    stop_event: Optional[threading.Event] = None,
+    out_path: Optional[Path] = None,
+) -> Path:
+    """Scrape gelbooru and write a dated snapshot file (source='gelbooru').
+
+    Mirrors build_snapshot but uses the gelbooru scrapers and leaves the danbooru-only
+    event-log tables (tag_versions/artist_versions) empty — gelbooru is current-only
+    (no time machine). Tags come from the JSON dapi (needs api_key+user_id); aliases
+    from the HTML alias list. Returns the new snapshot path.
+
+    If `out_path` is given (author dist build), writes there; otherwise writes a dated
+    file under `data_dir/snapshots/` (in-server build).
+    """
+    today = date.today().strftime("%Y-%m-%d")
+    if out_path is not None:
+        snap_path = Path(out_path)
+        snap_path.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        snap_dir = Path(data_dir) / "snapshots"
+        snap_dir.mkdir(parents=True, exist_ok=True)
+        snap_path = snap_dir / f"{today}_{label}.sqlite"
+
+    def _progress(msg: str) -> None:
+        logger.info(msg)
+        if progress_cb:
+            progress_cb(msg)
+
+    _progress(f"Building gelbooru snapshot: {snap_path}")
+
+    conn = _db.connect_write(snap_path)
+    try:
+        _db.migrate(conn)
+
+        # --- Tags ---
+        _progress("Scraping tags from gelbooru...")
+        tag_count = 0
+        conn.execute("BEGIN")
+        for tag in scrape_gelbooru_tags(
+            min_post_count=min_post_count,
+            api_key=api_key,
+            user_id=user_id,
+            stop_event=stop_event,
+        ):
+            if stop_event and stop_event.is_set():
+                conn.execute("ROLLBACK")
+                _progress("Cancelled during tag scrape")
+                return snap_path
+            conn.execute(
+                "INSERT OR REPLACE INTO tags(name, source, category, post_count, is_deprecated)"
+                " VALUES (?,?,?,?,?)",
+                (tag["name"], "gelbooru", tag["category"], tag["post_count"], tag["is_deprecated"]),
+            )
+            tag_count += 1
+            if tag_count % _BATCH_SIZE == 0:
+                conn.execute("COMMIT")
+                conn.execute("BEGIN")
+                _progress(f"Tags scraped: {tag_count:,}")
+        conn.execute("COMMIT")
+        _progress(f"Tags done: {tag_count:,}")
+
+        # --- Aliases (HTML scrape; gelbooru has no alias JSON API) ---
+        _progress("Scraping tag aliases from gelbooru...")
+        alias_count = 0
+        conn.execute("BEGIN")
+        for alias in scrape_gelbooru_aliases(
+            api_key=api_key,
+            user_id=user_id,
+            stop_event=stop_event,
+        ):
+            if stop_event and stop_event.is_set():
+                conn.execute("ROLLBACK")
+                _progress("Cancelled during alias scrape")
+                return snap_path
+            conn.execute(
+                "INSERT OR REPLACE INTO aliases(alias, canonical) VALUES (?,?)",
+                (alias["alias"], alias["canonical"]),
+            )
+            alias_count += 1
+            if alias_count % _BATCH_SIZE == 0:
+                conn.execute("COMMIT")
+                conn.execute("BEGIN")
+                _progress(f"Aliases scraped: {alias_count:,}")
+        conn.execute("COMMIT")
+        _progress(f"Aliases done: {alias_count:,}")
+
+        # --- FTS index ---
+        _progress("Building FTS index...")
+        rebuild_fts(conn)
+        _progress("FTS index done")
+
+        # --- Meta ---
+        conn.execute("BEGIN")
+        for k, v in [
+            ("date", today),
+            ("label", label),
+            ("source", "gelbooru"),
+            ("created_at", str(int(time.time()))),
+            ("tag_count", str(tag_count)),
+            ("alias_count", str(alias_count)),
+        ]:
+            conn.execute("INSERT OR REPLACE INTO meta(key, value) VALUES (?,?)", (k, v))
+        conn.execute("COMMIT")
+
+        _progress(f"Gelbooru snapshot complete: {tag_count:,} tags, {alias_count:,} aliases → {snap_path.name}")
+        return snap_path
+
+    except Exception:
+        logger.exception("Gelbooru snapshot build failed")
         try:
             conn.execute("ROLLBACK")
         except Exception:

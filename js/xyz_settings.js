@@ -184,6 +184,10 @@ class SettingsPage {
             sliderCtrl(() => S.maxSuggestions ?? 15, (v) => { S.maxSuggestions = v; save(); }, { min: 5, max: 50, step: 5 })),
         row('Hide rare tags', 'Skip tags with fewer than this many posts (0 = show all).',
             numberCtrl(() => S.minPostCount ?? 0, (v) => { S.minPostCount = v || 0; save(); }, { min: 0, step: 10 })),
+        row('Danbooru tags', 'Include danbooru tags in suggestions.',
+            toggle(() => S.sourceDanbooru !== false, (v) => { S.sourceDanbooru = v; save(); })),
+        row('Gelbooru tags', 'Include gelbooru tags (only if the gelbooru dataset is installed). When both sources are on, rows show D/G badges.',
+            toggle(() => S.sourceGelbooru !== false, (v) => { S.sourceGelbooru = v; save(); })),
       );
     } else if (key === 'insertion') {
       const sync = (k, plv2Key) => (v) => { S[k] = v; if (plv2Key) syncPlv2(plv2Key, v); save(); };

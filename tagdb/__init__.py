@@ -3,10 +3,14 @@
 Call setup(server) once during ComfyUI startup from the top-level __init__.py.
 
 Data lives in tagdb_data/ (gitignored):
-  tagdb.sqlite             — the mutable WORKING DB (autocomplete reads it)
-  settings.json            — danbooru credentials, active read DB, etc.
+  danbooru.sqlite          — the mutable danbooru WORKING DB (autocomplete reads it)
+  gelbooru.sqlite          — the optional second-source DB (present iff installed)
+  settings.json            — danbooru/gelbooru credentials, active read DB, etc.
   snapshots/official/      — immutable datasets downloaded from the GitHub Release
   snapshots/local/         — immutable user export checkpoints
+
+(The working DB was named tagdb.sqlite before gelbooru was added; setup() renames
+it to danbooru.sqlite on first launch — see _rename_legacy_working_db.)
 
 First-run behaviour (NO auto-scrape):
   If there is no working DB yet, we DOWNLOAD the author's prebuilt dataset from
@@ -25,7 +29,7 @@ logger = logging.getLogger("xyz.tagdb")
 
 _PKG_DIR = Path(__file__).resolve().parent
 DATA_DIR: Path = _PKG_DIR.parent / "tagdb_data"
-WORKING_DB: Path = DATA_DIR / "tagdb.sqlite"
+WORKING_DB: Path = DATA_DIR / "danbooru.sqlite"   # renamed from tagdb.sqlite (see setup)
 
 __all__ = ["setup", "DATA_DIR", "WORKING_DB"]
 
@@ -36,6 +40,8 @@ def setup(server) -> None:
     (DATA_DIR / "snapshots").mkdir(exist_ok=True)
     (DATA_DIR / "snapshots" / "official").mkdir(exist_ok=True)
     (DATA_DIR / "snapshots" / "local").mkdir(exist_ok=True)
+
+    _rename_legacy_working_db()  # tagdb.sqlite → danbooru.sqlite (before routes open it)
 
     from .routes import register
     register(server, DATA_DIR)
@@ -48,13 +54,36 @@ def setup(server) -> None:
     logger.info("[TagDB] setup complete. Data dir: %s", DATA_DIR)
 
 
+def _rename_legacy_working_db() -> None:
+    """One-time rename of the working DB tagdb.sqlite → danbooru.sqlite (+wal/shm).
+
+    The working DB was called tagdb.sqlite before gelbooru was added as a second
+    source; danbooru.sqlite is symmetric with gelbooru.sqlite. No-op once renamed,
+    or if the legacy file is absent. Runs at startup before any DB handle is opened.
+    """
+    import os
+    legacy = DATA_DIR / "tagdb.sqlite"
+    if WORKING_DB.exists() or not legacy.exists():
+        return
+    for suffix in ("", "-wal", "-shm"):
+        src = Path(str(legacy) + suffix)
+        if src.exists():
+            try:
+                os.replace(src, Path(str(WORKING_DB) + suffix))
+            except OSError as exc:
+                logger.warning("[TagDB] Could not rename %s → %s: %s",
+                               src.name, WORKING_DB.name, exc)
+                return
+    logger.info("[TagDB] Renamed working DB tagdb.sqlite → danbooru.sqlite")
+
+
 def _migrate_legacy_layout() -> None:
     """Seed the working DB from a pre-existing flat snapshot (older installs).
 
     Non-destructive: copies the active (or newest) flat `snapshots/*.sqlite` to
-    tagdb.sqlite and migrates it to the current schema. Original files are left
-    in place; the routes layer relocates them to snapshots/local/ when it adopts
-    the working-DB model.
+    the working DB (danbooru.sqlite) and migrates it to the current schema. Original
+    files are left in place; the routes layer relocates them to snapshots/local/ when
+    it adopts the working-DB model.
     """
     import json
     import shutil

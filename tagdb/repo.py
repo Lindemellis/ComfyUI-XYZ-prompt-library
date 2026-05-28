@@ -19,8 +19,8 @@ from . import db as _db
 logger = logging.getLogger("xyz.tagdb.repo")
 
 __all__ = [
-    "search_tags", "list_snapshots", "get_snapshot_meta", "get_meta_watermarks",
-    "get_cached_related", "store_related",
+    "search_tags", "search_tags_multi", "list_snapshots", "get_snapshot_meta",
+    "get_meta_watermarks", "get_cached_related", "store_related",
 ]
 
 _WATERMARK_KEYS = (
@@ -71,6 +71,80 @@ def search_tags(
     finally:
         if own:
             conn.close()
+
+
+def search_tags_multi(
+    sources: List[tuple],
+    q: str,
+    limit: int = 20,
+) -> List[Dict[str, Any]]:
+    """Merge per-source `search_tags` results, dedupe by name with source badges.
+
+    `sources` is a list of `(source_name, db_path, conn)` tuples (conn may be None →
+    a short-lived connection is opened). Each source is searched independently (with
+    a wider per-source cap so the merged top-`limit` is well-formed), then results are
+    deduped by tag name. The merged row carries:
+      - `sources`: list of source names that have the tag, in input order
+        (danbooru is passed first, so it leads);
+      - `category`/`category_name`: the AUTHORITATIVE source's value — danbooru's when
+        danbooru has the tag, else the first source that has it (see gelbooru plan #3);
+      - `post_count`: max across sources; `post_counts`: per-source map;
+      - `is_deprecated`: the authoritative source's flag;
+      - `aliases`/`translations`: union across sources.
+
+    Rows are ranked by `post_count` DESC and capped to `limit` after the merge. Used
+    only when ≥2 sources are active; a single source uses `search_tags` directly so the
+    legacy payload shape is unchanged.
+    """
+    q = q.strip()
+    if not q:
+        return []
+    per_source = min(max(limit * 3, limit), 100)
+    merged: Dict[str, Dict[str, Any]] = {}
+    order: List[str] = []
+    for source_name, db_path, conn in sources:
+        rows = search_tags(q, db_path, limit=per_source, conn=conn)
+        for r in rows:
+            name = r["name"]
+            existing = merged.get(name)
+            if existing is None:
+                merged[name] = {
+                    "name": name,
+                    "category": r["category"],
+                    "category_name": r["category_name"],
+                    "post_count": r["post_count"],
+                    "post_counts": {source_name: r["post_count"]},
+                    "is_deprecated": r["is_deprecated"],
+                    "aliases": list(r.get("aliases", [])),
+                    "translations": list(r.get("translations", [])),
+                    "sources": [source_name],
+                    "_authoritative": source_name,
+                }
+                order.append(name)
+            else:
+                existing["sources"].append(source_name)
+                existing["post_counts"][source_name] = r["post_count"]
+                existing["post_count"] = max(existing["post_count"], r["post_count"])
+                # danbooru is authoritative on category/deprecation when present.
+                # Sources are passed danbooru-first, so only override if the new source
+                # is danbooru and the current authority is not.
+                if source_name == "danbooru" and existing["_authoritative"] != "danbooru":
+                    existing["category"] = r["category"]
+                    existing["category_name"] = r["category_name"]
+                    existing["is_deprecated"] = r["is_deprecated"]
+                    existing["_authoritative"] = "danbooru"
+                # union aliases/translations
+                for a in r.get("aliases", []):
+                    if a not in existing["aliases"]:
+                        existing["aliases"].append(a)
+                for t in r.get("translations", []):
+                    if t not in existing["translations"]:
+                        existing["translations"].append(t)
+    out = [merged[n] for n in order]
+    for row in out:
+        row.pop("_authoritative", None)
+    out.sort(key=lambda r: r["post_count"], reverse=True)
+    return out[:limit]
 
 
 def _search_fts(conn: Any, q: str, limit: int) -> Optional[List[Dict[str, Any]]]:
@@ -200,9 +274,17 @@ def list_snapshots(data_dir: Path) -> List[Dict[str, Any]]:
     snap_dir = data_dir / "snapshots"
     result: List[Dict[str, Any]] = []
 
-    working = data_dir / "tagdb.sqlite"
+    working = data_dir / "danbooru.sqlite"
+    if not working.exists():
+        working = data_dir / "tagdb.sqlite"   # pre-rename installs
     if working.exists():
         e = _snapshot_entry(working, "working")
+        if e:
+            result.append(e)
+
+    gel_working = data_dir / "gelbooru.sqlite"
+    if gel_working.exists():
+        e = _snapshot_entry(gel_working, "working")
         if e:
             result.append(e)
 
