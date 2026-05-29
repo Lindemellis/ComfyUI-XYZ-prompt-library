@@ -188,6 +188,8 @@ class SettingsPage {
             toggle(() => S.sourceDanbooru !== false, (v) => { S.sourceDanbooru = v; save(); })),
         row('Gelbooru tags', 'Include gelbooru tags (only if the gelbooru dataset is installed). When both sources are on, rows show D/G badges.',
             toggle(() => S.sourceGelbooru !== false, (v) => { S.sourceGelbooru = v; save(); })),
+        row('Anima "@artist" syntax', 'Typing "@name" suggests artist tags (inserted as "@name"); clicking an "@name" prompt shows that artist\'s info.',
+            toggle(() => !!S.animaArtist, (v) => { S.animaArtist = v; save(); })),
       );
     } else if (key === 'insertion') {
       const sync = (k, plv2Key) => (v) => { S[k] = v; if (plv2Key) syncPlv2(plv2Key, v); save(); };

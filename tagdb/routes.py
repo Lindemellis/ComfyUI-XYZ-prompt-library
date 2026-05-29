@@ -239,6 +239,16 @@ async def _handle_search(request: web.Request) -> web.Response:
     except ValueError:
         limit = 20
 
+    # Optional category filter (danbooru convention: 1=artist) — used by the
+    # "@artist" autocomplete to surface only artist tags.
+    category: Optional[int] = None
+    raw_cat = request.rel_url.query.get("category", "").strip()
+    if raw_cat:
+        try:
+            category = int(raw_cat)
+        except ValueError:
+            category = None
+
     from . import repo as _repo
     sources = _enabled_sources(request)
     if not sources:
@@ -254,7 +264,7 @@ async def _handle_search(request: web.Request) -> web.Response:
             conn, active = _gelbooru_search_connection()
         if not active:
             return _ok([])
-        rows = _repo.search_tags(q, active, limit=limit, conn=conn)
+        rows = _repo.search_tags(q, active, limit=limit, conn=conn, category=category)
         for r in rows:
             r["sources"] = sources
         return _ok(rows)
@@ -267,7 +277,7 @@ async def _handle_search(request: web.Request) -> web.Response:
             conn, active = _gelbooru_search_connection()
         if active:
             tuples.append((src, active, conn))
-    return _ok(_repo.search_tags_multi(tuples, q, limit=limit))
+    return _ok(_repo.search_tags_multi(tuples, q, limit=limit, category=category))
 
 
 async def _handle_snapshots_list(request: web.Request) -> web.Response:

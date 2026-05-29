@@ -63,6 +63,9 @@ const settings = {
   // Tag sources feeding autocomplete (gelbooru only contributes if installed).
   sourceDanbooru: true,
   sourceGelbooru: true,
+  // Anima "@artist" syntax: typing "@name" suggests artist tags (inserted as "@name"),
+  // and clicking an "@name" prompt resolves it to the artist for its detail/related view.
+  animaArtist: false,
 };
 
 // Single shared settings object. The unified settings page (xyz_settings.js)
@@ -92,13 +95,15 @@ function _enabledSourcesParam() {
   return s.join(',');
 }
 
-async function searchTags(q, limit) {
+async function searchTags(q, limit, category) {
   const src = _enabledSourcesParam();
-  const key = `${limit}|${src}|${q}`;   // include sources so toggling re-queries
+  const catKey = category == null ? '' : String(category);
+  const key = `${limit}|${src}|${catKey}|${q}`;   // include sources/category so toggling re-queries
   const hit = _searchCache.get(key);
   if (hit) return hit;
   try {
-    const r = await fetch(`/xyz/tagdb/search?q=${encodeURIComponent(q)}&limit=${limit}&source=${encodeURIComponent(src)}`);
+    const catParam = category == null ? '' : `&category=${encodeURIComponent(category)}`;
+    const r = await fetch(`/xyz/tagdb/search?q=${encodeURIComponent(q)}&limit=${limit}&source=${encodeURIComponent(src)}${catParam}`);
     if (!r.ok) return [];
     const data = await r.json();
     if (_searchCache.size >= _SEARCH_CACHE_MAX) _searchCache.clear();
@@ -745,6 +750,11 @@ class TagAutocompleteUI {
     this._isRelated = false;
     this._isInfo    = false;
     this._lastQuery = info.query || '';
+    // Anima "@artist" syntax: "@xxx" → real tags containing the literal "@xxx" PLUS
+    // artist tags matching "xxx" (inserted with the "@").
+    if (settings.animaArtist && (info.query || '').startsWith('@')) {
+      return this._showAtTags(el, info);
+    }
     const [tagsRaw, libRaw] = await Promise.all([
       searchTags(info.query, settings.maxSuggestions),
       settings.useLibrary ? fetchLibraryPrompts(info.query, settings.maxLibrary) : [],
@@ -760,6 +770,26 @@ class TagAutocompleteUI {
       const i = results.findIndex((c) => _canonicalName(c.name) === qc);
       if (i > 0) results.unshift(results.splice(i, 1)[0]);
     }
+    this._open(el, results, info.rangeStart);
+  }
+
+  // Anima "@artist" suggestions for a query that starts with "@".
+  //   1) real tags whose name contains the literal "@xxx" (e.g. the "@_@" expression)
+  //   2) artist tags (danbooru category 1) matching the part after "@" by name / alias /
+  //      old-name — inserted WITH the leading "@" (marked `_atArtist`).
+  async _showAtTags(el, info) {
+    const q = info.query;                  // includes leading "@"
+    const bare = q.replace(/^@+/, '');     // the part after "@"
+    const [literalRaw, artistsRaw] = await Promise.all([
+      searchTags(q, settings.maxSuggestions),
+      bare.length >= 2 ? searchTags(bare, settings.maxSuggestions, 1) : [],
+    ]);
+    const literal = _applyMinCount(literalRaw).map((t) => ({ ...t, kind: 'tag' }));
+    const artists = _applyMinCount(artistsRaw).map((t) => ({ ...t, kind: 'tag', _atArtist: true }));
+    // Dedupe an artist that already appears as a literal "@name" tag (compare inserted form).
+    const seen = new Set(literal.map((t) => _canonicalName(t.name)));
+    const results = [...artists.filter((a) => !seen.has(_canonicalName('@' + a.name))), ...literal];
+    if (!results.length) { this.hide(); return; }
     this._open(el, results, info.rangeStart);
   }
 
@@ -883,6 +913,7 @@ class TagAutocompleteUI {
       core = `[${ref}]`;
     } else {
       core = _normalizeTagInsert(cand.name);
+      if (cand._atArtist) core = '@' + core;   // Anima artist syntax: insert as "@name"
     }
 
     // The splice below dispatches a trusted `input` event; tell the handler to
@@ -985,7 +1016,8 @@ class TagAutocompleteUI {
     });
     dot.title = CATEGORY_NAMES[tag.category] || 'general';
     row.appendChild(dot);
-    row.appendChild(this._nameSpan(settings.replaceUnderscore ? tag.name.replace(/_/g, ' ') : tag.name));
+    const dispName = settings.replaceUnderscore ? tag.name.replace(/_/g, ' ') : tag.name;
+    row.appendChild(this._nameSpan(tag._atArtist ? '@' + dispName : dispName));
 
     // Source info is shown via the jump affordance below (the D/G badge IS the link),
     // so there's no separate badge row here.
@@ -1303,7 +1335,23 @@ class TagAutocompleteUI {
 
     // Self-tag (the header) from the merged search. A few results so we can match the
     // exact name even when a higher-count substring match would otherwise rank first.
-    const selfTag = (await searchTags(name, 5)).find(t => t.name === name);
+    // `lookupName` is what related tags are fetched for (may differ from the clicked
+    // token when an "@artist" token resolves to a differently-named artist tag).
+    let lookupName = name;
+    let selfTag = (await searchTags(name, 5)).find(t => t.name === name);
+
+    // Anima "@artist": if the literal "@xxx" isn't itself a tag, treat "xxx" as an
+    // artist tag / alias / old-name and show THAT artist's detail + related tags.
+    if (!selfTag && settings.animaArtist && name.startsWith('@')) {
+      const bare = name.replace(/^@+/, '');
+      if (bare) {
+        const cand = await searchTags(bare, 15, 1);   // artists only (category 1)
+        selfTag = cand.find(t => t.name === bare)
+               || cand.find(t => (t.aliases || []).includes(bare))
+               || cand[0] || null;
+        if (selfTag) lookupName = selfTag.name;
+      }
+    }
     if (!selfTag) { this.hide(); return; }  // tag not in any active dataset → nothing to show
 
     const sources = Array.isArray(selfTag.sources) ? selfTag.sources : ['danbooru'];
@@ -1315,9 +1363,9 @@ class TagAutocompleteUI {
     // Related tags are computed by danbooru only. A gelbooru-only tag has none, so we
     // skip the (useless) danbooru fetch and just show its info — the user's request.
     if (sources.includes('danbooru')) {
-      const relatedResults = await fetchRelated(name, settings.maxSuggestions);
+      const relatedResults = await fetchRelated(lookupName, settings.maxSuggestions);
       for (const r of relatedResults) {
-        if (r.name !== name) results.push(r);
+        if (r.name !== lookupName) results.push(r);
       }
     }
 

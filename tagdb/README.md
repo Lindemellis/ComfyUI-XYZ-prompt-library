@@ -27,8 +27,9 @@ tagdb_data/
 - Type in any ComfyUI prompt textarea (and in the Prompt Library editors). Use ↑/↓ to move, Enter/Tab to accept, Esc to dismiss.
 - Tag names are stored with underscores; with **Replace `_` with space** on, they are inserted with spaces.
 - Suggestions also match a tag's **aliases**. When a row matched via an alias (not its name), that matching alias is shown on the row, so it's clear why the tag appears (e.g. typing `indoor` surfaces `nude` via its `indoor_nudity` alias).
+- **Anima `@artist` syntax** (opt-in, *Autocomplete → Anima "@artist" syntax*): typing `@name` suggests **artist** tags matching `name` by name / alias / old-name (inserted as `@name`), alongside any real tag that literally contains `@name`. Clicking an `@name` prompt shows that artist's detail + related tags — and if the whole `@name` is itself a real tag, that tag is shown instead. Weight/wrapper syntax is handled too, so clicking `(@wlop:1.1)` resolves to artist `wlop`.
 - Relevant settings (**XYZ Prompt Tools → …**):
-  - **Autocomplete**: enable on/off, max suggestions (default 15), hide rare tags (skip below a post count; default 0 = show all).
+  - **Autocomplete**: enable on/off, max suggestions (default 15), hide rare tags (skip below a post count; default 0 = show all), Anima `@artist` syntax.
   - **Insertion**: underscore→space, auto comma, escape brackets, full-width→half-width.
   - **Library**: also suggest your own Prompt Library prompts / entry references.
   - **Related**: click a tag in the rich editor / entry text view to see its details + related tags (one request per lookup; cached). Weighted/wrapped tokens are recognized — clicking `(wlop:1.1)` looks up `wlop`.

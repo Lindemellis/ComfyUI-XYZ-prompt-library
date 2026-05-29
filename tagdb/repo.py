@@ -42,6 +42,7 @@ def search_tags(
     db_path: Path,
     limit: int = 20,
     conn: Any = None,
+    category: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """Substring search using FTS5 trigram index, falling back to LIKE for short queries.
 
@@ -50,6 +51,9 @@ def search_tags(
 
     If `conn` is provided it is reused (and NOT closed) — the routes layer keeps a
     persistent read connection for autocomplete to avoid per-keystroke open cost.
+
+    `category` (danbooru convention: 1=artist, …) restricts results to that category
+    when given — used by the "@artist" autocomplete to surface only artist tags.
     """
     q = q.strip()
     if not q:
@@ -62,12 +66,12 @@ def search_tags(
     try:
         if len(q) >= 3:
             try:
-                rows = _search_fts(conn, q, limit)
+                rows = _search_fts(conn, q, limit, category)
                 if rows is not None:
                     return rows
             except Exception as exc:
                 logger.debug("FTS search failed, falling back to LIKE: %s", exc)
-        return _search_like(conn, q, limit)
+        return _search_like(conn, q, limit, category)
     finally:
         if own:
             conn.close()
@@ -77,6 +81,7 @@ def search_tags_multi(
     sources: List[tuple],
     q: str,
     limit: int = 20,
+    category: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """Merge per-source `search_tags` results, dedupe by name with source badges.
 
@@ -103,7 +108,7 @@ def search_tags_multi(
     merged: Dict[str, Dict[str, Any]] = {}
     order: List[str] = []
     for source_name, db_path, conn in sources:
-        rows = search_tags(q, db_path, limit=per_source, conn=conn)
+        rows = search_tags(q, db_path, limit=per_source, conn=conn, category=category)
         for r in rows:
             name = r["name"]
             existing = merged.get(name)
@@ -147,26 +152,33 @@ def search_tags_multi(
     return out[:limit]
 
 
-def _search_fts(conn: Any, q: str, limit: int) -> Optional[List[Dict[str, Any]]]:
+def _search_fts(conn: Any, q: str, limit: int,
+                category: Optional[int] = None) -> Optional[List[Dict[str, Any]]]:
     """FTS5 trigram phrase search — matches any tag/alias containing q as substring."""
     escaped = q.replace('"', '""')
-    sql = """
+    cat_clause = "AND t.category = ?" if category is not None else ""
+    sql = f"""
         SELECT t.name, t.category, t.post_count, t.is_deprecated,
                COALESCE(GROUP_CONCAT(a.alias, ','), '') AS aliases,
                (SELECT text FROM translations tr WHERE tr.tag = t.name AND tr.lang = 'artist') AS translations
         FROM tags_fts f
         JOIN tags t ON t.id = f.rowid
         LEFT JOIN aliases a ON a.canonical = t.name
-        WHERE tags_fts MATCH ?
+        WHERE tags_fts MATCH ? {cat_clause}
         GROUP BY t.id
         ORDER BY t.post_count DESC
         LIMIT ?
     """
-    rows = conn.execute(sql, (f'"{escaped}"', limit)).fetchall()
+    params: List[Any] = [f'"{escaped}"']
+    if category is not None:
+        params.append(category)
+    params.append(limit)
+    rows = conn.execute(sql, params).fetchall()
     return [_row_to_dict(r) for r in rows]
 
 
-def _search_like(conn: Any, q: str, limit: int) -> List[Dict[str, Any]]:
+def _search_like(conn: Any, q: str, limit: int,
+                 category: Optional[int] = None) -> List[Dict[str, Any]]:
     """Fast name-prefix match for short queries (<3 chars) + FTS-failure fallback.
 
     Two cheap steps instead of a join+group over the whole prefix set (which would
@@ -179,22 +191,32 @@ def _search_like(conn: Any, q: str, limit: int) -> List[Dict[str, Any]]:
     # (these queries are less frequent and users expect a small delay).
     if not q.isascii():
         pat = f"%{q}%"
-        rows = conn.execute("""
+        cat_clause = "AND t.category = ?" if category is not None else ""
+        params: List[Any] = [pat, pat]
+        if category is not None:
+            params.append(category)
+        params.append(limit)
+        rows = conn.execute(f"""
             SELECT t.name, t.category, t.post_count, t.is_deprecated,
                    COALESCE(GROUP_CONCAT(a.alias, ','), '') AS aliases,
                    (SELECT text FROM translations tr WHERE tr.tag = t.name AND tr.lang = 'artist') AS translations
             FROM tags t
             LEFT JOIN aliases a ON a.canonical = t.name
-            WHERE t.name LIKE ? OR a.alias LIKE ?
+            WHERE (t.name LIKE ? OR a.alias LIKE ?) {cat_clause}
             GROUP BY t.id ORDER BY t.post_count DESC LIMIT ?
-        """, (pat, pat, limit)).fetchall()
+        """, params).fetchall()
         return [_row_to_dict(r) for r in rows]
 
     prefix = f"{q}%"
+    cat_clause = "AND category = ?" if category is not None else ""
+    params = [prefix]
+    if category is not None:
+        params.append(category)
+    params.append(limit)
     base = conn.execute(
         "SELECT name, category, post_count, is_deprecated FROM tags "
-        "WHERE name LIKE ? ORDER BY post_count DESC LIMIT ?",
-        (prefix, limit),
+        f"WHERE name LIKE ? {cat_clause} ORDER BY post_count DESC LIMIT ?",
+        params,
     ).fetchall()
     if not base:
         return []
