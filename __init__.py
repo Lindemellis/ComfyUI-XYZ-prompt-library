@@ -1,4 +1,3 @@
-from .node import *
 from .prompt_library_node import PromptLibraryNode
 from .prompt_library_v2 import PromptLibraryV2PositiveNode, PromptLibraryV2NegativeNode
 
@@ -9,10 +8,6 @@ from server import PromptServer
 
 
 NODE_CLASS_MAPPINGS = {
-    "XYZ Multi Text Concatenate": MultiTextConcate,
-    "XYZ Multi Clip Encoder": MultiClipEncoder,
-    "XYZ Multi Text Replace": MutiTextReplace,
-    "XYZ Random String Picker": RandomStringPicker,
     "XYZ Prompt Library": PromptLibraryNode,
     "XYZ Prompt Library V2 Positive": PromptLibraryV2PositiveNode,
     "XYZ Prompt Library V2 Negative": PromptLibraryV2NegativeNode,

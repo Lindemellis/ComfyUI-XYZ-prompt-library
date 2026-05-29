@@ -2,7 +2,7 @@
 
 **English** | [中文](README_zh.md)
 
-A ComfyUI custom-node pack with three larger tools — **Danbooru (+ optional Gelbooru) tag autocomplete**, a **hierarchical prompt library (V2)**, and an **image gallery** — plus a few small text/prompt utility nodes.
+A ComfyUI custom-node pack with three larger tools — **Danbooru (+ optional Gelbooru) tag autocomplete**, a **hierarchical prompt library (V2)**, and an **image gallery**.
 
 Each tool has its own manual:
 
@@ -35,7 +35,6 @@ On the **first run**, the prebuilt Danbooru tag dataset (~66 MB, ~118K tags with
 | **Tag autocomplete** | Danbooru tag suggestions as you type in any prompt box, with a versioned local dataset, updates, snapshots, and date-based "time-machine" reconstruction. | [tagdb](tagdb/README.md) |
 | **Prompt Library V2** | A SQLite-backed hierarchical prompt library with `[ref]` references, trigger aliases, weights, random modes, and a floating text editor. Resolved by two nodes at execution time. | [plv2](prompt_library_v2/README.md) |
 | **Image Gallery** | Browse and manage ComfyUI output/input images — filters, tags, bulk operations, and metadata viewing. | [gallery](gallery/README.md) |
-| **Utility nodes** | Small text/prompt helpers (see the table below). | — |
 
 ## Where things live
 
@@ -66,10 +65,6 @@ Each Prompt Library V2 node also has its own **Library / Editor / Preview** butt
 
 | Node | Category | Purpose |
 |---|---|---|
-| XYZ Multi Text Concatenate | `XYZ Node` | Join several text inputs with a delimiter, prefix, and suffix |
-| XYZ Multi Text Replace | `XYZ Node` | Template replacement using `[N]` placeholders |
-| XYZ Multi Clip Encoder | `XYZ Node` | Batch CLIP text encoding for multiple prompts |
-| XYZ Random String Picker | `XYZ Node` | Random pick from `;`-separated tagged items |
 | XYZ Prompt Library V2 Positive | `XYZNodes/Prompt` | Resolve a positive prompt template against the library |
 | XYZ Prompt Library V2 Negative | `XYZNodes/Prompt` | Resolve a negative prompt template against the library |
 | XYZ Prompt Library | `XYZNodes/Prompt` | Legacy V1 prompt library node (kept for backward compatibility) |

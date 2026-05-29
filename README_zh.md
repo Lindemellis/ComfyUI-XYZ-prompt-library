@@ -2,7 +2,7 @@
 
 [English](README.md) | **中文**
 
-一个 ComfyUI 自定义节点包，包含三个较大的工具——**Danbooru（+ 可选 Gelbooru）标签自动补全**、**分层提示词库（V2）**、**图片画廊**——以及若干小型文本/提示词工具节点。
+一个 ComfyUI 自定义节点包，包含三个较大的工具——**Danbooru（+ 可选 Gelbooru）标签自动补全**、**分层提示词库（V2）**、**图片画廊**。
 
 每个工具都有独立手册：
 
@@ -35,7 +35,6 @@
 | **标签自动补全** | 在任意提示词框输入时给出 Danbooru 标签建议；带有版本化的本地数据集、增量/全量更新、快照，以及按日期回溯的「时间机器」重建。 | [tagdb](tagdb/README_zh.md) |
 | **提示词库 V2** | 基于 SQLite 的分层提示词库，支持 `[ref]` 引用、触发别名、权重、随机模式，以及浮动文本编辑器。由两个节点在执行时解析。 | [plv2](prompt_library_v2/README_zh.md) |
 | **图片画廊** | 浏览与管理 ComfyUI 的 output/input 图片——筛选、标签、批量操作、元数据查看。 | [gallery](gallery/README_zh.md) |
-| **工具节点** | 小型文本/提示词辅助节点（见下表）。 | — |
 
 ## 入口在哪里
 
@@ -66,10 +65,6 @@
 
 | 节点 | 分类 | 用途 |
 |---|---|---|
-| XYZ Multi Text Concatenate | `XYZ Node` | 用分隔符、前缀、后缀拼接多个文本输入 |
-| XYZ Multi Text Replace | `XYZ Node` | 使用 `[N]` 占位符做模板替换 |
-| XYZ Multi Clip Encoder | `XYZ Node` | 对多条提示词批量做 CLIP 编码 |
-| XYZ Random String Picker | `XYZ Node` | 从 `;` 分隔的带标签条目中随机选取 |
 | XYZ Prompt Library V2 Positive | `XYZNodes/Prompt` | 针对库解析正向提示词模板 |
 | XYZ Prompt Library V2 Negative | `XYZNodes/Prompt` | 针对库解析负向提示词模板 |
 | XYZ Prompt Library | `XYZNodes/Prompt` | 旧版 V1 提示词库节点（保留以兼容） |
