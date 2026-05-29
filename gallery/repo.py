@@ -1853,14 +1853,19 @@ def _build_filter(
             tok = str(token).strip()
             if not tok:
                 continue
+            # Underscore-insensitive match. Stored tokens keep whatever form the
+            # prompt used — danbooru/NAI prompts keep underscores (e.g.
+            # "slave_gear_(tsmg_nao!)") — but the query side maps "_"→space (F05).
+            # Canonicalise both sides so the stored underscore token still matches.
             where.append(
                 "EXISTS ("
                 "SELECT 1 FROM image_prompt_token ipt "
                 "INNER JOIN prompt_token pt ON pt.id = ipt.token_id "
-                "WHERE ipt.image_id = image.id AND pt.token = ? COLLATE NOCASE"
+                "WHERE ipt.image_id = image.id "
+                "AND replace(pt.token, '_', ' ') = ? COLLATE NOCASE"
                 ")"
             )
-            params.append(tok)
+            params.append(tok.replace("_", " "))
 
     if not where:
         return "1=1", params

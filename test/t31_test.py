@@ -338,6 +338,75 @@ def test_split_positive_prompt_words_underscore_f05(tmp_path: Path) -> None:
     assert vocab.split_positive_prompt_words("hello.") == ("hello",)
 
 
+def test_prompt_mode_underscore_token_matches(tmp_path: Path) -> None:
+    """Regression: a danbooru/NAI prompt token that keeps underscores (e.g.
+    ``slave_gear_\\(tsmg_nao!\\)``) is stored verbatim by the indexer, but the
+    query side maps ``_``→space (F05). Prompt-mode filtering must still match it
+    (previously: autocomplete showed N images, but the filter returned 0)."""
+    from urllib.parse import quote
+
+    from gallery import db
+    from gallery import repo as g_repo
+    from gallery import routes
+    from gallery import vocab
+
+    db_path = tmp_path / "gallery.sqlite"
+    conn = db.connect_write(db_path)
+    try:
+        db.migrate(conn)
+        root = _insert_folder(conn, path="/t31u/out", kind="output")
+        # Escaped parens + underscores → stored token "slave_gear_(tsmg_nao!)".
+        pp = "1girl, slave_gear_\\(tsmg_nao!\\), standing"
+        img_id = _insert_image(
+            conn, path="/t31u/out/a.png", folder_id=root,
+            relative_path="a.png", filename="a.png", file_size=10, mtime_ns=1,
+            positive_prompt=pp, model=None, workflow_present=0,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+    conn = db.connect_write(db_path)
+    try:
+        toks = list(vocab.normalize_prompt(pp, frozenset()))
+        assert "slave_gear_(tsmg_nao!)" in toks, toks
+        g_repo.UpsertVocabAndLinksOp(
+            image_id=img_id, prompt_tokens=toks, word_tokens=[], tag_names=[],
+        ).apply(conn)
+        conn.commit()
+    finally:
+        conn.close()
+
+    fake = type("S", (), {"routes": web.RouteTableDef()})()
+    routes._registered = False
+    routes.DB_PATH = db_path
+    routes.THUMBS_DIR = tmp_path / "thumbs_u"
+    routes.THUMBS_DIR.mkdir(exist_ok=True)
+    routes.register(fake)
+    app = web.Application()
+    app.add_routes(fake.routes)
+
+    async def run() -> None:
+        server = TestServer(app)
+        client = TestClient(server)
+        await server.start_server()
+        try:
+            q = "prompt_match_mode=prompt&prompt=" + quote("slave_gear_(tsmg_nao!)")
+            r1 = await client.get(f"/xyz/gallery/images?{q}&limit=50")
+            r2 = await client.get(f"/xyz/gallery/images/count?{q}")
+            assert r1.status == 200 and r2.status == 200
+            body = await r1.json()
+            cnt = await r2.json()
+            got = {it["id"] for it in body["items"]}
+            assert got == {img_id}, got
+            assert cnt["total"] == 1, cnt
+        finally:
+            await client.close()
+            await server.close()
+
+    asyncio.run(run())
+
+
 def test_explain_token_filter_not_full_table_scan(tmp_path: Path) -> None:
     from gallery import repo as g_repo
 
@@ -376,6 +445,7 @@ def main() -> None:
         ("count", test_images_count_matches_list_total),
         ("400", test_invalid_query_envelope),
         ("mapping", test_parse_filter_mapping_string_positive_tokens),
+        ("us_token", test_prompt_mode_underscore_token_matches),
         ("explain", test_explain_token_filter_not_full_table_scan),
     ]
     for label, fn in steps:
