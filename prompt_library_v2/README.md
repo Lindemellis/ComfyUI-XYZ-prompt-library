@@ -71,6 +71,7 @@ After resolving, the engine collapses runs of consecutive delimiters (e.g. left 
 ## Text editor window
 
 - **Single / split** panes — edit positive and negative together with a draggable divider.
+- Opening the editor from a node's **📝 Editor** button focuses that node: in single mode it switches to the node's positive/negative tab and loads it; in split mode it just focuses the matching pane (no tab switch).
 - `[ref]` **highlighting** — valid references are tinted; the backdrop tracks the text.
 - **Undo / redo** per pane, **find / replace** (case / word / selection), and **smart insert** that adds delimiters based on the cursor context.
 - **Right-click** — add selection to an entry, create a new entry from it, or open the referenced entry in detail.
@@ -91,6 +92,7 @@ Configured in **XYZ Prompt Tools → Insertion** (these apply to both the librar
 | Auto comma | append `, ` after an inserted tag |
 | Escape brackets / backslash | turn non-weight `()` into `\(\)` so they are literal |
 | Full-width → half-width | convert `（）`, `，` … to ASCII |
+| Comma spacing | normalize a comma + any spaces into a single `, ` (line breaks are left untouched) |
 
 ## Naming rules
 

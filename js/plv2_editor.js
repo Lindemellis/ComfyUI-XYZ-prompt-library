@@ -160,7 +160,12 @@ function _makePane(tab, withHeader) {
     fontFamily: FONT, fontSize: _fontSz + 'px', lineHeight: LH,
     whiteSpace: 'pre-wrap', wordBreak: 'break-word',
     color: '#cdd6f4', background: 'transparent', pointerEvents: 'none',
-    overflowY: 'auto', overflowX: 'hidden', boxSizing: 'border-box', scrollbarWidth: 'none',
+    // The backdrop must wrap text at EXACTLY the textarea's content width. The textarea
+    // reserves a thin scrollbar gutter when it overflows; to keep widths identical, the
+    // backdrop reserves the same stable gutter (rendered invisible) — otherwise wrapping
+    // diverges and the caret/selection highlight drift off the real glyph positions.
+    overflowY: 'auto', overflowX: 'hidden', boxSizing: 'border-box',
+    scrollbarWidth: 'thin', scrollbarGutter: 'stable', scrollbarColor: 'transparent transparent',
   });
 
   const textarea = document.createElement('textarea');
@@ -169,7 +174,7 @@ function _makePane(tab, withHeader) {
     fontFamily: FONT, fontSize: _fontSz + 'px', lineHeight: LH,
     background: 'transparent', color: 'transparent', caretColor: '#cdd6f4',
     border: 'none', outline: 'none', resize: 'none', boxSizing: 'border-box',
-    overflowY: 'auto', wordBreak: 'break-word',
+    overflowY: 'auto', wordBreak: 'break-word', scrollbarGutter: 'stable',
   });
   textarea.setAttribute('spellcheck', 'false');
   textarea.placeholder = 'e.g. [toki], {smile|laugh}, solo';
@@ -312,9 +317,13 @@ function _injectStyleOnce() {
   const s = document.createElement('style');
   s.id = 'plv2-editor-style';
   s.textContent = `
-    .plv2-bd::-webkit-scrollbar { display: none; }
+    /* Backdrop & textarea must reserve an IDENTICAL scrollbar gutter so they wrap text at
+       the same width (else caret/selection highlight drift off the glyphs). Both use the
+       same standard mechanism — scrollbar-width:thin + scrollbar-gutter:stable — and the
+       backdrop hides its gutter via a transparent scrollbar-color (set inline), NOT
+       'display:none' (which would remove the gutter and reintroduce the mismatch). */
     #plv2-editor-col textarea::placeholder { color: #45475a; }
-    #plv2-editor-col textarea { scrollbar-width: thin; scrollbar-color: #45475a transparent; }
+    #plv2-editor-col textarea { scrollbar-width: thin; scrollbar-color: #45475a transparent; scrollbar-gutter: stable; }
   `;
   document.head.appendChild(s);
 }
@@ -902,10 +911,30 @@ function _refresh() {
   const col = window.plv2?.panel?.editorCol;
   if (!col) return;
   _build(col);
+
+  // Explicit "open editor for THIS node" (the node's 📝 Editor button sets state.focusNode,
+  // one-shot). Bind that node into its polarity's saved slot so its pane shows it. In single
+  // mode also switch the visible pane to that polarity; in split mode both polarities are
+  // already shown side by side, so we skip the tab switch (per spec) and just focus its pane.
+  const focus = window.plv2.state.focusNode;
+  window.plv2.state.focusNode = null;
+  const focusTab = focus
+    ? (focus.comfyClass === 'XYZ Prompt Library V2 Negative' ? 'neg'
+     : focus.comfyClass === 'XYZ Prompt Library V2 Positive' ? 'pos' : null)
+    : null;
+  if (focusTab) {
+    _savedNodes[focusTab] = focus;
+    if (_orientation === 'single') {
+      _singleTab = focusTab;
+      if (_panes[0]) _panes[0].tab = focusTab;
+    }
+  }
+
   // Re-resolve / re-sync on every show (graph may have changed).
   for (const p of _panes) { p.resolveNode(); p.populate(); p.syncFromNode(); }
   if (_orientation === 'single') _applySingleTabStyle();
-  _setActive(_active && _panes.includes(_active) ? _active : _panes[0]);
+  const focusPane = focusTab ? _paneForPolarity(focusTab) : null;
+  _setActive(focusPane || (_active && _panes.includes(_active) ? _active : _panes[0]));
   _startPoll();
   _resolveRefsBackdrop();
 }

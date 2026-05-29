@@ -201,6 +201,8 @@ class SettingsPage {
             toggle(() => S.escapeParens, sync('escapeParens', 'escape'))),
         row('Full-width → half-width', 'Convert "（）" and full-width characters to ASCII.',
             toggle(() => S.halfwidth, sync('halfwidth', 'halfwidth'))),
+        row('Comma spacing', 'Normalize a comma + any spaces into a single ", ". Line breaks are left untouched.',
+            toggle(() => S.commaSpace, sync('commaSpace', 'commaSpace'))),
       );
     } else if (key === 'library') {
       wrap.append(

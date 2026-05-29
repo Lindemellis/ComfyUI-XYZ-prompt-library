@@ -606,20 +606,18 @@ function getTokenAtCaret(el) {
   const end = _tokenEnd(text, pos);
   let tok = text.substring(start, end).trim();
 
-  // Drop trailing :weight first
-  const ci = tok.indexOf(':');
-  if (ci !== -1) {
-    const after = tok.substring(ci + 1);
-    if (/^\d*\.?\d+$/.test(after.replace(/[\)\>]+$/, '').trim())) {
-      tok = tok.substring(0, ci);
-    }
-  }
+  // Drop a trailing weight suffix like ":1.1" but KEEP any close-wrapper that followed it,
+  // so "(wlop:1.1)" → "(wlop)" (not "(wlop", which would leave the leading "(" unbalanced
+  // and unstripped). The number is always at the token end; the captured ) / > is restored
+  // for the paired strip below. Escaped \( \) inside a name aren't ":num", so untouched.
+  tok = tok.replace(/:\s*\d*\.?\d+\s*([\)\>]*)\s*$/, '$1').trim();
 
-  // Only strip wrapping parens/brackets when they are paired (both sides present)
-  if (/^[\(\<]/.test(tok) && /[\)\>]$/.test(tok)) {
-    tok = tok.replace(/^[\(\<]/, '').replace(/[\)\>]$/, '');
+  // Strip balanced wrapping emphasis: "(tag)" / "<tag>" / "((tag))" → "tag". The loop only
+  // peels a wrapper when BOTH ends have one, and escaped parens start with a backslash (so
+  // they never sit at the leading edge) — thus "(yd \(orange maru\):1.1)" → "yd \(orange maru\)".
+  while (/^[\(\<]/.test(tok) && /[\)\>]$/.test(tok)) {
+    tok = tok.replace(/^[\(\<]/, '').replace(/[\)\>]$/, '').trim();
   }
-  tok = tok.trim();
 
   // Unescape backslash-escaped parens before canonicalising to underscore form
   tok = tok.replace(/\\([()])/g, '$1');
@@ -808,7 +806,12 @@ class TagAutocompleteUI {
     // No selectable rows (e.g. a tag-detail panel with only a header + "no related"
     // note) — keep no selection and bail, so the header-skipping loops below can't spin.
     if (!this._candidates.some((c) => !c._isSelf)) { this._selIndex = -1; return; }
-    if (!this._hasNavigated) {
+    if (!this._hasNavigated && this._selIndex < 0) {
+      // First navigation from a "no selection" state (info panels: related tags /
+      // clicked-tag detail). Land ON the first selectable item rather than advancing
+      // past it. Typing-triggered autocomplete starts with _selIndex = 0 (first row
+      // already highlighted), so it skips this branch and navigates normally below —
+      // the first Down press then moves to the second option.
       this._hasNavigated = true;
       // Find the first selectable index (skip header rows: _isSelf tags / entry refs)
       let first = 0;
@@ -830,6 +833,7 @@ class TagAutocompleteUI {
         }
       }
     } else {
+      this._hasNavigated = true;
       // Normal wrap-around navigation, skipping headers
       do {
         this._selIndex = (this._selIndex + dir + this._candidates.length) % this._candidates.length;
@@ -901,7 +905,9 @@ class TagAutocompleteUI {
       const beforeStart = text[start - 1];
       let toInsert;
       if (cand.kind === 'ref' && cand.refKind === 'bracket') {
-        toInsert = core;
+        const wantComma = settings.autoInsertComma
+          && afterCursor !== ',' && afterCursor !== ':' && afterCursor !== ']';
+        toInsert = core + (wantComma ? delim : '');
       } else if (cand.kind === 'ref' && cand.refKind === 'slash') {
         toInsert = core + (settings.autoInsertComma && afterCursor !== ',' ? delim : '');
       } else {
@@ -997,11 +1003,28 @@ class TagAutocompleteUI {
         color: '#888', fontSize: '13px', flexShrink: '0', maxWidth: '120px',
         overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
       });
-      if (tag.aliases && tag.aliases.length) {
+      // The FTS index folds in aliases/translations, so a tag can be in the list because
+      // an ALIAS matched the query, not its name (e.g. typing "indoor", `nude` matched via
+      // its `indoor_nudity` alias). Showing aliases[0] ("naked") is then baffling. When the
+      // name itself doesn't contain the query, surface the alias/translation that DID match.
+      const norm = (s) => (s || '').replace(/_/g, ' ').toLowerCase();
+      const q = norm(this._lastQuery).trim();
+      const nameMatches = !q || norm(tag.name).includes(q);
+      let matched = null;
+      if (q && !this._isRelated && !nameMatches) {
+        matched = (tag.aliases || []).find((a) => norm(a).includes(q))
+               || (tag.translations || []).find((t) => norm(t).includes(q));
+      }
+      if (matched) {
+        aliasSpan.textContent = matched;
+        aliasSpan.title = `matched alias: ${matched}` +
+          (tag.aliases && tag.aliases.length ? `\nall: ${tag.aliases.join(', ')}` : '');
+        aliasSpan.style.color = '#a6c98f';
+      } else if (tag.aliases && tag.aliases.length) {
         aliasSpan.textContent = tag.aliases[0]; aliasSpan.title = tag.aliases.join(', ');
-        } else if (tag.translations && tag.translations.length) {
-          aliasSpan.textContent = tag.translations[0]; aliasSpan.title = tag.translations.join(', ');
-          aliasSpan.style.color = '#caa';
+      } else if (tag.translations && tag.translations.length) {
+        aliasSpan.textContent = tag.translations[0]; aliasSpan.title = tag.translations.join(', ');
+        aliasSpan.style.color = '#caa';
       }
       row.appendChild(aliasSpan);
     }
@@ -1336,6 +1359,13 @@ class TagAutocompleteUI {
   // so its span.offsetTop/offsetLeft are in LOCAL (unscaled) space. We must scale
   // the local caret offset to match the viewport – otherwise the dropdown drifts
   // and covers the text being typed when the canvas is zoomed in/out.
+  //
+  // But not every host textarea lives inside the zoomed canvas: the PLv2 Text
+  // Editor is a standalone floating window that is NOT affected by the canvas
+  // transform. Using the global canvas zoom there would re-introduce the drift.
+  // So derive the *effective* transform scale from the element itself — the ratio
+  // of its rendered (viewport) width to its layout (local/unscaled) width. This is
+  // ~canvas-scale for in-canvas widgets and exactly 1 for an un-transformed window.
   _position(el) {
     const rect = el.getBoundingClientRect();
     const rootH = this._root.offsetHeight || 200;
@@ -1343,7 +1373,7 @@ class TagAutocompleteUI {
     const vH = window.innerHeight;
     const vW = window.innerWidth;
     const gap = 4;
-    const scale = window.app?.canvas?.ds?.scale ?? 1.0;
+    const scale = el.offsetWidth ? (rect.width / el.offsetWidth) : 1.0;
     let t, l;
 
     if (this._isInfo) {

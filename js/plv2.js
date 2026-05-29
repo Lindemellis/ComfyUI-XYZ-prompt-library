@@ -89,6 +89,8 @@ const state = {
   activeNode:        null,   // LiteGraph node owning the editor
   selectedLibNodeId: null,   // lib node id selected in tree
   activeTab:         'pos',  // 'pos' | 'neg'
+  focusNode:         null,   // node whose 📝 Editor button was just clicked — the editor
+                             // consumes this on show to focus that node/polarity (one-shot)
 };
 
 // ─── Persistence ────────────────────────────────────────────────────────────
@@ -1048,7 +1050,7 @@ function inlinePrompt(title, defaultValue = '') {
 
 const SETTINGS_KEY = 'plv2_settings_v1';
 const _settings = (() => {
-  const defs = { escape: false, halfwidth: false, underscore: false };
+  const defs = { escape: false, halfwidth: false, underscore: false, commaSpace: false };
   try { return { ...defs, ...JSON.parse(localStorage.getItem(SETTINGS_KEY) || '{}') }; }
   catch { return { ...defs }; }
 })();
@@ -1085,9 +1087,17 @@ function _escapePrompt(seg) {
   return out;
 }
 
+// Comma spacing: collapse "," + any run of spaces/tabs into ", " (exactly one space).
+// Never touches line breaks — a comma at end of line keeps its newline and gains no
+// trailing space ("a,\n", "a,  \n" → "a,\n"); inline commas get exactly one space.
+function _normCommaSpace(seg) {
+  return seg.replace(/,[ \t]*(\r?\n)?/g, (_m, nl) => (nl ? ',' + nl : ', '));
+}
+
 function _normSeg(seg) {
   if (_settings.halfwidth)  seg = _toHalfwidth(seg);
   if (_settings.underscore) seg = seg.replace(/_/g, ' ');
+  if (_settings.commaSpace) seg = _normCommaSpace(seg);  // after half-width "，"→","
   if (_settings.escape)     seg = _escapePrompt(seg);   // last: after full-width "（）" became "()"
   return seg;
 }
@@ -1095,7 +1105,7 @@ function _normSeg(seg) {
 /** Apply the enabled transforms to literal prompt text, skipping [refs]/{patterns}. */
 function normalizePrompt(text) {
   if (typeof text !== 'string' || !text) return text;
-  if (!_settings.escape && !_settings.halfwidth && !_settings.underscore) return text;
+  if (!_settings.escape && !_settings.halfwidth && !_settings.underscore && !_settings.commaSpace) return text;
   const parts = text.split(/(\[[^\]\n]*\]|\{[^}\n]*\})/);   // odd indices = refs/patterns (kept)
   for (let i = 0; i < parts.length; i++) if (i % 2 === 0) parts[i] = _normSeg(parts[i]);
   return parts.join('');
@@ -1121,6 +1131,9 @@ function _applyNode(litegraphNode) {
   if (litegraphNode.comfyClass === 'XYZ Prompt Library V2 Positive')      state.activeTab = 'pos';
   else if (litegraphNode.comfyClass === 'XYZ Prompt Library V2 Negative') state.activeTab = 'neg';
   state.activeNode = litegraphNode;
+  // Signal the editor's onShow handler to focus THIS specific node (and switch the
+  // single-mode polarity tab to match). Consumed + cleared by the editor's _refresh.
+  state.focusNode = litegraphNode;
 }
 
 // ─── Public surface ───────────────────────────────────────────────────────────
