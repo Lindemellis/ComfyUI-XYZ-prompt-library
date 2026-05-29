@@ -1,5 +1,6 @@
 {
   "_comment": "Author-maintained pointer to prebuilt TagDB datasets on GitHub Releases. Build danbooru with `python -m tagdb.build_dataset --full --with-versions --with-artists --zip` (base) + `--translations-dlc`; build the gelbooru DLC with `python -m tagdb.build_dataset --gelbooru --zip` and paste its entry into datasets_gelbooru[] + set latest_gelbooru. The .zip lives on the Release, NOT in git.",
+  "_release_convention": "Going forward, use one release per source per date, tagged `<source>-<YYYY-MM-DD>` (e.g. danbooru-2026-05-26, gelbooru-2025-09-25); asset filenames stay `<source>_<date>.sqlite.zip` (the install code splits on the `_danbooru.sqlite`/`_gelbooru.sqlite` suffix). translations_<date>.sqlite.zip is danbooru-only and rides in the danbooru release. The app picks 'latest' from the `latest`/`latest_gelbooru` keys here, NOT GitHub's Latest-release badge. Existing tagdb-<date> releases are left as-is (renaming a tag breaks the asset URLs referenced below).",
   "latest": "2026-05-26",
   "latest_gelbooru": "2026-05-27",
   "datasets_gelbooru": [

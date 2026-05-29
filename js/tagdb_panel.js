@@ -101,6 +101,8 @@ function el(tag, props = {}, ...children) {
 
 const fmtDays = (d) => (d == null ? 'never' : `${d} day(s) ago`);
 const fmtEpoch = (s) => (s ? new Date(s * 1000).toISOString().slice(0, 10) : '—');
+const fmtMB = (b) => (b ? `${(b / (1 << 20)).toFixed(b >= (10 << 20) ? 0 : 1)} MB` : '—');
+const fmtTags = (n) => (n ? (n >= 1000 ? `${Math.round(n / 1000)}k tags` : `${n} tags`) : '');
 
 // ─── Panel ───────────────────────────────────────────────────────────────────────
 
@@ -304,16 +306,58 @@ class TagDBManager {
     );
   }
 
-  // ── official dataset ──
+  // ── official dataset (version picker) ──
   _sectionOfficial() {
     this.els.official = el('div', { style: { fontSize: '12px', marginBottom: '6px' } }, '—');
+    this.els.officialVersions = el('div', { style: { marginTop: '2px' } });
     return this._section('Prebuilt dataset (from the node author’s GitHub release)',
       this.els.official,
-      el('div', {},
+      el('div', { style: { marginBottom: '6px' } },
         this._btn('Check for updates', () => this._checkOfficial()),
-        this._btn('Download / Update', () => this._downloadOfficial(), { primary: true }),
+        this._btn('Download latest', () => this._downloadOfficial(), { primary: true }),
       ),
+      el('div', { style: { fontSize: '11px', color: '#999', margin: '4px 0 2px' } },
+        'Available versions — pick one to download, or use “Download latest”. ' +
+        '“downloaded” = already on disk; downloading replaces the working DB ' +
+        '(your current one is exported to a local checkpoint first).'),
+      this.els.officialVersions,
     );
+  }
+
+  // Render a manifest version list into `host`. Each row shows date + count cutoff +
+  // tag count + size; installed versions are marked, others get a Download button.
+  _renderVersionList(versions, host, onDownload) {
+    host.innerHTML = '';
+    if (!versions || !versions.length) {
+      host.append(el('div', { style: { fontSize: '12px', color: '#888', padding: '4px 0' } },
+        'No versions published yet.'));
+      return;
+    }
+    for (const v of versions) {
+      const meta = [
+        v.min_post_count != null ? `count≥${v.min_post_count}` : '',
+        fmtTags(v.tag_count),
+        fmtMB(v.size_bytes),
+        v.has_translations ? '+translations' : '',
+      ].filter(Boolean).join(' · ');
+      const latestBadge = v.is_latest
+        ? el('span', { style: {
+            background: '#3a6', color: '#fff', borderRadius: '3px', padding: '0 5px',
+            fontSize: '10px', marginRight: '6px', fontWeight: 'bold',
+          }}, 'latest')
+        : null;
+      const right = v.installed
+        ? el('span', { style: { color: '#6f6', fontSize: '11px', padding: '5px 8px' } }, 'downloaded')
+        : this._btn('Download', () => onDownload(v.version));
+      host.append(el('div', { style: {
+        display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        padding: '4px 0', borderBottom: '1px solid #2a2a2a',
+      }},
+        el('div', {}, latestBadge, el('b', {}, v.version || '—'),
+          el('div', { style: { fontSize: '11px', color: '#aaa' } }, meta)),
+        el('span', { style: { flexShrink: '0' } }, right),
+      ));
+    }
   }
 
   // ── gelbooru (second source) ──
@@ -360,6 +404,7 @@ class TagDBManager {
   // danbooru's "Update from danbooru" section, incl. the terminal-style <pre> log).
   _sectionGelbooruDataset() {
     this.els.gelStatus = el('div', { style: { fontSize: '12px', margin: '4px 0' } }, '—');
+    this.els.gelVersions = el('div', { style: { marginTop: '2px' } });
     this.els.gelMinCount = el('input', { type: 'number', value: '20', style: { ...this._inputStyle(), width: '70px', display: 'inline-block' } });
     this.els.gelLog = el('pre', { style: {
       background: '#111', border: '1px solid #333', borderRadius: '4px', padding: '6px',
@@ -369,10 +414,13 @@ class TagDBManager {
       el('div', { style: { fontSize: '11px', color: '#999', marginBottom: '4px' } },
         'When installed AND enabled in Settings → Autocomplete, gelbooru tags merge into suggestions (rows show D/G tokens). Deprecated tags are excluded. No time machine — gelbooru is current-only.'),
       this.els.gelStatus,
-      el('div', {},
+      el('div', { style: { marginBottom: '6px' } },
         this._btn('Check for updates', () => this._checkGelbooru()),
-        this._btn('Download dataset', () => this._downloadGelbooru(), { primary: true }),
+        this._btn('Download latest', () => this._downloadGelbooru(), { primary: true }),
       ),
+      el('div', { style: { fontSize: '11px', color: '#999', margin: '4px 0 2px' } },
+        'Available versions — pick one to download, or use “Download latest”. Downloading needs no credentials.'),
+      this.els.gelVersions,
       el('div', { style: { marginTop: '6px' } },
         el('label', { style: { fontSize: '12px' } }, 'build direct: post count ≥ '), this.els.gelMinCount,
         this._btn('Build from gelbooru', () => this._buildGelbooru()),
@@ -486,6 +534,10 @@ class TagDBManager {
       this.els.official.innerHTML =
         `latest: <b>${info.latest || '—'}</b> · installed: <b>${info.installed || 'none'}</b>` +
         (info.update_available ? ' · <span style="color:#6f6">update available</span>' : ' · up to date');
+      if (this.els.officialVersions) {
+        this._renderVersionList(info.versions, this.els.officialVersions,
+          (v) => this._downloadOfficial(v));
+      }
       if (!silent) this._toast(`Prebuilt dataset: ${status} (latest ${info.latest || '—'}, installed ${info.installed || 'none'})`);
     } catch (e) {
       this.els.official.textContent = 'check failed: ' + e.message;
@@ -493,13 +545,13 @@ class TagDBManager {
     }
   }
 
-  async _downloadOfficial() {
+  async _downloadOfficial(version) {
     try {
       // If a working DB exists, replace it (the backend exports it to local/ first).
       const snaps = await api.snapshots();
       const hasWorking = snaps.some((s) => s.kind === 'working');
-      await api.officialDownload({ replace_working: hasWorking });
-      this._toast('Download started');
+      await api.officialDownload({ version: version || undefined, replace_working: hasWorking });
+      this._toast(version ? `Downloading ${version}…` : 'Download started');
     } catch (e) { this._toast('Download error: ' + e.message); }
   }
 
@@ -531,6 +583,10 @@ class TagDBManager {
         txt += ' · no prebuilt DLC published — build directly with credentials';
       }
       if (this.els.gelStatus) this.els.gelStatus.innerHTML = txt;
+      if (this.els.gelVersions) {
+        this._renderVersionList(info.versions, this.els.gelVersions,
+          (v) => this._downloadGelbooru(v));
+      }
       if (!silent) this._toast('Gelbooru: ' + (info.active ? 'installed' : 'not installed'));
     } catch (e) {
       if (this.els.gelStatus) this.els.gelStatus.textContent = 'check failed: ' + e.message;
@@ -538,10 +594,10 @@ class TagDBManager {
     }
   }
 
-  async _downloadGelbooru() {
+  async _downloadGelbooru(version) {
     try {
-      await api.gelbooruDownload({});
-      this._toast('Gelbooru download started');
+      await api.gelbooruDownload({ version: version || undefined });
+      this._toast(version ? `Downloading gelbooru ${version}…` : 'Gelbooru download started');
     } catch (e) { this._toast('Download error: ' + e.message); }
   }
 

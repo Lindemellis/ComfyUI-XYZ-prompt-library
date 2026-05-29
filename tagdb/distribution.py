@@ -29,7 +29,8 @@ __all__ = [
     "load_manifest", "check_official", "download_official",
     "seed_working_db_from_official", "OFFICIAL_DIR_NAME",
     "check_gelbooru", "download_gelbooru", "seed_gelbooru_db_from_official",
-    "installed_gelbooru_version",
+    "installed_gelbooru_version", "installed_official_versions",
+    "installed_gelbooru_versions",
 ]
 
 _MANIFEST_PATH = Path(__file__).resolve().parent / "official_manifest.json"
@@ -76,27 +77,61 @@ def _official_dir(data_dir: Path) -> Path:
     return d
 
 
+def installed_official_versions(data_dir: Path) -> List[str]:
+    """All danbooru versions present on disk (from `<version>_danbooru.sqlite`), newest first."""
+    versions = {p.name.split("_danbooru.sqlite")[0]
+                for p in _official_dir(data_dir).glob("*_danbooru.sqlite")}
+    return sorted(versions, reverse=True)
+
+
 def installed_official_version(data_dir: Path) -> Optional[str]:
     """Newest official version present on disk (from `<version>_danbooru.sqlite`)."""
-    versions = []
-    for p in _official_dir(data_dir).glob("*_danbooru.sqlite"):
-        versions.append(p.name.split("_danbooru.sqlite")[0])
-    return max(versions) if versions else None
+    versions = installed_official_versions(data_dir)
+    return versions[0] if versions else None
+
+
+def _versions_payload(manifest: Dict[str, Any], key: str, latest_key: str,
+                      installed: List[str]) -> List[Dict[str, Any]]:
+    """Per-version rows for the settings-page picker (date/size/cutoff/installed/latest).
+
+    Shared by danbooru (`datasets`) and gelbooru (`datasets_gelbooru`). Sorted newest
+    first; `version` is a YYYY-MM-DD string so a reverse string sort is chronological.
+    """
+    latest = manifest.get(latest_key)
+    installed_set = set(installed)
+    out: List[Dict[str, Any]] = []
+    for d in (manifest.get(key) or []):
+        v = d.get("version")
+        out.append({
+            "version": v,
+            "size_bytes": d.get("size_bytes"),
+            "tag_count": d.get("tag_count"),
+            "alias_count": d.get("alias_count"),
+            "min_post_count": d.get("min_post_count"),
+            "has_translations": bool(d.get("translations")),
+            "installed": v in installed_set,
+            "is_latest": v == latest,
+        })
+    out.sort(key=lambda x: x["version"] or "", reverse=True)
+    return out
 
 
 def check_official(data_dir: Path, manifest_url: Optional[str] = None) -> Dict[str, Any]:
-    """Report latest available vs installed prebuilt dataset version."""
+    """Report latest available vs installed prebuilt dataset version + full version list."""
     manifest = load_manifest(manifest_url)
     latest = manifest.get("latest")
-    installed = installed_official_version(data_dir)
+    installed_all = installed_official_versions(data_dir)
+    installed = installed_all[0] if installed_all else None
     ds = _dataset_by_version(manifest, latest)
     return {
         "latest": latest,
         "installed": installed,
+        "installed_versions": installed_all,
         "update_available": bool(latest and latest != installed),
         "size_bytes": (ds or {}).get("size_bytes"),
         "tag_count": (ds or {}).get("tag_count"),
         "has_manifest": bool(manifest.get("datasets")),
+        "versions": _versions_payload(manifest, "datasets", "latest", installed_all),
     }
 
 
@@ -232,29 +267,39 @@ def seed_working_db_from_official(official_path: Path, working_path: Path,
 # `latest_gelbooru`) and downloads into the gelbooru working file `gelbooru.sqlite`.
 # It is NOT part of the first-run auto-download — the user opts in from the manager.
 
+def installed_gelbooru_versions(data_dir: Path) -> List[str]:
+    """All gelbooru versions present on disk (from `<version>_gelbooru.sqlite`), newest first."""
+    versions = {p.name.split("_gelbooru.sqlite")[0]
+                for p in _official_dir(data_dir).glob("*_gelbooru.sqlite")}
+    return sorted(versions, reverse=True)
+
+
 def installed_gelbooru_version(data_dir: Path) -> Optional[str]:
     """Newest gelbooru official version on disk (from `<version>_gelbooru.sqlite`)."""
-    versions = [p.name.split("_gelbooru.sqlite")[0]
-                for p in _official_dir(data_dir).glob("*_gelbooru.sqlite")]
-    return max(versions) if versions else None
+    versions = installed_gelbooru_versions(data_dir)
+    return versions[0] if versions else None
 
 
 def check_gelbooru(data_dir: Path, manifest_url: Optional[str] = None) -> Dict[str, Any]:
-    """Report latest available vs installed gelbooru DLC version + whether installed."""
+    """Report latest available vs installed gelbooru DLC version + full version list."""
     manifest = load_manifest(manifest_url)
     latest = manifest.get("latest_gelbooru")
     ds = _dataset_by_version(manifest, latest, key="datasets_gelbooru",
                              latest_key="latest_gelbooru")
-    installed = installed_gelbooru_version(data_dir)
+    installed_all = installed_gelbooru_versions(data_dir)
+    installed = installed_all[0] if installed_all else None
     gel_working = Path(data_dir) / "gelbooru.sqlite"
     return {
         "latest": (ds or {}).get("version", latest),
         "installed": installed,
+        "installed_versions": installed_all,
         "active": gel_working.exists(),
         "update_available": bool(ds and ds.get("version") and ds["version"] != installed),
         "size_bytes": (ds or {}).get("size_bytes"),
         "tag_count": (ds or {}).get("tag_count"),
         "has_manifest": bool(manifest.get("datasets_gelbooru")),
+        "versions": _versions_payload(manifest, "datasets_gelbooru", "latest_gelbooru",
+                                      installed_all),
     }
 
 
