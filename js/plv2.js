@@ -57,6 +57,8 @@ const api = {
   updatePrompt:   (id, body)   => _req('PATCH',  `/xyz/plv2/prompts/${id}`, body),
   deletePrompt:   (id)         => _req('DELETE', `/xyz/plv2/prompts/${id}`),
   reorderPrompts: (nid, order) => _req('POST',   `/xyz/plv2/nodes/${nid}/prompts/reorder`, { order }),
+  getInherited:   (nid)        => _req('GET',    `/xyz/plv2/nodes/${nid}/inherited`),
+  setOverride:    (nid, pid, body) => _req('POST', `/xyz/plv2/nodes/${nid}/override/${pid}`, body),
 
   getTriggers:    (nid)        => _req('GET',    `/xyz/plv2/nodes/${nid}/triggers`),
   createTrigger:  (nid, body)  => _req('POST',   `/xyz/plv2/nodes/${nid}/triggers`, body),
@@ -980,15 +982,19 @@ function _planInsert(s, pos) {
     const k = s.slice(pos).search(/[,|\n]/);
     b = k === -1 ? s.length : pos + k;                   // caret inside a prompt → after it
   }
-  // Strip only spaces/tabs/commas/pipes adjacent to the seam — NEVER newlines.
-  const beforeContent = s.slice(0, b).replace(/[ \t,|]*$/, '');
-  const afterContent  = s.slice(b).replace(/^[ \t,|]*/, '');
-  // Separate the structural whitespace (newlines) at the seam from the prompt text,
-  // so delimiters can be placed against the prompt *before* the newline.
-  const beforeNL = (beforeContent.match(/\s*$/) || [''])[0];
-  const beforeCore = beforeContent.slice(0, beforeContent.length - beforeNL.length);
-  const afterNL = (afterContent.match(/^\s*/) || [''])[0];
-  const afterCore = afterContent.slice(afterNL.length);
+  // Split the seam (run of whitespace + delimiters around the insertion point)
+  // from the prompt cores. Keep ONLY newlines as structural layout and drop the
+  // stray spaces/commas/pipes, so we never emit a doubled delimiter — e.g. a caret
+  // after "prompt, \n" must NOT become "prompt,, \n[ref]" (the comma sits before
+  // the newline and was previously left in beforeCore).
+  const beforeRaw = s.slice(0, b);
+  const afterRaw  = s.slice(b);
+  const seamBefore = (beforeRaw.match(/[\s,|]*$/) || [''])[0];
+  const seamAfter  = (afterRaw.match(/^[\s,|]*/)  || [''])[0];
+  const beforeCore = beforeRaw.slice(0, beforeRaw.length - seamBefore.length);
+  const afterCore  = afterRaw.slice(seamAfter.length);
+  const beforeNL = '\n'.repeat((seamBefore.match(/\n/g) || []).length);
+  const afterNL  = '\n'.repeat((seamAfter.match(/\n/g)  || []).length);
   const li = Math.max(beforeCore.lastIndexOf(','), beforeCore.lastIndexOf('|'), beforeCore.lastIndexOf('\n'));
   return {
     beforeCore, beforeNL, afterCore, afterNL,

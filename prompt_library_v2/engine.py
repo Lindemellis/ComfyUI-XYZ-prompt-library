@@ -30,6 +30,10 @@ from .trigger import resolve_trigger
 MAX_EXPANSION_DEPTH = 50   # safety cap on [ref] recursion depth
 _WEIGHT_EPS = 1e-9         # treat weights within this of 1.0 as unweighted
 
+# [this] / [this.sub] — "this" is rebound to the owning entry's full_path at
+# generation time so the ref resolves against the right node (feature e).
+_THIS_RE = re.compile(r"\[this(\.[^\[\]]*)?\]")
+
 
 # ---------------------------------------------------------------------------
 # Public API
@@ -75,9 +79,10 @@ def generate_entry_text(
     if node is None or not node["has_prompts"]:
         return ""
 
-    all_prompts = _repo.get_prompts(node_id)
-    # get_prompts already orders: enabled by order_index, disabled alphabetically
-    enabled = [p for p in all_prompts if p["enabled"]]
+    # Effective enabled prompts = own + inherited template prompts (cascaded
+    # per-entry overrides, deduped by content), in own-then-inherited order.
+    from .template import effective_enabled_prompts
+    enabled = effective_enabled_prompts(node_id)
     if not enabled:
         return ""
 
@@ -129,9 +134,24 @@ def generate_entry_text(
             text = f"({text}:{_fmt_weight(weight)})"
 
         if text.strip():            # drop empty/whitespace parts (no stray delimiters)
-            parts.append(text)
+            parts.append((text, int(prompt["sep_after"] or 0)))
 
-    return delimiter.join(parts)
+    # Join with the delimiter, but where a prompt carries trailing newlines
+    # (sep_after > 0) emit them as the user's line breaks (feature B). The
+    # delimiter's trailing spaces are dropped before a newline so lines stay clean.
+    delim_trim = delimiter.rstrip(" \t")
+    segs = []
+    for i, (text, sep) in enumerate(parts):
+        segs.append(text)
+        if i < len(parts) - 1:
+            segs.append((delim_trim + "\n" * sep) if sep > 0 else delimiter)
+        elif sep > 0:
+            segs.append("\n" * sep)   # trailing layout (cleanup strips it at the end)
+    joined = "".join(segs)
+    # Rebind [this]/[this.sub] to this entry's own full_path so the outer
+    # ref-expander targets the right node (feature e).
+    full_path = node["full_path"]
+    return _THIS_RE.sub(lambda m: f"[{full_path}{m.group(1) or ''}]", joined)
 
 
 # ---------------------------------------------------------------------------
@@ -197,6 +217,7 @@ def _expand_refs(
 
         # If sub_path is non-empty, navigate to the child node
         target_id = node_id
+        inherited = False
         if sub_path:
             parent = _repo.get_node(node_id)
             if parent is None:
@@ -204,8 +225,23 @@ def _expand_refs(
             child_path = parent["full_path"] + "." + sub_path
             child = _repo.get_node_by_path(child_path)
             if child is None:
-                return ""   # Sub-path doesn't exist
-            target_id = child["id"]
+                # No own child — fall back to an inherited template sub-entry (#1).
+                from .template import resolve_inherited_target
+                tgt = resolve_inherited_target(node_id, sub_path)
+                if tgt is None:
+                    return ""   # Sub-path doesn't exist
+                target_id = tgt
+                inherited = True
+            else:
+                target_id = child["id"]
+
+        # A _template entry (or anything under one) is not directly referenceable —
+        # its prompts only reach entries through inheritance, never via direct [ref]
+        # (#11). Targets reached THROUGH inheritance above are allowed.
+        if not inherited:
+            _tnode = _repo.get_node(target_id)
+            if _tnode is not None and "_template" in _tnode["full_path"].split("."):
+                return ""
 
         # Cycle detection
         if target_id in resolving_set:

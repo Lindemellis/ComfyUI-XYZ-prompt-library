@@ -38,6 +38,10 @@ Insert the resolved text of another entry:
 
 A reference resolves to exactly one entry: an exact full path wins over a trigger alias; multi-segment refs take the longest matching prefix and treat the rest as a sub-path. Unknown references resolve to empty. Cycles are detected and skipped.
 
+### `[this.subentry]` — in-entry self reference
+
+Inside an **entry's own prompts**, reference one of its sub-entries: at resolve time `this` is rebound to the entry's full path, so `[this.face]` inside `character.toki` equals `[character.toki.face]`. It only means anything inside the entry text box (`this` doesn't resolve in the editor / node template). If the entry has no `face` child but its inherited template does, it resolves to the template's one. Typing `[` in the entry text box surfaces `this.<subentry>` candidates in the same autocomplete dropdown as library refs.
+
 ### `(text:1.2)` — weights
 
 Prompts whose weight ≠ 1.0 are emitted wrapped, e.g. `(glowing eyes:1.3)`.
@@ -62,11 +66,23 @@ After resolving, the engine collapses runs of consecutive delimiters (e.g. left 
 
 - **Name** and a **positive / negative** badge.
 - **Trigger aliases** — short names you can use in `[ref]`. Add your own with **+ alias**; each entry also has an automatic trigger (the shortest unique suffix of its path).
-- **Prompt list** — vertical or compact layout. Toggle each prompt on/off, set a weight, drag to reorder. Enabled prompts come first in prompt-text order; disabled prompts are listed alphabetically.
+- **Prompt list** — vertical or compact layout. Toggle each prompt on/off, set a weight, drag to reorder. **Prompts inherited from the folder template** are merged into this list (tinted background, locked content, no delete); their enable/weight/order are stored per-entry. Order: enabled first (text order, own + template interleaved), then local disabled (alphabetical), then template-inherited disabled (alphabetical).
 - **Mode** — `off`, `select` (a random count between min/max), or `dropout` (drop each prompt at a probability), plus a **Shuffle** toggle. All driven by the node `seed`.
-- **Format** — wrap each prompt, e.g. `art by {prompt}` (`{prompt}` and `{p}` are placeholders).
+- **Format** — wrap each prompt, e.g. `art by {prompt}` (`{prompt}` and `{p}` are placeholders). The **⌖ auto** button next to it detects the maximal common format across all prompts; the input autocompletes from formats used by other entries.
 - **Delimiter** — what joins this entry's prompts (`, `, ` | `, newline, …).
-- **Sub-entries** — child entries (own / inherited from a `_template` / overriding). A `_neg` child can be auto-inserted into the negative node when you insert the parent. Each sub-entry row has: **⤴** add a reference into *this* entry's prompts, **＋** insert a reference into the text editor, **→** open it.
+- **Sub-entries** — a collapsible panel **below** the prompt list (draggable split between the two). Entries are own, **inherited from the template** (`↳ tpl`, with an **override** button that materialises a same-named local child that keeps inheriting), or **overriding** (`✎ ovr`). A `_neg` child can be auto-inserted into the negative node when you insert the parent. Each row has: **⤴** add a reference (`[this.x]`) into *this* entry's prompts, **＋** insert into the text editor, **→** open/jump.
+- **Text box** — preserves your newline layout; a hover icon (top-right) previews this entry's **fully resolved** text; right-clicking a selection offers move/create sub-entry (leaving a `[this.x]` ref in place).
+
+## Folder templates (`_template`)
+
+Create a child entry named `_template` inside a folder and it becomes that folder's **template** (one per folder, always positive).
+
+- Base entries in that folder **and all its subfolders** inherit the template's prompts (woven into the entry text box and the final output) and its sub-entries (display / insert only — they do not auto-enter output).
+- **Negative entries never inherit.**
+- **Chained inheritance:** a subfolder's own `_template` inherits its parent folder's `_template`; an entry inherits the nearest template and gets the upper levels through it.
+- **Per-entry overrides:** an inherited prompt can be enabled/disabled, re-weighted, and reordered within a single entry without affecting the template or other entries.
+- **Same-named sub-entries auto-inherit:** create a sub-entry whose name matches a template sub-entry and it inherits it (an "inheritable override"); the **override** button does the same.
+- The template entry itself is a stripped-down editor (locked positive; no trigger/delimiter/format/random rows). It does **not** appear in trigger autocomplete, `[ref]` resolution, or normal entry lists (it shows as `⚙ template` in the tree and stays editable). **Renaming a template sub-entry** cascades the rename to every inheriting/overriding copy and updates their references.
 
 ## Text editor window
 

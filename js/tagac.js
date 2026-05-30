@@ -793,12 +793,32 @@ class TagAutocompleteUI {
     this._open(el, results, info.rangeStart);
   }
 
-  // Ref mode: entry names + trigger names (after "[" or "/").
+  // Local [this.<subentry>] candidates matching `query` by substring (so they show
+  // for "[thi", "[this", "[qual", …). Entry text box only (#3).
+  _buildThisRefs(el, query) {
+    let names = [];
+    try { names = [...new Set(el._xyzGetThisRefs() || [])]; } catch {}
+    const q = (query || '').toLowerCase();
+    return names
+      .filter((n) => n)
+      .map((n) => `this.${n}`)
+      .filter((r) => !q || r.toLowerCase().includes(q))
+      .slice(0, settings.maxRefs)
+      .map((r) => ({ kind: 'ref', refKind: 'bracket', names: [r],
+                     definition: r, auto_trigger: r, id: null, _thisRef: true }));
+  }
+
+  // Ref mode: [this.<subentry>] candidates (entry box) + library entry/trigger refs,
+  // merged into one dropdown.
   async showRefs(el, info) {
     this._isRelated = false;
     this._isInfo    = false;
     this._lastQuery = info.query || '';
-    const results = await fetchRefs(info.query, settings.maxRefs, info.refKind);
+    const thisResults = (info.refKind === 'bracket' && typeof el._xyzGetThisRefs === 'function')
+      ? this._buildThisRefs(el, info.query) : [];
+    const libResults = (settings.useRefs && info.query !== null)
+      ? await fetchRefs(info.query, settings.maxRefs, info.refKind) : [];
+    const results = [...thisResults, ...libResults];
     if (!results.length) { this.hide(); return; }
     this._open(el, results, info.rangeStart);
   }
@@ -1144,7 +1164,7 @@ class TagAutocompleteUI {
     const q = this._lastQuery || '';
     const ql = q.toLowerCase();
 
-    row.appendChild(this._badge('entry', '#ffd479'));
+    row.appendChild(this._badge(cand._thisRef ? 'this' : 'entry', cand._thisRef ? '#cba6f7' : '#ffd479'));
 
     // Primary name: default trigger name (auto_trigger), fallback to definition
     const nameEl = document.createElement('span');
@@ -1481,7 +1501,10 @@ class TagACHandler {
       if (!settings.enabled) return;
       const info = _analyzeToken(el);
       if (info.mode === 'ref') {
-        if (settings.useRefs && info.query !== null) await this.ui.showRefs(el, info);
+        // Library refs (if enabled) AND, in the entry text box, [this.<subentry>]
+        // candidates — merged into ONE dropdown by showRefs (#3).
+        const wantThis = info.refKind === 'bracket' && typeof el._xyzGetThisRefs === 'function';
+        if (info.query !== null && (settings.useRefs || wantThis)) await this.ui.showRefs(el, info);
         else this.ui.hide();
       } else if (info.query.length >= 1) {
         await this.ui.showTags(el, info);
@@ -1600,6 +1623,8 @@ handler.ui._handler = handler;   // let the UI suppress the re-trigger after a c
 function attachTo(el, opts = {}) {
   if (opts.related) el._xyzRelated = true;
   if (typeof opts.getDelimiter === 'function') el._xyzGetDelimiter = opts.getDelimiter;
+  // Entry text box only: provider of sub-entry names for [this.<name>] refs (#3).
+  if (typeof opts.getThisRefs === 'function') el._xyzGetThisRefs = opts.getThisRefs;
   if (el._xyzTagACHooked) return;
   el._xyzTagACHooked = true;
 

@@ -221,12 +221,60 @@ def _migrate_v1(conn: sqlite3.Connection) -> None:
     conn.executescript(_V1_SEED.format(ts=int(time.time())))
 
 
+def _migrate_v2(conn: sqlite3.Connection) -> None:
+    # raw_text: the entry's prompt text box content verbatim, preserving the
+    # user's newline layout between prompts (prompts are derived from it).
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(nodes)")}
+    if "raw_text" not in cols:
+        conn.execute("ALTER TABLE nodes ADD COLUMN raw_text TEXT NOT NULL DEFAULT ''")
+
+
+def _migrate_v3(conn: sqlite3.Connection) -> None:
+    # sep_after: number of newlines that follow this prompt in the entry's layout.
+    # Passive metadata — keeps line breaks across list-ops and resolve without
+    # adding pseudo-prompt rows. 0 = plain delimiter follows.
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(prompts)")}
+    if "sep_after" not in cols:
+        conn.execute("ALTER TABLE prompts ADD COLUMN sep_after INTEGER NOT NULL DEFAULT 0")
+
+
+def _migrate_v4(conn: sqlite3.Connection) -> None:
+    # prompt_overrides: per-entry override of an inherited (template) prompt's
+    # enable state and/or weight. Content is never overridable. NULL = inherit the
+    # template default for that field. Cascades when either node or prompt is gone.
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS prompt_overrides (
+            owner_node_id INTEGER NOT NULL REFERENCES nodes(id)   ON DELETE CASCADE,
+            prompt_id     INTEGER NOT NULL REFERENCES prompts(id) ON DELETE CASCADE,
+            enabled       INTEGER,
+            weight        REAL,
+            PRIMARY KEY (owner_node_id, prompt_id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_overrides_owner ON prompt_overrides(owner_node_id);
+        """
+    )
+
+
+def _migrate_v5(conn: sqlite3.Connection) -> None:
+    # order_index: per-entry position of an inherited prompt, on the SAME scale as
+    # the entry's own prompts' order_index — so enabled own + inherited interleave
+    # by their position in the entry text box. NULL = unpositioned (sorts last).
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(prompt_overrides)")}
+    if "order_index" not in cols:
+        conn.execute("ALTER TABLE prompt_overrides ADD COLUMN order_index INTEGER")
+
+
 # ---------------------------------------------------------------------------
 # Migration framework (mirrors gallery/db.py)
 # ---------------------------------------------------------------------------
 
 MIGRATIONS: Dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migrate_v1,
+    2: _migrate_v2,
+    3: _migrate_v3,
+    4: _migrate_v4,
+    5: _migrate_v5,
 }
 
 SCHEMA_VERSION: int = max(MIGRATIONS)

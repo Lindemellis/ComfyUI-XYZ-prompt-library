@@ -246,8 +246,10 @@ def rebuild_auto_triggers() -> "concurrent.futures.Future":
     Call this after any node create / rename / delete / custom-trigger change.
     """
     # Read side — short-lived connections
+    from .template import template_node_ids
     all_nodes = _repo.get_tree()
-    entry_nodes = [n for n in all_nodes if n["has_prompts"]]
+    tmpl_ids = template_node_ids(all_nodes)   # _template entries + their subtree (hidden, #11)
+    entry_nodes = [n for n in all_nodes if n["has_prompts"] and n["id"] not in tmpl_ids]
     all_triggers = _repo.get_all_triggers()
     custom_triggers = [t for t in all_triggers if not t["is_auto"]]
 
@@ -279,16 +281,22 @@ def resolve_trigger(text: str) -> Optional[Tuple[int, str]]:
 
     Returns None if nothing matches.
     """
+    from .template import template_node_ids
     all_triggers = _repo.get_all_triggers()
     all_nodes = _repo.get_tree()
+    tmpl_ids = template_node_ids(all_nodes)   # _template subtree is not [ref]-able (#11)
 
     # Build lookup: text → node_id
     # Full paths have priority over trigger aliases in case of collision
     # (shouldn't occur, but full_path is definitive)
     lookup: Dict[str, int] = {}
     for t in all_triggers:
+        if t["node_id"] in tmpl_ids:
+            continue
         lookup[t["trigger_text"]] = t["node_id"]
     for n in all_nodes:
+        if n["id"] in tmpl_ids:
+            continue
         # Full path always overrides (direct reference beats trigger alias)
         lookup[n["full_path"]] = n["id"]
 

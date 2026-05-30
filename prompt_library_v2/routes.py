@@ -52,6 +52,7 @@ from aiohttp import web
 
 from . import repo as _repo
 from . import engine as _engine
+from . import template as _template
 from .trigger import (
     rebuild_auto_triggers, resolve_trigger, trigger_name_conflict,
     prune_shadowed_triggers,
@@ -180,6 +181,7 @@ async def _patch_node(request: web.Request) -> web.Response:
     # Handle rename (name change → must cascade full_path for subtree)
     new_name = body.get("name")
     triggers_changed = False
+    _rename = None   # carries rename info to the post-rebuild ref-replacement step
 
     if new_name is not None:
         new_name = str(new_name).strip()
@@ -188,6 +190,9 @@ async def _patch_node(request: web.Request) -> web.Response:
             return _err(400, "invalid_name", err)
 
         if new_name != node["name"]:
+            old_name = node["name"]
+            old_full_path = node["full_path"]
+            old_auto = next((t["trigger_text"] for t in _repo.get_triggers(nid) if t["is_auto"]), None)
             try:
                 new_full_path = _compute_full_path(node["parent_id"], new_name)
             except ValueError as e:
@@ -196,6 +201,30 @@ async def _patch_node(request: web.Request) -> web.Response:
             if _repo.get_node_by_path(new_full_path) is not None:
                 return _err(409, "path_conflict",
                             f"a node at '{new_full_path}' already exists")
+
+            # Capture inherited overrides BEFORE renaming: if this node is a
+            # _template sub-entry, every entry that overrides it has a same-named
+            # child that must be renamed too, or the name-match link breaks (#1).
+            override_targets = []
+            try:
+                ctx = _template._build_ctx()
+                if _template.is_template_path(nid, ctx) and not _template.is_template_node(node):
+                    for y in ctx.by_id.values():
+                        if y["id"] == nid:
+                            continue
+                        tf = _template.template_for(y, ctx)
+                        if tf and tf["id"] == nid:
+                            par = ctx.by_id.get(y["parent_id"])
+                            if par is None:
+                                continue
+                            y_new_fp = (par["full_path"] + "." + new_name) if par["full_path"] else new_name
+                            y_old_auto = next((t["trigger_text"] for t in _repo.get_triggers(y["id"]) if t["is_auto"]), None)
+                            override_targets.append({
+                                "id": y["id"], "parent_id": y["parent_id"],
+                                "old_fp": y["full_path"], "new_fp": y_new_fp, "old_auto": y_old_auto,
+                            })
+            except Exception:
+                logger.exception("capture template overrides failed")
 
             move_op = _repo.MoveNodeOp(
                 node_id=nid,
@@ -209,13 +238,45 @@ async def _patch_node(request: web.Request) -> web.Response:
             except Exception as e:
                 logger.exception("rename failed")
                 return _err(500, "internal", str(e))
+
+            # Fix owner-relative [this.<old>] refs in the renamed node's parent
+            # (covers any sub-entry rename, template or not).
+            if node["parent_id"] is not None:
+                try:
+                    _repo.replace_refs_in_node(node["parent_id"], [{"old": f"this.{old_name}", "new": f"this.{new_name}"}])
+                except Exception:
+                    logger.exception("this-ref update failed")
+
+            # Cascade the rename to the captured overrides + their references.
+            override_reps = []        # full_path reps, applied now
+            renamed_overrides = []     # {id, old_auto} → auto-trigger reps after rebuild
+            for t in override_targets:
+                if _repo.get_node_by_path(t["new_fp"]) is not None:
+                    continue   # owner already has a child with the new name — skip
+                try:
+                    _repo.enqueue_write(_repo.HIGH, _repo.MoveNodeOp(
+                        node_id=t["id"], new_parent_id=t["parent_id"], new_name=new_name,
+                        old_full_path=t["old_fp"], new_full_path=t["new_fp"],
+                    )).result(timeout=5)
+                except Exception:
+                    logger.exception("override rename failed for %s", t["old_fp"])
+                    continue
+                override_reps.append({"old": t["old_fp"], "new": t["new_fp"]})
+                renamed_overrides.append({"id": t["id"], "old_auto": t["old_auto"]})
+                try:
+                    _repo.replace_refs_in_node(t["parent_id"], [{"old": f"this.{old_name}", "new": f"this.{new_name}"}])
+                except Exception:
+                    logger.exception("override this-ref update failed")
+
+            _rename = {"old_fp": old_full_path, "new_fp": new_full_path, "old_auto": old_auto,
+                       "override_reps": override_reps, "renamed_overrides": renamed_overrides}
             triggers_changed = True
 
     # Update remaining scalar fields
     scalar_fields = {
         "has_template", "has_prompts", "pos_neg", "shuffle",
         "random_mode", "select_min", "select_max", "dropout_rate",
-        "format", "delimiter", "order_index",
+        "format", "delimiter", "order_index", "raw_text",
     }
     update_kwargs = {k: body[k] for k in scalar_fields if k in body}
     if update_kwargs:
@@ -231,10 +292,38 @@ async def _patch_node(request: web.Request) -> web.Response:
     removed = []
     if triggers_changed:
         removed = prune_shadowed_triggers()   # rename may shadow a custom trigger
-        rebuild_auto_triggers()
+        # Await the rebuild so the response (and the client's follow-up getTriggers)
+        # reflects the new auto-trigger names — otherwise refs-by-trigger and the
+        # displayed trigger lag a render behind (race).
+        try:
+            rebuild_auto_triggers().result(timeout=5)
+        except Exception:
+            logger.exception("auto-trigger rebuild failed")
+
+    # After the rebuild, update ALL references to the renamed node in the prompts
+    # DB — by full_path AND by auto-trigger (works no matter which UI triggered the
+    # rename: tree or entry detail). The client uses ref_replacements to mirror the
+    # change into open node prompt_template widgets. (#fix: tree rename did nothing)
+    ref_replacements = []
+    if _rename is not None:
+        new_auto = next((t["trigger_text"] for t in _repo.get_triggers(nid) if t["is_auto"]), None)
+        ref_replacements.append({"old": _rename["old_fp"], "new": _rename["new_fp"]})
+        if _rename["old_auto"] and new_auto and _rename["old_auto"] != new_auto:
+            ref_replacements.append({"old": _rename["old_auto"], "new": new_auto})
+        ref_replacements.extend(_rename["override_reps"])
+        # Each cascaded override's auto-trigger may also have changed (e.g.
+        # [heroine2.quality2] → [heroine2.quality], the override's entry-path auto name).
+        for ov in _rename.get("renamed_overrides", []):
+            ov_new_auto = next((t["trigger_text"] for t in _repo.get_triggers(ov["id"]) if t["is_auto"]), None)
+            if ov["old_auto"] and ov_new_auto and ov["old_auto"] != ov_new_auto:
+                ref_replacements.append({"old": ov["old_auto"], "new": ov_new_auto})
+        try:
+            _repo.replace_refs_in_prompts(ref_replacements)
+        except Exception:
+            logger.exception("rename ref replace failed")
 
     node = _repo.get_node(nid)
-    return _ok({"node": node, "removed_triggers": removed})
+    return _ok({"node": node, "removed_triggers": removed, "ref_replacements": ref_replacements})
 
 
 async def _delete_node(request: web.Request) -> web.Response:
@@ -348,6 +437,7 @@ async def _post_prompt(request: web.Request) -> web.Response:
         enabled=bool(body.get("enabled", True)),
         order_index=int(body.get("order_index", max_order)),
         source=str(body.get("source", "custom")),
+        sep_after=int(body.get("sep_after", 0)),
     )
     try:
         prompt_id = _repo.enqueue_write(_repo.HIGH, op).result(timeout=5)
@@ -387,6 +477,7 @@ async def _patch_prompt(request: web.Request) -> web.Response:
         enabled=bool(body.get("enabled", row["enabled"])),
         order_index=int(body.get("order_index", row["order_index"])),
         source=str(row["source"]),   # source is immutable after creation
+        sep_after=int(body.get("sep_after", row["sep_after"])),
         prompt_id=pid,
     )
     try:
@@ -411,6 +502,56 @@ async def _delete_prompt(request: web.Request) -> web.Response:
         logger.exception("delete prompt failed")
         return _err(500, "internal", str(e))
     return web.json_response({"deleted": pid})
+
+
+async def _get_inherited(request: web.Request) -> web.Response:
+    """GET /xyz/plv2/nodes/{id}/inherited
+    Returns the entry's inherited template prompts (effective enable/weight after
+    this entry's overrides) and the template's direct child sub-entries.
+    """
+    nid = _node_id(request)
+    if _repo.get_node(nid) is None:
+        return _err(404, "not_found", f"node {nid} not found")
+    ctx = _template._build_ctx()
+    node = ctx.by_id.get(nid)
+    tmpl = _template.template_for(node, ctx) if node else None
+    prompts = _template.inherited_prompts(nid, ctx)
+    children = _template.template_children(nid, ctx)
+    return _ok({
+        "template_id": tmpl["id"] if tmpl else None,
+        "template_full_path": tmpl["full_path"] if tmpl else None,
+        "prompts": prompts,
+        "children": children,
+    })
+
+
+async def _put_override(request: web.Request) -> web.Response:
+    """POST /xyz/plv2/nodes/{id}/override/{prompt_id}
+    Body: {"enabled": bool|null, "weight": number|null}. Both null clears the override.
+    """
+    try:
+        body: Dict = await request.json()
+    except Exception:
+        body = {}
+    nid = int(request.match_info["id"])
+    pid = int(request.match_info["prompt_id"])
+    enabled = body.get("enabled", None)
+    weight = body.get("weight", None)
+    order_index = body.get("order_index", None)
+    op = _repo.SetPromptOverrideOp(
+        owner_node_id=nid,
+        prompt_id=pid,
+        enabled=None if enabled is None else bool(enabled),
+        weight=None if weight is None else float(weight),
+        order_index=None if order_index is None else int(order_index),
+        clear=bool(body.get("clear", False)),
+    )
+    try:
+        _repo.enqueue_write(_repo.HIGH, op).result(timeout=5)
+    except Exception as e:
+        logger.exception("set prompt override failed")
+        return _err(500, "internal", str(e))
+    return _ok({"owner_node_id": nid, "prompt_id": pid})
 
 
 async def _reorder_prompts(request: web.Request) -> web.Response:
@@ -726,6 +867,10 @@ async def _resolve_ref(request: web.Request) -> web.Response:
     if sub_path and node is not None:
         target_path = node["full_path"] + "." + sub_path
         node = next((n for n in _repo.get_tree() if n["full_path"] == target_path), node)
+    # A direct reference to a _template entry (or its subtree) is invalid — let the
+    # editor flag it red and the engine ignore it (#5/#11).
+    if node is not None and "_template" in str(node["full_path"]).split("."):
+        return _ok({"node": None})
     return _ok({"node": node})
 
 
@@ -821,16 +966,25 @@ async def _ac_prompts(request: web.Request) -> web.Response:
     return _ok({"prompts": _repo.search_prompt_contents(q, _ac_limit(request))})
 
 
+def _not_template_path(path: str) -> bool:
+    return "_template" not in str(path or "").split(".")
+
+
 async def _ac_refs(request: web.Request) -> web.Response:
     """GET /xyz/plv2/ac/refs?q=&limit= — entry full_paths + trigger names matching q."""
     q = request.rel_url.query.get("q", "")
-    return _ok({"refs": _repo.search_refs(q, _ac_limit(request))})
+    refs = _repo.search_refs(q, _ac_limit(request))
+    # Hide _template entries (and their subtree) from ref autocomplete (#11).
+    refs = [r for r in refs if _not_template_path(r.get("definition") if r.get("kind") == "trigger" else r.get("name"))]
+    return _ok({"refs": refs})
 
 
 async def _ac_entries_by_prompt(request: web.Request) -> web.Response:
     """GET /xyz/plv2/ac/entries_by_prompt?q=&limit= — entries whose prompts contain q."""
     q = request.rel_url.query.get("q", "")
-    return _ok({"entries": _repo.search_entries_by_prompt(q, _ac_limit(request))})
+    entries = _repo.search_entries_by_prompt(q, _ac_limit(request))
+    entries = [e for e in entries if _not_template_path(e.get("full_path"))]   # hide _template (#11)
+    return _ok({"entries": entries})
 
 
 async def _resolve_shallow(request: web.Request) -> web.Response:
@@ -902,6 +1056,8 @@ def register(server) -> None:
     r.patch(r"/xyz/plv2/prompts/{id:\d+}")(_patch_prompt)
     r.delete(r"/xyz/plv2/prompts/{id:\d+}")(_delete_prompt)
     r.post(r"/xyz/plv2/nodes/{id:\d+}/prompts/reorder")(_reorder_prompts)
+    r.get(r"/xyz/plv2/nodes/{id:\d+}/inherited")(_get_inherited)
+    r.post(r"/xyz/plv2/nodes/{id:\d+}/override/{prompt_id:\d+}")(_put_override)
 
     # Triggers
     r.get(r"/xyz/plv2/nodes/{id:\d+}/triggers")(_get_triggers)

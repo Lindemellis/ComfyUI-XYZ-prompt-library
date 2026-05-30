@@ -41,6 +41,19 @@ let _fontSz      = 13;
 let _singleTab   = 'pos';
 let _savedNodes  = { pos: null, neg: null };
 
+// Persist the last-selected node per polarity so it survives page reload / ComfyUI
+// restart (the in-memory _savedNodes is reset, but the ids live in localStorage). (#4)
+const LAST_NODE_KEY = 'plv2_editor_lastNode';
+let _savedNodeIds = (() => {
+  try { return { pos: null, neg: null, ...JSON.parse(localStorage.getItem(LAST_NODE_KEY) || '{}') }; }
+  catch { return { pos: null, neg: null }; }
+})();
+function _setSaved(tab, node) {
+  _savedNodes[tab] = node;
+  _savedNodeIds[tab] = node ? node.id : null;
+  try { localStorage.setItem(LAST_NODE_KEY, JSON.stringify(_savedNodeIds)); } catch {}
+}
+
 let _panes  = [];
 let _active = null;
 let _textarea = null, _backdrop = null;   // pointers to the active pane's elements
@@ -207,9 +220,13 @@ function _makePane(tab, withHeader) {
   pane.resolveNode = () => {
     const nodes = _graphNodes(pane.tab);
     let n = _savedNodes[pane.tab];
-    if (!n || !nodes.some(x => x.id === n.id)) n = nodes[0] ?? null;
+    if (!n || !nodes.some(x => x.id === n.id)) {
+      // Restore the persisted choice across reloads, else fall back to the first node. (#4)
+      const savedId = _savedNodeIds[pane.tab];
+      n = (savedId != null ? nodes.find(x => x.id === savedId) : null) ?? nodes[0] ?? null;
+    }
     pane.node = n;
-    if (n) _savedNodes[pane.tab] = n;
+    if (n) _setSaved(pane.tab, n);
   };
 
   pane.populate = () => {
@@ -305,7 +322,7 @@ function _wireNodeSel(pane) {
   pane.nodeSel.addEventListener('change', () => {
     const id = parseInt(pane.nodeSel.value);
     pane.node = isNaN(id) ? null : (_graphNodes(pane.tab).find(n => n.id === id) ?? null);
-    if (pane.node) _savedNodes[pane.tab] = pane.node;
+    if (pane.node) _setSaved(pane.tab, pane.node);
     _setActive(pane);
     pane.syncFromNode();
     _emitChanged();
@@ -598,7 +615,7 @@ async function insertRef(posNeg, text, delimiter) {
 
   // Otherwise resolve a target node and append to its widget (offscreen).
   let target = (_savedNodes[tab] && nodes.some(n => n.id === _savedNodes[tab].id)) ? _savedNodes[tab] : nodes[0];
-  _savedNodes[tab] = target;
+  _setSaved(tab, target);
   const widget = target.widgets?.find(w => w.name === 'prompt_template');
   if (!widget) return;
   const { value } = await _computeInsert(widget.value ?? '', (widget.value ?? '').length, text, D);
@@ -923,7 +940,7 @@ function _refresh() {
      : focus.comfyClass === 'XYZ Prompt Library V2 Positive' ? 'pos' : null)
     : null;
   if (focusTab) {
-    _savedNodes[focusTab] = focus;
+    _setSaved(focusTab, focus);
     if (_orientation === 'single') {
       _singleTab = focusTab;
       if (_panes[0]) _panes[0].tab = focusTab;

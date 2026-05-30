@@ -44,6 +44,7 @@ __all__ = [
     "UpsertPromptOp",
     "DeletePromptOp",
     "ReorderPromptsOp",
+    "SetPromptOverrideOp",
     "UpsertTriggerOp",
     "DeleteTriggerOp",
     "ReplaceAutoTriggersOp",
@@ -63,6 +64,7 @@ __all__ = [
     "get_subtree_paths",
     "get_tree",
     "get_prompts",
+    "get_prompt_overrides",
     "get_triggers",
     "get_all_triggers",
     "get_common_formats",
@@ -317,6 +319,7 @@ class UpdateNodeOp:
     format: Optional[str] = None
     delimiter: Optional[str] = None
     order_index: Optional[int] = None
+    raw_text: Optional[str] = None
 
     def apply(self, conn: sqlite3.Connection) -> None:
         fields = {
@@ -333,6 +336,7 @@ class UpdateNodeOp:
             "format": self.format,
             "delimiter": self.delimiter,
             "order_index": self.order_index,
+            "raw_text": self.raw_text,
         }
         updates = {k: v for k, v in fields.items() if v is not None}
         if not updates:
@@ -413,6 +417,7 @@ class UpsertPromptOp:
     enabled: bool = True
     order_index: int = 0
     source: str = "custom"
+    sep_after: int = 0
     prompt_id: Optional[int] = None  # set to UPDATE an existing row
 
     def apply(self, conn: sqlite3.Connection) -> int:
@@ -422,12 +427,12 @@ class UpsertPromptOp:
                 """
                 UPDATE prompts
                 SET content = ?, weight = ?, enabled = ?, order_index = ?,
-                    updated_at = ?
+                    sep_after = ?, updated_at = ?
                 WHERE id = ? AND node_id = ?
                 """,
                 (
                     self.content, self.weight, int(self.enabled),
-                    self.order_index, ts,
+                    self.order_index, int(self.sep_after), ts,
                     self.prompt_id, self.node_id,
                 ),
             )
@@ -436,12 +441,12 @@ class UpsertPromptOp:
             """
             INSERT INTO prompts
                 (node_id, content, weight, enabled, order_index, source,
-                 created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                 sep_after, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 self.node_id, self.content, self.weight, int(self.enabled),
-                self.order_index, self.source, ts, ts,
+                self.order_index, self.source, int(self.sep_after), ts, ts,
             ),
         )
         return cur.lastrowid
@@ -463,6 +468,46 @@ class DeletePromptOp:
                     f"prompt {self.prompt_id} is template-locked and cannot be deleted"
                 )
         conn.execute("DELETE FROM prompts WHERE id = ?", (self.prompt_id,))
+
+
+@dataclass
+class SetPromptOverrideOp:
+    """Per-entry override of an inherited (template) prompt's enable / weight /
+    position. PARTIAL update: a field left None is NOT touched (so toggling enable
+    won't wipe a weight override). Pass `clear=True` to drop the row (re-inherit).
+    """
+    owner_node_id: int
+    prompt_id: int
+    enabled: Optional[bool] = None
+    weight: Optional[float] = None
+    order_index: Optional[int] = None
+    clear: bool = False
+
+    def apply(self, conn: sqlite3.Connection) -> None:
+        if self.clear:
+            conn.execute(
+                "DELETE FROM prompt_overrides WHERE owner_node_id = ? AND prompt_id = ?",
+                (self.owner_node_id, self.prompt_id),
+            )
+            return
+        fields: Dict[str, Any] = {}
+        if self.enabled is not None:
+            fields["enabled"] = int(self.enabled)
+        if self.weight is not None:
+            fields["weight"] = self.weight
+        if self.order_index is not None:
+            fields["order_index"] = self.order_index
+        if not fields:
+            return
+        cols = ["owner_node_id", "prompt_id"] + list(fields)
+        vals = [self.owner_node_id, self.prompt_id] + list(fields.values())
+        set_clause = ", ".join(f"{k} = excluded.{k}" for k in fields)
+        conn.execute(
+            f"INSERT INTO prompt_overrides ({', '.join(cols)}) "
+            f"VALUES ({', '.join('?' * len(cols))}) "
+            f"ON CONFLICT(owner_node_id, prompt_id) DO UPDATE SET {set_clause}",
+            vals,
+        )
 
 
 @dataclass
@@ -806,6 +851,20 @@ def get_prompts(node_id: int) -> List[Dict[str, Any]]:
         conn.close()
 
 
+def get_prompt_overrides(owner_node_id: int) -> Dict[int, Dict[str, Any]]:
+    """Return {prompt_id: {"enabled": 0|1|None, "weight": float|None}} for an entry."""
+    conn = _db.connect_read(_db_path())
+    try:
+        rows = conn.execute(
+            "SELECT prompt_id, enabled, weight, order_index FROM prompt_overrides WHERE owner_node_id = ?",
+            (owner_node_id,),
+        ).fetchall()
+        return {r["prompt_id"]: {"enabled": r["enabled"], "weight": r["weight"],
+                                 "order_index": r["order_index"]} for r in rows}
+    finally:
+        conn.close()
+
+
 def get_triggers(node_id: int) -> List[Dict[str, Any]]:
     """Return all triggers for a node (auto + custom)."""
     conn = _db.connect_read(_db_path())
@@ -1020,6 +1079,43 @@ def replace_refs_in_prompts(replacements: List[Dict[str, str]]) -> int:
                     (old_d, new_d, old_b, new_b, _now(), f"%[{old}]%", f"%[{old}.%"),
                 )
                 total += res.rowcount
+                # Keep the per-entry raw text box layout (nodes.raw_text) in sync too.
+                conn.execute(
+                    "UPDATE nodes SET raw_text = REPLACE(REPLACE(raw_text, ?, ?), ?, ?), updated_at = ? "
+                    "WHERE raw_text LIKE ? OR raw_text LIKE ?",
+                    (old_d, new_d, old_b, new_b, _now(), f"%[{old}]%", f"%[{old}.%"),
+                )
+    finally:
+        conn.close()
+    return total
+
+
+def replace_refs_in_node(node_id: int, replacements: List[Dict[str, str]]) -> int:
+    """Like replace_refs_in_prompts but scoped to ONE node's prompts — used for
+    owner-relative `[this.<name>]` refs that must not be touched in other entries."""
+    if not replacements:
+        return 0
+    conn = _db.connect_write(_db_path())
+    total = 0
+    try:
+        with conn:
+            for r in replacements:
+                old = str(r["old"]); new = str(r["new"])
+                if old == new:
+                    continue
+                old_b, new_b = f"[{old}]", f"[{new}]"
+                old_d, new_d = f"[{old}.", f"[{new}."
+                res = conn.execute(
+                    "UPDATE prompts SET content = REPLACE(REPLACE(content, ?, ?), ?, ?), updated_at = ? "
+                    "WHERE node_id = ? AND (content LIKE ? OR content LIKE ?)",
+                    (old_d, new_d, old_b, new_b, _now(), node_id, f"%[{old}]%", f"%[{old}.%"),
+                )
+                total += res.rowcount
+                conn.execute(
+                    "UPDATE nodes SET raw_text = REPLACE(REPLACE(raw_text, ?, ?), ?, ?), updated_at = ? "
+                    "WHERE id = ? AND (raw_text LIKE ? OR raw_text LIKE ?)",
+                    (old_d, new_d, old_b, new_b, _now(), node_id, f"%[{old}]%", f"%[{old}.%"),
+                )
     finally:
         conn.close()
     return total

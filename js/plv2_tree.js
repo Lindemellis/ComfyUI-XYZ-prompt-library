@@ -277,13 +277,14 @@ function _renderTree(container, treeMap, parentId, depth, filteredIds) {
     if (filteredIds && !filteredIds.has(node.id) && !_hasMatchingDescendant(node.id, treeMap, filteredIds)) continue;
 
     const isFolder = !node.has_prompts;
+    const isTemplate = node.has_prompts && node.name === '_template';
     const hasKids  = treeMap.has(node.id);
     const isExp    = _expanded.has(node.id);
     const isSel    = window.plv2.state.selectedLibNodeId === node.id;
 
-    // Distinct backgrounds for folders vs entries (#3).
-    const baseBg  = isFolder ? '#242438' : '#191926';
-    const hoverBg = isFolder ? '#2e2e48' : '#23233a';
+    // Distinct backgrounds for folders vs entries (#3); templates get a tint.
+    const baseBg  = isTemplate ? '#1d1830' : isFolder ? '#242438' : '#191926';
+    const hoverBg = isTemplate ? '#28204a' : isFolder ? '#2e2e48' : '#23233a';
 
     const row = el('div', {
       display: 'flex', alignItems: 'center', gap: '5px',
@@ -293,6 +294,7 @@ function _renderTree(container, treeMap, parentId, depth, filteredIds) {
       background: isSel ? '#313244' : baseBg,
       userSelect: 'none',
     });
+    row.dataset.nodeId = node.id;   // for reveal() scroll-into-view (#7)
 
     const toggle = el('span', {
       width: '15px', textAlign: 'center', color: '#6c7086',
@@ -301,12 +303,13 @@ function _renderTree(container, treeMap, parentId, depth, filteredIds) {
     }, hasKids ? (isExp ? '▼' : '▶') : '');
 
     const icon = el('span', { flexShrink: '0', fontSize: '15px' },
-      isFolder ? '📁' : '📝');
+      isTemplate ? '⚙' : isFolder ? '📁' : '📝');
 
     const nameEl = el('span', {
       flex: '1', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
-      color: isSel ? '#cba6f7' : '#cdd6f4', fontSize: '13.5px',
-    }, node.name);
+      color: isSel ? '#cba6f7' : isTemplate ? '#b59cf0' : '#cdd6f4',
+      fontSize: '13.5px', fontStyle: isTemplate ? 'italic' : 'normal',
+    }, isTemplate ? 'template' : node.name);
 
     row.append(toggle, icon, nameEl);
 
@@ -470,7 +473,13 @@ async function _renameNode(node) {
     try { app.extensionManager.toast.add({ severity: 'error', summary: 'PLv2', detail: res.error.message, life: 4000 }); } catch {}
     return;
   }
+  // The backend already updated all prompt-DB refs; mirror the change into live
+  // node prompt_template widgets + the editor, and refresh the open detail.
+  const reps = res?.ref_replacements ?? [];
+  if (reps.length) window.plv2Entry?.applyWorkflowRefs?.(reps);
   await _load();
+  const fresh = _nodes.find(n => n.id === node.id);
+  if (fresh) document.dispatchEvent(new CustomEvent('plv2:node-renamed', { detail: { nodeId: node.id, node: fresh } }));
 }
 
 async function _deleteNode(node) {
@@ -992,7 +1001,24 @@ function _buildDOM(container) {
 
 // ─── Register ─────────────────────────────────────────────────────────────────
 
-window.plv2Tree = { onSelectEntry, onSelectFolder, reload: _load };
+// Expand every ancestor of `nodeId`, select it, and scroll it into view (#7).
+// Called whenever an entry is opened in the detail pane (any path).
+function _reveal(nodeId) {
+  if (nodeId == null) return;
+  window.plv2.state.selectedLibNodeId = nodeId;
+  const byId = new Map(_nodes.map(n => [n.id, n]));
+  let cur = byId.get(nodeId);
+  if (cur) {
+    cur = cur.parent_id != null ? byId.get(cur.parent_id) : null;
+    while (cur) { _expanded.add(cur.id); cur = cur.parent_id != null ? byId.get(cur.parent_id) : null; }
+  }
+  _rerender();
+  requestAnimationFrame(() => {
+    try { _listEl?.querySelector?.(`[data-node-id="${nodeId}"]`)?.scrollIntoView?.({ block: 'nearest' }); } catch {}
+  });
+}
+
+window.plv2Tree = { onSelectEntry, onSelectFolder, reload: _load, reveal: _reveal };
 
 app.registerExtension({
   name: 'XYZNodes.PromptLibraryV2.Tree',
