@@ -258,6 +258,13 @@ try:
 except Exception as _plv2_err:
     print(f"[PLv2] setup failed, continuing without PLv2: {_plv2_err!r}")
 
+# LLM Prompt Assistant — must run AFTER PLv2 (reuses its DB + WriteQueue).
+try:
+    from .llm import setup as _llm_setup
+    _llm_setup(PromptServer.instance)
+except Exception as _llm_err:
+    print(f"[LLM] setup failed, continuing without LLM assistant: {_llm_err!r}")
+
 try:
     from .tagdb import setup as _tagdb_setup
     _tagdb_setup(PromptServer.instance)

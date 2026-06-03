@@ -137,6 +137,7 @@ def _collect(node_id: int, ctx: _Ctx, _seen: frozenset = frozenset()) -> List[Di
             o = ov.get(it["id"])
             enabled = it["enabled"]
             weight = it["weight"]
+            sep_after = it["sep_after"]
             # Position on the OWNER's scale: this entry's override order if set,
             # else after the owner's own prompts (UNPOSITIONED + template order).
             order = _UNPOSITIONED + seq
@@ -147,8 +148,10 @@ def _collect(node_id: int, ctx: _Ctx, _seen: frozenset = frozenset()) -> List[Di
                     weight = float(o["weight"])
                 if o.get("order_index") is not None:
                     order = int(o["order_index"])
+                if o.get("sep_after") is not None:
+                    sep_after = int(o["sep_after"])
             items.append({**it, "enabled": enabled, "weight": weight,
-                          "order_index": order, "is_inherited": True})
+                          "order_index": order, "sep_after": sep_after, "is_inherited": True})
     return items
 
 

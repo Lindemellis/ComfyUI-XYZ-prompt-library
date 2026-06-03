@@ -2,12 +2,13 @@
 
 [English](README.md) | **中文**
 
-一个 ComfyUI 自定义节点包，包含三个较大的工具——**Danbooru（+ 可选 Gelbooru）标签自动补全**、**分层提示词库（V2）**、**图片画廊**。
+一个 ComfyUI 自定义节点包，包含四个较大的工具——**Danbooru（+ 可选 Gelbooru）标签自动补全**、**分层提示词库（V2）**、**LLM 提示词助手**（多家模型可选，带本地 tag 验真）、**图片画廊**。
 
 每个工具都有独立手册：
 
 - 📖 [标签自动补全与数据集](tagdb/README_zh.md)
 - 📖 [提示词库 V2](prompt_library_v2/README_zh.md)
+- 📖 [LLM 提示词助手](llm/README_zh.md)
 - 📖 [图片画廊](gallery/README_zh.md)
 
 ## 安装
@@ -34,6 +35,7 @@
 |---|---|---|
 | **标签自动补全** | 在任意提示词框输入时给出 Danbooru 标签建议；带有版本化的本地数据集、增量/全量更新、快照，以及按日期回溯的「时间机器」重建。 | [tagdb](tagdb/README_zh.md) |
 | **提示词库 V2** | 基于 SQLite 的分层提示词库，支持 `[ref]` 引用、触发别名、权重、随机模式，以及浮动文本编辑器。由两个节点在执行时解析。 | [plv2](prompt_library_v2/README_zh.md) |
+| **LLM 提示词助手** | 一个浮动窗口，用大模型（DeepSeek / OpenAI / Claude / Grok / 自定义）生成或优化文生图提示词，并把 danbooru tag 拿到本地数据集验真，保证 tag 真实存在。 | [llm](llm/README_zh.md) |
 | **图片画廊** | 浏览与管理 ComfyUI 的 output/input 图片——筛选、标签、批量操作、元数据查看。 | [gallery](gallery/README_zh.md) |
 
 ## 入口在哪里
@@ -44,6 +46,7 @@
 - **XYZ Tools**（菜单）——打开：
   - *Prompt Library V2 — Library*（库）
   - *Prompt Library V2 — Text Editor*（文本编辑器）
+  - *Prompt Library V2 — LLM Prompt*（LLM 提示词助手）
   - *Prompt Library V1 Manager*（旧版）
   - *XYZ Prompt Tools Settings*（设置）
 
@@ -57,9 +60,10 @@
 | Related | 点击标签查相关标签 + 缓存有效期 |
 | Preview | 悬停显示画师作品 / 标签预览图（默认均**关闭**） |
 | Tag dataset | **Danbooru / Gelbooru 两个分页**：凭据、预构建数据集、更新、快照、重建 |
+| LLM | **提供方**（DeepSeek / OpenAI / Claude / Grok / 自定义）、API key、模型、**Test connection**、temperature/top_p、查表来源 |
 | About | 版本 / 信息 |
 
-每个 Prompt Library V2 节点上也有各自的 **Library / Editor / Preview** 按钮。
+每个 Prompt Library V2 节点上也有各自的 **Library / Editor / Preview / LLM** 按钮。
 
 ## 节点
 

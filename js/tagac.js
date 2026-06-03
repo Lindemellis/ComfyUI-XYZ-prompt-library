@@ -516,6 +516,18 @@ const _CARET_PROPS = [
   'letterSpacing', 'wordSpacing', 'tabSize',
 ];
 
+// ─── Host accessor (textarea | contentEditable) ──────────────────────────────
+// Autocomplete reads/writes the host through these so it works on BOTH a <textarea>
+// (default) and a rich contentEditable host. A contentEditable host is attached by
+// passing `opts.adapter` to attach(), stored on el._xyzAcc, exposing:
+//   getValue() → string, getCaret() → int, getSelEnd() → int,
+//   splice(start,end,text) → void (replace + fire input), caretCoords() → {top,left,lineHeight}
+// For a textarea these fall back to el.value / el.selectionStart / setSelectionRange.
+function _acVal(el)         { return el._xyzAcc ? el._xyzAcc.getValue()  : el.value; }
+function _acCaret(el)       { return el._xyzAcc ? el._xyzAcc.getCaret()  : el.selectionStart; }
+function _acSelEnd(el)      { return el._xyzAcc ? el._xyzAcc.getSelEnd() : el.selectionEnd; }
+function _acCaretCoords(el) { return el._xyzAcc ? el._xyzAcc.caretCoords() : getCaretCoordinates(el); }
+
 function getCaretCoordinates(el) {
   const computed = window.getComputedStyle(el);
   const div = document.createElement('div');
@@ -569,8 +581,8 @@ function _tokenEnd(text, pos) {
 }
 
 function getPartialTag(el) {
-  const text = el.value;
-  const pos  = el.selectionStart;
+  const text = _acVal(el);
+  const pos  = _acCaret(el);
 
   const start = _tokenStart(text, pos);
   const segment = text.substring(start, pos);
@@ -605,8 +617,8 @@ function getPartialTag(el) {
 // Unescapes \( → ( and \) → ) before canonicalising.
 // Only strips paired wrapping parens, not parens that are part of the tag name.
 function getTokenAtCaret(el) {
-  const text = el.value;
-  const pos  = el.selectionStart;
+  const text = _acVal(el);
+  const pos  = _acCaret(el);
   const start = _tokenStart(text, pos);
   const end = _tokenEnd(text, pos);
   let tok = text.substring(start, end).trim();
@@ -631,8 +643,8 @@ function getTokenAtCaret(el) {
 
 // Token end position (for insertion after a clicked tag).
 function getTokenEnd(el) {
-  const text = el.value;
-  const pos  = el.selectionStart;
+  const text = _acVal(el);
+  const pos  = _acCaret(el);
   return _tokenEnd(text, pos);
 }
 
@@ -643,8 +655,8 @@ function getTokenEnd(el) {
 //   otherwise       → tag mode (tags + library prompts)
 
 function _analyzeToken(el) {
-  const text = el.value;
-  const pos  = el.selectionStart;
+  const text = _acVal(el);
+  const pos  = _acCaret(el);
 
   const lastOpen  = text.lastIndexOf('[', pos - 1);
   const lastClose = text.lastIndexOf(']', pos - 1);
@@ -672,6 +684,7 @@ function _normalizeTagInsert(name) {
 
 // Replace text[start, end) in `el` with `toInsert` (undo-safe via execCommand).
 function _spliceInsert(el, start, end, toInsert) {
+  if (el._xyzAcc) { el._xyzAcc.splice(start, end, toInsert); return; }   // contentEditable host
   el.focus();
   el.setSelectionRange(start, end);
   const ok = document.execCommand('insertText', false, toInsert);
@@ -914,7 +927,7 @@ class TagAutocompleteUI {
   // Insert a candidate by kind: tag/library → normalized text + delim; ref/bracket
   // → [name]; ref/slash → the entry's resolved-shallow text.
   async _insert(el, cand) {
-    const text = el.value;
+    const text = _acVal(el);
     const delim = this._getDelimiter();
     let core;
 
@@ -936,9 +949,11 @@ class TagAutocompleteUI {
       if (cand._atArtist) core = '@' + core;   // Anima artist syntax: insert as "@name"
     }
 
-    // The splice below dispatches a trusted `input` event; tell the handler to
-    // ignore that one so the dropdown doesn't reopen on what we just inserted.
-    if (this._handler) this._handler._suppressInput = true;
+    // Textarea: the execCommand splice fires a trusted `input` event; tell the handler
+    // to ignore that one so the dropdown doesn't reopen on what we just inserted. The
+    // contentEditable adapter's splice fires no input event, so don't arm the flag there
+    // (it would otherwise swallow the user's next real keystroke).
+    if (this._handler && !el._xyzAcc) this._handler._suppressInput = true;
 
     if (this._isRelated && cand.kind === 'tag' && !cand._isSelf) {
       // Related-tag insertion: insert AFTER the original clicked token.
@@ -951,7 +966,7 @@ class TagAutocompleteUI {
       _spliceInsert(el, end, end, toInsert);
     } else {
       const start = this._rangeStart;
-      const pos = el.selectionStart;
+      const pos = _acCaret(el);
       const afterCursor = text[pos];
       const beforeStart = text[start - 1];
       let toInsert;
@@ -1316,7 +1331,7 @@ class TagAutocompleteUI {
     this._isRelated = false;
     this._isInfo    = true;
     this._lastQuery = refInner;
-    this._open(el, [candidate], el.selectionStart);
+    this._open(el, [candidate], _acCaret(el));
   }
 
   // Show entries whose prompts contain the clicked token text.
@@ -1343,7 +1358,7 @@ class TagAutocompleteUI {
     this._isRelated = false;
     this._isInfo    = true;
     this._lastQuery = name;
-    this._open(el, entries, el.selectionStart);
+    this._open(el, entries, _acCaret(el));
   }
 
   // Open the dropdown showing related tags for a clicked token in the textarea.
@@ -1455,7 +1470,7 @@ class TagAutocompleteUI {
       // Autocomplete: below the text cursor (caret), aligned to caret horizontal.
       // getCaretCoordinates mixes viewport element position with local caret
       // offset (from an un-transformed mirror div), so decompose and re-scale.
-      const { top: ct, left: cl, lineHeight: clh } = getCaretCoordinates(el);
+      const { top: ct, left: cl, lineHeight: clh } = _acCaretCoords(el);
       const localY = ct - rect.top;   // caret offset from element top (unscaled)
       const localX = cl - rect.left;  // caret offset from element left (unscaled)
       const sy = localY * scale;
@@ -1523,22 +1538,23 @@ class TagACHandler {
       clearTimeout(this._timer);
       return;
     }
-    this._debounce(e.target);
+    this._debounce(e.currentTarget);
   }
 
-  // Click a token in the textarea.
+  // Click a token in the host (textarea or contentEditable). `currentTarget` is the
+  // attached host (the contentEditable root, not the inner span the click landed on).
   // Priority: [ref] → show entry info → entries by prompt → related tags.
-  // Clicking empty space / non-triggering position dismisses any open info panel.
   handleClick(e) {
     if (!settings.enabled) return;
+    const el = e.currentTarget;
     // 1) Check for [ref] at click position
-    const refInner = _refAtCaret(e.target.value, e.target.selectionStart);
+    const refInner = _refAtCaret(_acVal(el), _acCaret(el));
     if (refInner) {
-      this.ui.showEntryForRef(e.target, refInner);
+      this.ui.showEntryForRef(el, refInner);
       return;
     }
     // 2) Check for token
-    const name = getTokenAtCaret(e.target);
+    const name = getTokenAtCaret(el);
     if (!name || name.length < 2) {
       // Clicked empty area / non-triggering position — dismiss info panel
       if (this.ui.isVisible() && this.ui._isInfo) this.ui.hide();
@@ -1546,9 +1562,9 @@ class TagACHandler {
     }
     // 3) Entries by prompt (library) → related tags (danbooru)
     if (settings.useLibrary) {
-      this.ui.showEntriesByPrompt(e.target, name);
+      this.ui.showEntriesByPrompt(el, name);
     } else if (settings.enableRelated) {
-      this.ui.showRelatedFor(e.target, name);
+      this.ui.showRelatedFor(el, name);
     }
   }
 
@@ -1600,7 +1616,7 @@ class TagACHandler {
       if (e.key.length > 1 && !['Delete', 'Backspace', 'Process'].includes(e.key)) return;
     }
 
-    if (!e.defaultPrevented) this._debounce(e.target);
+    if (!e.defaultPrevented) this._debounce(e.currentTarget);
   }
 
   handleBlur(e) {
@@ -1625,6 +1641,9 @@ function attachTo(el, opts = {}) {
   if (typeof opts.getDelimiter === 'function') el._xyzGetDelimiter = opts.getDelimiter;
   // Entry text box only: provider of sub-entry names for [this.<name>] refs (#3).
   if (typeof opts.getThisRefs === 'function') el._xyzGetThisRefs = opts.getThisRefs;
+  // Rich contentEditable host: an adapter that abstracts value/caret/splice/caret-coords
+  // so the same AC code drives a contentEditable editor (see js/plv2_richedit adapter).
+  if (opts.adapter) el._xyzAcc = opts.adapter;
   if (el._xyzTagACHooked) return;
   el._xyzTagACHooked = true;
 

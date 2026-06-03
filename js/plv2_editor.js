@@ -17,6 +17,8 @@
  */
 
 import { app } from '../../../scripts/app.js';
+import { createRichEditor } from './plv2_richedit.js';
+import { createIslandBackend } from './plv2_island_backend.js';
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -56,7 +58,37 @@ function _setSaved(tab, node) {
 
 let _panes  = [];
 let _active = null;
-let _textarea = null, _backdrop = null;   // pointers to the active pane's elements
+let _editor = null;    // the active pane's rich editor component
+
+// Inline ref-expansion backend (resolveRef / loadEntry / saveEntry), shared by all panes.
+const _islandBackend = createIslandBackend();
+
+// Remembered inline-ref expansion per graph node id → expansion tree (top-level + nested),
+// persisted to localStorage so it survives page refresh / ComfyUI restart. Keyed by node id
+// (like _savedNodeIds); a stale id from another workflow just fails to match → no restore.
+const _EXPANDED_KEY = 'plv2_editor_expanded_v1';
+const _expandedByNode = (() => {
+  try {
+    const obj = JSON.parse(localStorage.getItem(_EXPANDED_KEY) || '{}');
+    return new Map(Object.entries(obj).map(([k, v]) => [Number(k), v]));
+  } catch { return new Map(); }
+})();
+function _writeExpandedStore() {
+  try {
+    const obj = {};
+    for (const [k, v] of _expandedByNode) if (Array.isArray(v) && v.length) obj[k] = v;
+    localStorage.setItem(_EXPANDED_KEY, JSON.stringify(obj));
+  } catch {}
+}
+// Capture a pane's CURRENT expansion (of its loaded node) into the store + persist.
+function _persistExpansionNow(pane) {
+  if (!pane || pane._loadedId == null || !pane.editor) return;
+  const tree = pane.editor.getExpansionTree();
+  if (tree.length) _expandedByNode.set(pane._loadedId, tree); else _expandedByNode.delete(pane._loadedId);
+  _writeExpandedStore();
+}
+let _persistTimer = null;
+function _persistExpansionSoon(pane) { clearTimeout(_persistTimer); _persistTimer = setTimeout(() => _persistExpansionNow(pane), 500); }
 
 // Find / replace
 let _findPanel = null, _findCountEl = null, _findSel = null;
@@ -65,68 +97,8 @@ const _findState = { query: '', replace: '', matchCase: false, wholeWord: false,
 // Live node-list refresh (#3)
 let _nodeSig = '', _pollTimer = null;
 
-// ─── Syntax highlight ─────────────────────────────────────────────────────────
-
-let _refValid  = new Map();   // ref string → boolean (true = valid, false = unresolvable)
-let _refTimer  = null;
-let _refVer    = 0;           // version counter for stale-result rejection
-
-function _hlInner(text) {
-  return text
-    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
-    .replace(/\[([^\]\n]*)\]/g, (_match, inner) => {
-      const resolved = _refValid.get(inner);
-      if (resolved === false) {
-        return `<span style="background:#3d1520;color:#f38ba8;border-radius:2px;text-decoration:underline wavy #f38ba888" title="Unresolvable reference">[${inner}]</span>`;
-      }
-      return `<span style="background:#2d1b5e;color:#cba6f7;border-radius:2px">[${inner}]</span>`;
-    });
-}
-function _highlight(text) { return _hlInner(text) + '\n'; }
-
-async function _resolveRefsBackdrop() {
-  // Collect all unique refs from all panes
-  const refs = new Set();
-  for (const p of _panes) {
-    const text = p.textarea?.value ?? '';
-    for (const m of text.matchAll(/\[([^\]\n]*)\]/g)) {
-      const inner = m[1].trim();
-      if (inner) refs.add(inner);
-    }
-  }
-  if (refs.size === 0) { _refValid.clear(); return; }
-
-  const ver = ++_refVer;
-  const results = await Promise.all(
-    [...refs].map(async ref => {
-      try {
-        const node = (await window.plv2?.api?.resolveRef(ref))?.node;
-        return { ref, valid: !!node };
-      } catch { return { ref, valid: false }; }
-    })
-  );
-  // Discard stale results if a newer resolution started
-  if (ver !== _refVer) return;
-
-  _refValid.clear();
-  for (const { ref, valid } of results) { _refValid.set(ref, valid); }
-
-  // Re-render all visible pane backdrops
-  for (const p of _panes) { p.updateBackdrop(); }
-}
-
-function _scheduleRefResolve() {
-  clearTimeout(_refTimer);
-  _refTimer = setTimeout(_resolveRefsBackdrop, 300);
-}
-
-// Highlight + mark a selection range (the "find in selection" scope — #2).
-function _highlightWithSel(text, s, e) {
-  if (s == null || e == null || e <= s) return _highlight(text);
-  return _hlInner(text.slice(0, s))
-    + '<span style="background:#3a4a63">' + _hlInner(text.slice(s, e)) + '</span>'
-    + _hlInner(text.slice(e)) + '\n';
-}
+// Ref highlighting + validation now live INSIDE the rich editor component
+// (plv2_richedit.js) — the old backdrop/_refValid machinery is gone.
 
 // ─── Graph node helpers ─────────────────────────────────────────────────────
 
@@ -161,58 +133,48 @@ function _makePane(tab, withHeader) {
     _wireNodeSel(pane);
   }
 
-  // Editor area: highlighted backdrop + transparent textarea overlay.
+  // Rich contentEditable editor: live [ref] highlight + inline ref expansion
+  // (chevron → edit the referenced entry in place). Highlight/validation/undo/islands
+  // all live inside the component; this pane just wires it to its graph node.
   const area = document.createElement('div');
-  area.style.cssText = 'flex:1;position:relative;overflow:hidden;';
-  _injectStyleOnce();
-
-  const backdrop = document.createElement('div');
-  backdrop.className = 'plv2-bd';
-  Object.assign(backdrop.style, {
-    position: 'absolute', inset: '0', padding: PAD,
-    fontFamily: FONT, fontSize: _fontSz + 'px', lineHeight: LH,
-    whiteSpace: 'pre-wrap', wordBreak: 'break-word',
-    color: '#cdd6f4', background: 'transparent', pointerEvents: 'none',
-    // The backdrop must wrap text at EXACTLY the textarea's content width. The textarea
-    // reserves a thin scrollbar gutter when it overflows; to keep widths identical, the
-    // backdrop reserves the same stable gutter (rendered invisible) — otherwise wrapping
-    // diverges and the caret/selection highlight drift off the real glyph positions.
-    overflowY: 'auto', overflowX: 'hidden', boxSizing: 'border-box',
-    scrollbarWidth: 'thin', scrollbarGutter: 'stable', scrollbarColor: 'transparent transparent',
+  area.style.cssText = 'flex:1;position:relative;overflow:auto;';
+  const editor = createRichEditor({
+    placeholder: 'e.g. [toki], {smile|laugh}, solo',
+    resolveRef:   _islandBackend.resolveRef,
+    loadEntry:    _islandBackend.loadEntry,
+    saveEntry:    _islandBackend.saveEntry,
+    loadThisRefs: _islandBackend.loadThisRefs,   // [this.x] candidates inside an island
+    normalize:    (t) => window.plv2.normalizePrompt(t),   // blur normalisation (skips refs/patterns)
   });
-
-  const textarea = document.createElement('textarea');
-  Object.assign(textarea.style, {
-    position: 'absolute', inset: '0', width: '100%', height: '100%', padding: PAD,
-    fontFamily: FONT, fontSize: _fontSz + 'px', lineHeight: LH,
-    background: 'transparent', color: 'transparent', caretColor: '#cdd6f4',
-    border: 'none', outline: 'none', resize: 'none', boxSizing: 'border-box',
-    overflowY: 'auto', wordBreak: 'break-word', scrollbarGutter: 'stable',
+  Object.assign(editor.el.style, {
+    padding: PAD, fontFamily: FONT, fontSize: _fontSz + 'px', lineHeight: LH,
+    minHeight: '100%', boxSizing: 'border-box', color: '#cdd6f4',
   });
-  textarea.setAttribute('spellcheck', 'false');
-  textarea.placeholder = 'e.g. [toki], {smile|laugh}, solo';
-
-  // Tag/library/ref autocomplete + related-on-click (rich editor = related-capable).
-  window.xyzTagAC?.attach(textarea, { related: true });
-
-  textarea.addEventListener('focus', () => _setActive(pane));
-  textarea.addEventListener('scroll', () => { backdrop.scrollTop = textarea.scrollTop; });
-  textarea.addEventListener('input', () => { pane.updateBackdrop(); pane.syncToNode(); pane.ckptRecord(); _emitChanged(); _scheduleRefResolve(); });
-  textarea.addEventListener('keydown', _onKeydown);
-  textarea.addEventListener('contextmenu', _onContextMenu);
-  // Normalise the template when editing finishes (skips [refs]/{patterns}).
-  textarea.addEventListener('blur', () => {
-    const v = window.plv2.normalizePrompt(textarea.value);
-    if (v !== textarea.value) {
-      textarea.value = v;
-      pane.updateBackdrop(); pane.syncToNode(); pane.ckptRecord(true); _emitChanged();
-    }
+  editor.onChange(() => { pane.syncToNode(); _emitChanged(); _persistExpansionSoon(pane); });
+  editor.el.addEventListener('focusin', () => _setActive(pane));
+  editor.el.addEventListener('contextmenu', _onContextMenu);
+  editor.el.addEventListener('keydown', e => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'f') { e.preventDefault(); _openFind(); }
   });
-
-  area.append(backdrop, textarea);
+  // Tag/library/ref autocomplete + related-on-click, driven through a SCOPE-AWARE
+  // contentEditable adapter: it reads/writes whichever level the caret is in — the top
+  // editor OR the expanded-ref island — so tag AC and [this.x] AC both work inside an
+  // island (getThisRefs returns that island's sub-entries).
+  window.xyzTagAC?.attach(editor.el, {
+    related: true,
+    getThisRefs: () => editor.activeThisRefs(),
+    adapter: {
+      getValue:    () => editor.scopeValue(),
+      getCaret:    () => editor.scopeCaret(),
+      getSelEnd:   () => editor.scopeCaret(),
+      splice:      (s, e, t) => editor.spliceActive(s, e, t),
+      caretCoords: () => editor.caretRect(),
+    },
+  });
+  area.appendChild(editor.el);
   el.appendChild(area);
 
-  pane.el = el; pane.backdrop = backdrop; pane.textarea = textarea;
+  pane.el = el; pane.editor = editor;
 
   // ── methods ──
   pane.widget = () => pane.node?.widgets?.find(w => w.name === 'prompt_template') ?? null;
@@ -251,63 +213,47 @@ function _makePane(tab, withHeader) {
 
   pane.syncFromNode = () => {
     const val = pane.widget()?.value ?? '';
-    if (pane.textarea.value !== val) pane.textarea.value = val;
-    pane.updateBackdrop();
-    pane.ckptReset();
+    const newId = pane.node?.id ?? null;
+    // Before swapping content, remember the currently-loaded node's FULL expansion tree
+    // (top-level + nested refs) + persist it, so switching nodes (and page refresh / restart)
+    // restores what was expanded.
+    if (pane._loadedId != null && pane._loadedId !== newId) {
+      _persistExpansionNow(pane);
+    }
+    const changed = pane.editor.getValue() !== val;
+    if (changed) pane.editor.setValue(val);
+    pane._loadedId = newId;
+    // Restore the new node's remembered expansions IN THE SAME TICK as setValue (no rAF):
+    // the chevrons render optimistically (present synchronously), and applyExpansionTree
+    // creates the island shells synchronously, so the collapsed state is never painted.
+    if (changed && newId != null) {
+      const tree = _expandedByNode.get(newId);
+      if (tree && tree.length) pane.editor.applyExpansionTree(tree);
+    }
     pane.setDisabled(!pane.node);
   };
 
   pane.syncToNode = () => {
     const w = pane.widget();
     if (!w) return;
-    w.value = pane.textarea.value;
-    if (w.inputEl && w.inputEl.value !== pane.textarea.value) w.inputEl.value = pane.textarea.value;  // node box live update (#9)
+    const v = pane.editor.getValue();
+    w.value = v;
+    if (w.inputEl && w.inputEl.value !== v) w.inputEl.value = v;   // node box live update (#9)
     try { app.graph.setDirtyCanvas(true, true); } catch {}
   };
 
-  pane.updateBackdrop = () => {
-    if (pane === _active && _findState.inSelection && _findSel) {
-      pane.backdrop.innerHTML = _highlightWithSel(pane.textarea.value, _findSel.start, _findSel.end);
-    } else {
-      pane.backdrop.innerHTML = _highlight(pane.textarea.value);
-    }
-  };
-
-  pane.setFont = px => { pane.backdrop.style.fontSize = px + 'px'; pane.textarea.style.fontSize = px + 'px'; };
+  pane.setFont = px => pane.editor.setFont(px);
 
   pane.setDisabled = b => {
-    pane.textarea.disabled = b;
-    pane.textarea.style.opacity = b ? '0.4' : '1';
-    pane.textarea.style.cursor  = b ? 'not-allowed' : '';
-    pane.textarea.placeholder   = b ? '(no nodes of this type in workflow)' : 'e.g. [toki], {smile|laugh}, solo';
+    pane.editor.el.contentEditable = b ? 'false' : 'true';
+    pane.editor.el.style.opacity = b ? '0.4' : '1';
+    pane.editor.el.style.pointerEvents = b ? 'none' : '';
+    pane.editor.el.dataset.placeholder = b ? '(no nodes of this type in workflow)' : 'e.g. [toki], {smile|laugh}, solo';
   };
 
-  // Per-pane undo/redo checkpoint history.
-  pane.ckptReset = () => { pane.ckpt = [{ value: pane.textarea.value, caret: pane.textarea.value.length }]; pane.ckptIdx = 0; clearTimeout(pane.ckptTimer); };
-  pane.ckptRecord = (immediate = false) => {
-    clearTimeout(pane.ckptTimer);
-    const commit = () => {
-      if (pane.applying) return;
-      const v = pane.textarea.value;
-      if (pane.ckpt[pane.ckptIdx] && pane.ckpt[pane.ckptIdx].value === v) return;
-      pane.ckpt = pane.ckpt.slice(0, pane.ckptIdx + 1);
-      pane.ckpt.push({ value: v, caret: pane.textarea.selectionStart ?? v.length });
-      if (pane.ckpt.length > 300) pane.ckpt.shift();
-      pane.ckptIdx = pane.ckpt.length - 1;
-    };
-    if (immediate) commit(); else pane.ckptTimer = setTimeout(commit, 350);
-  };
-  pane.applyCkpt = () => {
-    pane.applying = true;
-    const c = pane.ckpt[pane.ckptIdx];
-    pane.textarea.value = c.value;
-    const caret = Math.min(c.caret, c.value.length);
-    pane.textarea.selectionStart = pane.textarea.selectionEnd = caret;
-    pane.updateBackdrop(); pane.syncToNode();
-    pane.applying = false; pane.textarea.focus();
-  };
-  pane.undo = () => { pane.ckptRecord(true); if (pane.ckptIdx <= 0) return; pane.ckptIdx--; pane.applyCkpt(); };
-  pane.redo = () => { if (pane.ckptIdx >= pane.ckpt.length - 1) return; pane.ckptIdx++; pane.applyCkpt(); };
+  // Undo/redo is owned by the rich editor component (value + caret snapshots).
+  pane.undo = () => pane.editor.undo();
+  pane.redo = () => pane.editor.redo();
 
   return pane;
 }
@@ -329,29 +275,12 @@ function _wireNodeSel(pane) {
   });
 }
 
-function _injectStyleOnce() {
-  if (document.getElementById('plv2-editor-style')) return;
-  const s = document.createElement('style');
-  s.id = 'plv2-editor-style';
-  s.textContent = `
-    /* Backdrop & textarea must reserve an IDENTICAL scrollbar gutter so they wrap text at
-       the same width (else caret/selection highlight drift off the glyphs). Both use the
-       same standard mechanism — scrollbar-width:thin + scrollbar-gutter:stable — and the
-       backdrop hides its gutter via a transparent scrollbar-color (set inline), NOT
-       'display:none' (which would remove the gutter and reintroduce the mismatch). */
-    #plv2-editor-col textarea::placeholder { color: #45475a; }
-    #plv2-editor-col textarea { scrollbar-width: thin; scrollbar-color: #45475a transparent; scrollbar-gutter: stable; }
-  `;
-  document.head.appendChild(s);
-}
-
 // ─── Active pane ────────────────────────────────────────────────────────────
 
 function _setActive(pane) {
   if (!pane) return;
   _active = pane;
-  _textarea = pane.textarea;
-  _backdrop = pane.backdrop;
+  _editor = pane.editor;
   window.plv2.state.activeTab  = pane.tab;
   window.plv2.state.activeNode = pane.node;
   for (const p of _panes) p.el.style.boxShadow = (_orientation === 'split' && p === pane) ? 'inset 0 0 0 1px #45475a' : 'none';
@@ -378,8 +307,8 @@ function _build(col) {
   editBtn.addEventListener('click', () => {
     const r = editBtn.getBoundingClientRect();
     window.plv2.showContextMenu(r.left, r.bottom + 2, [
-      { label: 'Undo            Ctrl+Z', action: () => { _textarea?.focus(); _active?.undo(); } },
-      { label: 'Redo            Ctrl+Y', action: () => { _textarea?.focus(); _active?.redo(); } },
+      { label: 'Undo            Ctrl+Z', action: () => { _editor?.focus(); _active?.undo(); } },
+      { label: 'Redo            Ctrl+Y', action: () => { _editor?.focus(); _active?.redo(); } },
       { separator: true },
       { label: 'Find / Replace  Ctrl+F', action: () => _openFind() },
     ]);
@@ -410,6 +339,15 @@ function _build(col) {
   previewBtn.title = 'Open a live preview window';
   previewBtn.addEventListener('click', () => window.plv2.windows.preview.showEditor());
   row1.appendChild(previewBtn);
+
+  const llmBtn = _flatBtn('🤖 LLM');
+  llmBtn.title = 'Open the LLM prompt assistant (binds the active pane\'s node)';
+  llmBtn.addEventListener('click', () => {
+    window.plv2.windows.llm.show();
+    const nid = _active?.node?.id;
+    if (nid != null) document.dispatchEvent(new CustomEvent('plv2:llm-bind', { detail: { nodeId: nid } }));
+  });
+  row1.appendChild(llmBtn);
 
   // ── Top bar, row 2: orientation + (single: tabs + node select) ──
   _row2 = document.createElement('div');
@@ -575,30 +513,29 @@ async function _computeInsert(s, pos, ins, D) {
   return window.plv2.insert.assemble(plan, ins, leadDelim, D);
 }
 
-/** Insert at the caret of a specific pane. */
+/** Insert at the caret of a specific pane (delimiter-aware smart insert). */
 async function _insertIntoPane(pane, text, D) {
-  const pos = pane.textarea.selectionStart ?? pane.textarea.value.length;
-  const { value, caret } = await _computeInsert(pane.textarea.value, pos, text, D);
-  pane.textarea.value = value;
-  pane.textarea.selectionStart = pane.textarea.selectionEnd = caret;
-  pane.textarea.focus();
-  pane.updateBackdrop(); pane.syncToNode(); pane.ckptRecord(true);
+  const ed = pane.editor;
+  const cur = ed.getValue();
+  const pos = ed.getCaret() ?? cur.length;          // append when the editor isn't focused
+  const { value, caret } = await _computeInsert(cur, pos, text, D);
+  ed.applyEdit(value, caret);   // island-preserving (keeps any expanded refs open)
+  ed.focus();
+  pane.syncToNode();
   _emitChanged();
-  _scheduleRefResolve();
 }
 
 /** Plain caret insert into the active pane (back-compat, no delimiter logic). */
 function insertText(text) {
   if (!_active) return;
   text = window.plv2.normalizePrompt(text);
-  const t = _active.textarea;
-  const start = t.selectionStart ?? t.value.length, end = t.selectionEnd ?? start;
-  t.value = t.value.slice(0, start) + text + t.value.slice(end);
-  t.selectionStart = t.selectionEnd = start + text.length;
-  t.focus();
-  _active.updateBackdrop(); _active.syncToNode(); _active.ckptRecord(true);
+  const ed = _active.editor;
+  const cur = ed.getValue();
+  const pos = ed.getCaret() ?? cur.length;
+  ed.applyEdit(cur.slice(0, pos) + text + cur.slice(pos), pos + text.length);   // island-preserving
+  ed.focus();
+  _active.syncToNode();
   _emitChanged();
-  _scheduleRefResolve();
 }
 
 /** Insert a [ref] / prompt block into the node matching `posNeg`. */
@@ -625,21 +562,12 @@ async function insertRef(posNeg, text, delimiter) {
   _emitChanged();
 }
 
-// ─── Keyboard shortcuts (#4 undo/redo/find) ──────────────────────────────────
-
-function _onKeydown(e) {
-  const ctrl = e.ctrlKey || e.metaKey;
-  if (!ctrl) return;
-  const k = e.key.toLowerCase();
-  if (k === 'z' && !e.shiftKey)     { e.preventDefault(); _active?.undo(); }
-  else if (k === 'y')               { e.preventDefault(); _active?.redo(); }
-  else if (k === 'z' && e.shiftKey) { e.preventDefault(); _active?.redo(); }
-  else if (k === 'f')               { e.preventDefault(); _openFind(); }
-}
-
 // ─── Find / Replace ───────────────────────────────────────────────────────────
 
-function _afterEdit() { _active.updateBackdrop(); _active.syncToNode(); _active.ckptRecord(true); _emitChanged(); }
+// Find/Replace operates on the ACTIVE pane's rich editor via its top-level value +
+// range-selection API (islands are skipped — you can't find/replace inside an island's
+// borrowed entry text from here). `_findSel` is a stored {start,end} (the "in selection"
+// scope), captured from the editor when the toggle is switched on.
 
 function _findRegex() {
   if (!_findState.query) return null;
@@ -648,10 +576,11 @@ function _findRegex() {
   try { return new RegExp(pat, _findState.matchCase ? 'g' : 'gi'); } catch { return null; }
 }
 function _findScope() {
+  const full = _editor ? _editor.getValue() : '';
   if (_findState.inSelection && _findSel && _findSel.end > _findSel.start) {
-    return { text: _textarea.value.slice(_findSel.start, _findSel.end), offset: _findSel.start };
+    return { text: full.slice(_findSel.start, _findSel.end), offset: _findSel.start };
   }
-  return { text: _textarea.value, offset: 0 };
+  return { text: full, offset: 0 };
 }
 function _findMatches() {
   const re = _findRegex(); if (!re) return [];
@@ -664,40 +593,41 @@ function _updateFindCount(cur = 0) {
   _findCountEl.textContent = total ? `${cur || 0}/${total}` : '0/0';
 }
 function _doFindNext(backwards = false) {
+  if (!_editor) return;
   const matches = _findMatches();
   if (!matches.length) { _updateFindCount(0); return; }
+  const cur = _editor.getSelection();
   let idx;
   if (backwards) {
     idx = -1;
-    for (let i = 0; i < matches.length; i++) if (matches[i].end <= (_textarea.selectionStart ?? 0)) idx = i;
+    for (let i = 0; i < matches.length; i++) if (matches[i].end <= cur.start) idx = i;
     if (idx === -1) idx = matches.length - 1;
   } else {
-    idx = matches.findIndex(m => m.start >= (_textarea.selectionEnd ?? 0));
+    idx = matches.findIndex(m => m.start >= cur.end);
     if (idx === -1) idx = 0;
   }
   const m = matches[idx];
-  _textarea.focus();
-  _textarea.setSelectionRange(m.start, m.end);
+  _editor.selectRange(m.start, m.end);
   _updateFindCount(idx + 1);
 }
 function _doReplace() {
+  if (!_editor) return;
   const re = _findRegex(); if (!re) return;
-  const s = _textarea.selectionStart, e = _textarea.selectionEnd;
-  const sel = _textarea.value.slice(s, e);
-  if (sel && new RegExp('^(?:' + re.source + ')$', _findState.matchCase ? '' : 'i').test(sel)) {
-    _textarea.value = _textarea.value.slice(0, s) + _findState.replace + _textarea.value.slice(e);
-    const caret = s + _findState.replace.length;
-    _textarea.setSelectionRange(caret, caret);
-    _afterEdit();
+  const sel = _editor.getSelection();
+  if (sel.text && new RegExp('^(?:' + re.source + ')$', _findState.matchCase ? '' : 'i').test(sel.text)) {
+    const v = _editor.getValue();
+    _editor.applyEdit(v.slice(0, sel.start) + _findState.replace + v.slice(sel.end), sel.start + _findState.replace.length);
   }
   _doFindNext();
 }
 function _doReplaceAll() {
+  if (!_editor) return;
   const re = _findRegex(); if (!re) return;
   const scope = _findScope();
   const replaced = scope.text.replace(re, _findState.replace);
-  _textarea.value = _textarea.value.slice(0, scope.offset) + replaced + _textarea.value.slice(scope.offset + scope.text.length);
-  _afterEdit(); _updateFindCount(0);
+  const v = _editor.getValue();
+  _editor.applyEdit(v.slice(0, scope.offset) + replaced + v.slice(scope.offset + scope.text.length), scope.offset + replaced.length);
+  _updateFindCount(0);
 }
 function _findToggle(label, title, key) {
   const b = document.createElement('button');
@@ -712,8 +642,8 @@ function _findToggle(label, title, key) {
   b.addEventListener('click', () => {
     _findState[key] = !_findState[key];
     if (key === 'inSelection') {
-      _findSel = _findState[key] ? { start: _textarea.selectionStart ?? 0, end: _textarea.selectionEnd ?? 0 } : null;
-      _active?.updateBackdrop();    // #2 — show/clear the selection highlight
+      const s = _editor ? _editor.getSelection() : { start: 0, end: 0 };
+      _findSel = _findState[key] ? { start: s.start, end: s.end } : null;
     }
     sync(); _updateFindCount(0);
   });
@@ -753,21 +683,21 @@ function _buildFindPanel() {
   return panel;
 }
 function _openFind() {
-  if (!_active) return;
-  // The find panel lives in the active pane's area so it tracks the focused editor.
+  if (!_active || !_editor) return;
+  // The find panel lives in the active pane's editor area so it tracks the focused editor.
   if (_findPanel) _findPanel.remove();
   _findPanel = _buildFindPanel();
-  _active.textarea.parentElement.appendChild(_findPanel);   // the pane's editor area
-  const s = _textarea.selectionStart ?? 0, e = _textarea.selectionEnd ?? 0;
-  if (e > s) { _findState.query = _textarea.value.slice(s, e); _findPanel._findInput.value = _findState.query; }
+  _editor.el.parentElement.appendChild(_findPanel);   // the pane's editor area (position:relative)
+  const sel = _editor.getSelection();
+  if (sel.text) { _findState.query = sel.text; _findPanel._findInput.value = _findState.query; }
   _findPanel.style.display = 'flex';
   _updateFindCount(0);
   requestAnimationFrame(() => { _findPanel._findInput?.focus(); _findPanel._findInput?.select(); });
 }
 function _closeFind() {
   if (_findPanel) _findPanel.style.display = 'none';
-  if (_findState.inSelection) { _findState.inSelection = false; _findSel = null; _active?.updateBackdrop(); }
-  _textarea?.focus();
+  if (_findState.inSelection) { _findState.inSelection = false; _findSel = null; }
+  _editor?.focus();
 }
 
 // ─── Right-click context menu (#5/#8) ────────────────────────────────────────
@@ -830,12 +760,13 @@ function _refAtCaret(s, pos) {
   return null;
 }
 async function _onContextMenu(e) {
-  const ta = e.currentTarget;
-  const s = ta.value;
-  const selStart = ta.selectionStart ?? 0, selEnd = ta.selectionEnd ?? 0;
-  const tok = _tokenAt(s, selStart);
-  const text = (selEnd > selStart) ? s.slice(selStart, selEnd).trim() : tok.text;
-  const refInner = _refAtCaret(s, selStart);
+  if (!_active) return;
+  const s = _active.editor.getValue();
+  const pos = _active.editor.getCaret() ?? 0;          // top-level caret (null inside an island)
+  const sel = (window.getSelection()?.toString() || '').trim();
+  const tok = _tokenAt(s, pos);
+  const text = sel || tok.text;
+  const refInner = _refAtCaret(s, pos);
   if (!text && refInner == null) return;
   e.preventDefault();
 
@@ -911,13 +842,13 @@ function _emitChanged(immediate = false) {
 
 // ─── Public surface ───────────────────────────────────────────────────────────
 
-function getEditorText() { return _panes.map(p => p.textarea.value).join('\n'); }
+function getEditorText() { return _panes.map(p => p.editor.getValue()).join('\n'); }
 
 /** Data for the preview window (#10): orientation, active polarity, and the pos
  *  and neg templates (from panes if shown, else the saved nodes' widgets). */
 function getPreviewData() {
   const out = { orientation: _orientation, activeTab: _active?.tab ?? 'pos', pos: null, neg: null };
-  for (const p of _panes) { if (p.tab === 'pos') out.pos = p.textarea.value; else out.neg = p.textarea.value; }
+  for (const p of _panes) { if (p.tab === 'pos') out.pos = p.editor.getValue(); else out.neg = p.editor.getValue(); }
   const w = n => n?.widgets?.find(x => x.name === 'prompt_template')?.value ?? null;
   if (out.pos == null) out.pos = w(_savedNodes.pos);
   if (out.neg == null) out.neg = w(_savedNodes.neg);
@@ -953,7 +884,6 @@ function _refresh() {
   const focusPane = focusTab ? _paneForPolarity(focusTab) : null;
   _setActive(focusPane || (_active && _panes.includes(_active) ? _active : _panes[0]));
   _startPoll();
-  _resolveRefsBackdrop();
 }
 
 // ─── Register ─────────────────────────────────────────────────────────────────
@@ -978,17 +908,30 @@ app.registerExtension({
     // Node's multiline textbox edited on canvas → mirror into the matching pane (#9).
     document.addEventListener('plv2:node-edited', e => {
       const { nodeId, value } = e.detail || {};
-      let touched = false;
       for (const p of _panes) {
-        if (p.node && p.node.id === nodeId && p.textarea.value !== value) {
-          p.textarea.value = value ?? '';
-          p.updateBackdrop();
-          p.ckptRecord();
-          touched = true;
+        if (p.node && p.node.id === nodeId && p.editor.getValue() !== value) {
+          p.editor.setValue(value ?? '');
+          _emitChanged();
         }
       }
-      if (touched) { _emitChanged(); _scheduleRefResolve(); }
     });
+
+    // An entry's content changed elsewhere (entry detail text box, prompt-list toggle, or
+    // another island) → refresh any OPEN inline-expansion island that targets that entry.
+    // Both events carry {nodeId}; the component skips an island the user is editing, so this
+    // never clobbers live input. (`entry-changed` = structural reload; `entry-content-changed`
+    // = the detail box / list edits — see plv2_entry.js `_notifyEditorIfReferenced`.)
+    const _refreshIslandsFor = async (nodeId) => {
+      if (nodeId == null) return;
+      for (const p of _panes) {
+        for (const name of p.editor.openIslandRefs()) {
+          if (_islandBackend.nodeIdForRef(name) !== nodeId) continue;
+          try { p.editor.refreshIsland(name, await _islandBackend.loadEntry(name)); } catch {}
+        }
+      }
+    };
+    document.addEventListener('plv2:entry-changed',         e => _refreshIslandsFor(e.detail?.nodeId));
+    document.addEventListener('plv2:entry-content-changed', e => _refreshIslandsFor(e.detail?.nodeId));
 
     window.plv2Editor = { getEditorText, insertText, insertRef, getPreviewData };
   },

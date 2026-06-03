@@ -83,6 +83,29 @@ const api = {
   replaceRefs:       (nid, body) => _req('POST',  `/xyz/plv2/nodes/${nid}/refs/replace`, body),
   getUsages:         (nid)       => _req('GET',   `/xyz/plv2/nodes/${nid}/usages`),
   stripRefs:          (nid, body) => _req('POST',  `/xyz/plv2/nodes/${nid}/strip_refs`, body),
+
+  // LLM Prompt Assistant (/xyz/llm/...). Chat itself uses a raw fetch (AbortController).
+  llm: {
+    getSettings:        ()              => _req('GET',    '/xyz/llm/settings'),
+    saveSettings:       (body)          => _req('POST',   '/xyz/llm/settings', body),
+    testConnection:     ()              => _req('POST',   '/xyz/llm/test', {}),
+    getBlocks:          ()              => _req('GET',    '/xyz/llm/blocks'),
+    createBlock:        (body)          => _req('POST',   '/xyz/llm/blocks', body),
+    updateBlock:        (id, body)      => _req('PATCH',  `/xyz/llm/blocks/${id}`, body),
+    deleteBlock:        (id)            => _req('DELETE', `/xyz/llm/blocks/${id}`),
+    reorderBlocks:      (order)         => _req('POST',   '/xyz/llm/blocks/reorder', { order }),
+    getVariants:        (id)            => _req('GET',    `/xyz/llm/blocks/${id}/variants`),
+    createVariant:      (id, body)      => _req('POST',   `/xyz/llm/blocks/${id}/variants`, body),
+    updateVariant:      (id, vid, body) => _req('PATCH',  `/xyz/llm/blocks/${id}/variants/${vid}`, body),
+    deleteVariant:      (id, vid)       => _req('DELETE', `/xyz/llm/blocks/${id}/variants/${vid}`),
+    setActiveVariant:   (id, vid)       => _req('POST',   `/xyz/llm/blocks/${id}/active-variant`, { variant_id: vid }),
+    getConversations:   ()              => _req('GET',    '/xyz/llm/conversations'),
+    createConversation: (title)         => _req('POST',   '/xyz/llm/conversations', { title }),
+    renameConversation: (id, title)     => _req('PATCH',  `/xyz/llm/conversations/${id}`, { title }),
+    deleteConversation: (id)            => _req('DELETE', `/xyz/llm/conversations/${id}`),
+    getMessages:        (id)            => _req('GET',    `/xyz/llm/conversations/${id}/messages`),
+    deleteLastAssistant:(id, inclUser)  => _req('DELETE', `/xyz/llm/conversations/${id}/last-assistant${inclUser ? '?include_user=1' : ''}`),
+  },
 };
 
 // ─── State ────────────────────────────────────────────────────────────────────
@@ -769,6 +792,7 @@ let _pvSource = 'editor';   // 'editor' | 'node'
 let _pvNodeId = null;
 let _pvLayoutKey = '';      // current DOM layout signature (rebuild only when it changes — #6)
 let _pvOuts = {};           // section key → output <div> (reused in place to avoid flicker)
+let _pvDeps = new Set();    // node_ids the last resolution walked through (see previewDeps)
 
 const previewWin = _makeWindow({
   key: PREVIEW_KEY, title: 'Preview', defs: { x: 1180, y: 80, w: 380, h: 520 }, minW: 240,
@@ -779,6 +803,18 @@ const previewWin = _makeWindow({
   },
 });
 
+// LLM Prompt Assistant — the 4th window. Body is rendered by js/plv2_llm.js on first
+// show (it hooks windows.llm.onShow), so here we only build the empty column container.
+const LLM_KEY  = 'plv2_win_llm_v2';
+const LLM_DEFS = { x: 1240, y: 80, w: 480, h: 640 };
+const llmWin = _makeWindow({
+  key: LLM_KEY, title: '🤖 LLM Prompt', defs: LLM_DEFS, minW: 400, showSettings: true,
+  buildBody(body) {
+    body.style.flexDirection = 'column';
+    body.dataset.plv2Llm = '1';   // plv2_llm.js renders into this body
+  },
+});
+
 const PREVIEW_OUT_CSS = 'flex:1;overflow:auto;padding:10px 14px;white-space:pre-wrap;word-break:break-word;font-family:"Fira Code","Cascadia Code",Consolas,monospace;font-size:13px;line-height:1.6;color:#cdd6f4;scrollbar-width:thin;scrollbar-color:#45475a transparent;';
 
 function _nodeTemplate(nodeId) {
@@ -786,10 +822,15 @@ function _nodeTemplate(nodeId) {
   return n?.widgets?.find(w => w.name === 'prompt_template')?.value ?? null;
 }
 
-/** Resolve `text` and write it into `out` only when it actually changed (no flicker). */
+/** Resolve `text` and write it into `out` only when it actually changed (no flicker).
+ *  Also folds the resolution's dependency node_ids into `_pvDeps` (union across the
+ *  pos/neg sections of one render) so entry edits know whether to re-resolve. */
 function _pvResolveInto(out, text) {
   api.resolveTemplate(text || '', 0)
-    .then(r => { const t = (r?.text ?? '').trim() || '(empty)'; if (out.textContent !== t) out.textContent = t; })
+    .then(r => {
+      if (Array.isArray(r?.node_ids)) for (const id of r.node_ids) _pvDeps.add(id);
+      const t = (r?.text ?? '').trim() || '(empty)'; if (out.textContent !== t) out.textContent = t;
+    })
     .catch(() => { if (out.textContent !== '(preview failed)') out.textContent = '(preview failed)'; });
 }
 
@@ -834,6 +875,8 @@ function _renderPreview() {
       }
     }
   }
+  // Recompute the dependency set on every render; each section's resolve unions in.
+  _pvDeps = new Set();
   if (sections) for (const s of sections) { if (_pvOuts[s.key]) _pvResolveInto(_pvOuts[s.key], s.text); }
 }
 
@@ -885,6 +928,17 @@ document.addEventListener('plv2:editor-changed', e => {
 // A node-sourced preview tracks edits to that node's textbox (debounced, in place — #6).
 document.addEventListener('plv2:node-edited', e => {
   if (!previewWin.isVisible() || _pvSource !== 'node' || e.detail?.nodeId !== _pvNodeId) return;
+  clearTimeout(_previewTimer);
+  _previewTimer = setTimeout(_renderPreview, 150);
+});
+// A node-sourced preview also tracks edits to any *entry* it resolves through (an
+// indirectly referenced library entry). Gated by the recorded dependency set so it
+// only re-resolves when the edited entry actually contributes. (The editor-sourced
+// case is handled above via plv2:editor-changed + previewDeps.)
+document.addEventListener('plv2:entry-content-changed', e => {
+  if (!previewWin.isVisible() || _pvSource !== 'node') return;
+  const id = e.detail?.nodeId;
+  if (id == null || !_pvDeps.has(id)) return;
   clearTimeout(_previewTimer);
   _previewTimer = setTimeout(_renderPreview, 150);
 });
@@ -1046,6 +1100,38 @@ function inlinePrompt(title, defaultValue = '') {
   });
 }
 
+// In-page confirm dialog (replaces window.confirm so it layers above the floating
+// windows and matches the app theme). Resolves true (OK) / false (Cancel/Escape).
+function inlineConfirm(message, { okLabel = 'OK', danger = false } = {}) {
+  return new Promise(resolve => {
+    const bg = _div('position:fixed;inset:0;z-index:100049;background:rgba(0,0,0,.35);');
+    const box = _div('position:fixed;z-index:100050;left:50%;top:40%;transform:translate(-50%,-50%);background:#252526;border:1px solid #454545;border-radius:6px;padding:14px 16px;box-shadow:0 4px 20px rgba(0,0,0,.7);display:flex;flex-direction:column;gap:12px;min-width:280px;max-width:420px;font-family:ui-sans-serif,system-ui,sans-serif;');
+    const lbl = _div('font-size:12px;color:#cdd6f4;line-height:1.5;white-space:pre-wrap;');
+    lbl.textContent = message;
+    const btns = _div('display:flex;gap:6px;justify-content:flex-end;');
+    const cancel = document.createElement('button');
+    cancel.textContent = 'Cancel';
+    cancel.style.cssText = 'background:none;border:1px solid #454545;color:#a6adc8;font-size:11px;padding:4px 12px;border-radius:3px;cursor:pointer;';
+    const ok = document.createElement('button');
+    ok.textContent = okLabel;
+    ok.style.cssText = `background:${danger ? '#f38ba8' : '#7c3aed'};border:none;color:${danger ? '#11111b' : '#fff'};font-size:11px;font-weight:600;padding:4px 12px;border-radius:3px;cursor:pointer;`;
+    btns.append(cancel, ok);
+    box.append(lbl, btns);
+    document.body.append(bg, box);
+    let done = false;
+    const finish = v => { if (done) return; done = true; bg.remove(); box.remove(); document.removeEventListener('keydown', onKey, true); resolve(v); };
+    const onKey = e => {
+      if (e.key === 'Enter')  { e.preventDefault(); finish(true); }
+      if (e.key === 'Escape') { e.preventDefault(); finish(false); }
+    };
+    cancel.addEventListener('click', () => finish(false));
+    ok.addEventListener('click', () => finish(true));
+    bg.addEventListener('mousedown', () => finish(false));
+    document.addEventListener('keydown', onKey, true);
+    requestAnimationFrame(() => ok.focus());
+  });
+}
+
 // ─── Prompt normalisation settings ───────────────────────────────────────────
 //
 // Three opt-in transforms applied to literal prompt text (NOT to [refs] or
@@ -1149,7 +1235,11 @@ window.plv2 = {
   state,
   showContextMenu,
   inlinePrompt,
+  inlineConfirm,
   insert: { plan: _planInsert, assemble: _assembleInsert },
+  // Node ids the live preview last resolved through (entry detail uses this to
+  // decide whether an edit must re-resolve the preview — handles indirect refs).
+  previewDeps: () => _pvDeps,
   settings: _settings,
   saveSettings: _saveSettings,   // persist normalize flags (used by unified settings page)
   normalizePrompt,
@@ -1161,6 +1251,7 @@ window.plv2 = {
     editor:  editorWin,
     library: libraryWin,
     preview: previewWin,
+    llm:     llmWin,
   },
 
   // Back-compat surface consumed by the render modules (containers + dialog anchor).
@@ -1200,14 +1291,19 @@ app.registerExtension({
     if (!PLV2_TYPES.has(node.comfyClass)) return;
     node.serialize_widgets = true;
 
-    const wrap = _div('display:flex;gap:6px;width:100%;box-sizing:border-box;');
+    const wrap = _div('display:flex;gap:6px;width:100%;box-sizing:border-box;flex-wrap:wrap;');
     const edBtn  = _nodeBtn('📝 Editor');
     const libBtn = _nodeBtn('📚 Library');
     const pvBtn  = _nodeBtn('👁 Preview');
+    const llmBtn = _nodeBtn('🤖 LLM');
     edBtn.addEventListener('click',  () => editorWin.toggle(node));
     libBtn.addEventListener('click', () => libraryWin.toggle());
     pvBtn.addEventListener('click',  () => previewWin.showNode(node.id));   // #7
-    wrap.append(edBtn, libBtn, pvBtn);
+    llmBtn.addEventListener('click', () => {
+      llmWin.show();
+      document.dispatchEvent(new CustomEvent('plv2:llm-bind', { detail: { nodeId: node.id } }));
+    });
+    wrap.append(edBtn, libBtn, pvBtn, llmBtn);
 
     const w = node.addDOMWidget('plv2_open_btns', 'custom', wrap, {
       getValue: () => '', setValue: () => {}, serialize: false,

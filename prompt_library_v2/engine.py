@@ -43,6 +43,7 @@ def resolve_template(
     template: str,
     seed: int,
     output_index: int = 0,
+    deps: Optional[Set[int]] = None,
 ) -> str:
     """Process a prompt template and return the fully expanded text.
 
@@ -50,6 +51,10 @@ def resolve_template(
         template:     raw text from the node's prompt_template widget
         seed:         RNG seed (controls random mode + dropout)
         output_index: which option to pick from {a|b|c} patterns
+        deps:         if given, every node_id this resolution actually walks
+                      through is added to it — the expanded entries AND the
+                      origin nodes of the prompts they used (template sources).
+                      Lets a caller know which entry edits should re-resolve.
     """
     if not template or not template.strip():
         return ""
@@ -60,7 +65,7 @@ def resolve_template(
     text = _apply_choices(template, output_index)
 
     # Step 2: recursively expand [entry_ref] patterns
-    text = _expand_refs(text, rng, resolving_set=frozenset(), depth=0)
+    text = _expand_refs(text, rng, resolving_set=frozenset(), depth=0, deps=deps)
 
     # Step 3: clean up
     return _cleanup(text)
@@ -70,19 +75,30 @@ def generate_entry_text(
     node_id: int,
     rng: _random.Random,
     resolving_set: frozenset,
+    deps: Optional[Set[int]] = None,
 ) -> str:
     """Generate prompt text for a single entry node.
 
     Called by _expand_refs; resolving_set is passed through for cycle detection.
+    If `deps` is given, this entry and the origin nodes of its (enabled) prompts
+    are recorded into it (so template-inheritance sources are captured too).
     """
     node = _repo.get_node(node_id)
     if node is None or not node["has_prompts"]:
         return ""
 
+    if deps is not None:
+        deps.add(node_id)   # the entry contributes even when it currently yields ""
+
     # Effective enabled prompts = own + inherited template prompts (cascaded
     # per-entry overrides, deduped by content), in own-then-inherited order.
     from .template import effective_enabled_prompts
     enabled = effective_enabled_prompts(node_id)
+    if deps is not None:
+        for it in enabled:
+            oid = it.get("origin_id")
+            if oid is not None:
+                deps.add(oid)   # inherited prompts → their _template owner node
     if not enabled:
         return ""
 
@@ -191,6 +207,7 @@ def _expand_refs(
     rng: _random.Random,
     resolving_set: frozenset,
     depth: int,
+    deps: Optional[Set[int]] = None,
 ) -> str:
     """Expand all [entry_ref] patterns in text, recursing into generated text.
 
@@ -254,10 +271,10 @@ def _expand_refs(
 
         # Generate text for the target entry
         new_resolving_set = resolving_set | {target_id}
-        generated = generate_entry_text(target_id, rng, new_resolving_set)
+        generated = generate_entry_text(target_id, rng, new_resolving_set, deps)
 
         # Recursively expand any [refs] inside the generated text
-        return _expand_refs(generated, rng, new_resolving_set, depth + 1)
+        return _expand_refs(generated, rng, new_resolving_set, depth + 1, deps)
 
     return _REF_RE.sub(_replacer, text)
 

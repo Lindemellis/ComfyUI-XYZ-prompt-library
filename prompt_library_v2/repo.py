@@ -56,6 +56,25 @@ __all__ = [
     "CreateTemplatePromptOp",
     "UpdateTemplatePromptOp",
     "DeleteTemplatePromptOp",
+    # LLM assistant write ops
+    "CreateLlmBlockOp",
+    "UpdateLlmBlockOp",
+    "DeleteLlmBlockOp",
+    "ReorderLlmBlocksOp",
+    "UpsertLlmVariantOp",
+    "DeleteLlmVariantOp",
+    "SetActiveVariantOp",
+    "CreateConversationOp",
+    "RenameConversationOp",
+    "DeleteConversationOp",
+    "AppendMessageOp",
+    "DeleteMessageOp",
+    # LLM assistant read APIs
+    "count_llm_blocks",
+    "get_llm_blocks",
+    "get_block_variants",
+    "get_conversations",
+    "get_messages",
     # Read APIs
     "get_prompt",
     "get_node",
@@ -481,6 +500,7 @@ class SetPromptOverrideOp:
     enabled: Optional[bool] = None
     weight: Optional[float] = None
     order_index: Optional[int] = None
+    sep_after: Optional[int] = None
     clear: bool = False
 
     def apply(self, conn: sqlite3.Connection) -> None:
@@ -497,6 +517,8 @@ class SetPromptOverrideOp:
             fields["weight"] = self.weight
         if self.order_index is not None:
             fields["order_index"] = self.order_index
+        if self.sep_after is not None:
+            fields["sep_after"] = self.sep_after
         if not fields:
             return
         cols = ["owner_node_id", "prompt_id"] + list(fields)
@@ -728,6 +750,244 @@ class DeleteTemplatePromptOp:
 
 
 # ---------------------------------------------------------------------------
+# Write ops — LLM assistant (blocks / variants / conversations / messages)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class CreateLlmBlockOp:
+    """Create a block together with its first variant, set it active. Returns block id.
+
+    A block's text lives only in variants, so a new block always gets one 'default'
+    variant seeded with `text` and pointed at by active_variant_id — atomically.
+    """
+    kind: str
+    name: str
+    text: str = ""
+    enabled: bool = True
+    order_index: int = 0
+    keep_turns: Optional[int] = None
+    variant_name: str = "default"
+
+    def apply(self, conn: sqlite3.Connection) -> int:
+        ts = _now()
+        cur = conn.execute(
+            """
+            INSERT INTO llm_blocks
+                (kind, name, enabled, order_index, keep_turns, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (self.kind, self.name, int(self.enabled), self.order_index,
+             self.keep_turns, ts, ts),
+        )
+        block_id = cur.lastrowid
+        vcur = conn.execute(
+            "INSERT INTO llm_block_variants (block_id, variant_name, text, created_at, updated_at)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (block_id, self.variant_name, self.text, ts, ts),
+        )
+        conn.execute(
+            "UPDATE llm_blocks SET active_variant_id = ? WHERE id = ?",
+            (vcur.lastrowid, block_id),
+        )
+        return block_id
+
+
+@dataclass
+class UpdateLlmBlockOp:
+    """Partial update of a block's own fields (not variant text). None = leave."""
+    block_id: int
+    name: Optional[str] = None
+    enabled: Optional[bool] = None
+    order_index: Optional[int] = None
+    keep_turns: Optional[int] = None
+    active_variant_id: Optional[int] = None
+    keep_turns_set: bool = False  # set True to write keep_turns even when None (history 'all')
+
+    def apply(self, conn: sqlite3.Connection) -> None:
+        fields: Dict[str, Any] = {}
+        if self.name is not None:
+            fields["name"] = self.name
+        if self.enabled is not None:
+            fields["enabled"] = int(self.enabled)
+        if self.order_index is not None:
+            fields["order_index"] = self.order_index
+        if self.active_variant_id is not None:
+            fields["active_variant_id"] = self.active_variant_id
+        if self.keep_turns is not None or self.keep_turns_set:
+            fields["keep_turns"] = self.keep_turns
+        if not fields:
+            return
+        fields["updated_at"] = _now()
+        set_clause = ", ".join(f"{k} = :{k}" for k in fields)
+        fields["block_id"] = self.block_id
+        conn.execute(f"UPDATE llm_blocks SET {set_clause} WHERE id = :block_id", fields)
+
+
+@dataclass
+class DeleteLlmBlockOp:
+    """Delete a block; its variants cascade."""
+    block_id: int
+
+    def apply(self, conn: sqlite3.Connection) -> None:
+        conn.execute("DELETE FROM llm_blocks WHERE id = ?", (self.block_id,))
+
+
+@dataclass
+class ReorderLlmBlocksOp:
+    """Bulk-update order_index. order_map: {block_id: new_order_index}."""
+    order_map: Dict[int, int]
+
+    def apply(self, conn: sqlite3.Connection) -> None:
+        ts = _now()
+        for block_id, idx in self.order_map.items():
+            conn.execute(
+                "UPDATE llm_blocks SET order_index = ?, updated_at = ? WHERE id = ?",
+                (idx, ts, block_id),
+            )
+
+
+@dataclass
+class UpsertLlmVariantOp:
+    """Insert or update a block variant. Returns the variant id.
+
+    On insert (variant_id=None), does NOT change which variant is active — the route
+    decides whether to switch (e.g. a fresh "save as new" usually becomes active).
+    """
+    block_id: int
+    text: str
+    variant_name: str = "default"
+    variant_id: Optional[int] = None
+
+    def apply(self, conn: sqlite3.Connection) -> int:
+        ts = _now()
+        if self.variant_id is not None:
+            conn.execute(
+                "UPDATE llm_block_variants SET text = ?, variant_name = ?, updated_at = ?"
+                " WHERE id = ? AND block_id = ?",
+                (self.text, self.variant_name, ts, self.variant_id, self.block_id),
+            )
+            return self.variant_id
+        cur = conn.execute(
+            "INSERT INTO llm_block_variants (block_id, variant_name, text, created_at, updated_at)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (self.block_id, self.variant_name, self.text, ts, ts),
+        )
+        return cur.lastrowid
+
+
+@dataclass
+class DeleteLlmVariantOp:
+    """Delete a variant. Refuses to drop a block's last variant (a block needs ≥1).
+    If the deleted variant was active, re-points active to the newest remaining one."""
+    variant_id: int
+
+    def apply(self, conn: sqlite3.Connection) -> None:
+        row = conn.execute(
+            "SELECT block_id FROM llm_block_variants WHERE id = ?", (self.variant_id,)
+        ).fetchone()
+        if not row:
+            return
+        block_id = row[0]
+        (cnt,) = conn.execute(
+            "SELECT COUNT(*) FROM llm_block_variants WHERE block_id = ?", (block_id,)
+        ).fetchone()
+        if cnt <= 1:
+            raise ValueError("cannot delete the block's only variant")
+        conn.execute("DELETE FROM llm_block_variants WHERE id = ?", (self.variant_id,))
+        active = conn.execute(
+            "SELECT active_variant_id FROM llm_blocks WHERE id = ?", (block_id,)
+        ).fetchone()
+        if active and active[0] == self.variant_id:
+            newest = conn.execute(
+                "SELECT id FROM llm_block_variants WHERE block_id = ? ORDER BY id DESC LIMIT 1",
+                (block_id,),
+            ).fetchone()
+            conn.execute(
+                "UPDATE llm_blocks SET active_variant_id = ?, updated_at = ? WHERE id = ?",
+                (newest[0] if newest else None, _now(), block_id),
+            )
+
+
+@dataclass
+class SetActiveVariantOp:
+    block_id: int
+    variant_id: int
+
+    def apply(self, conn: sqlite3.Connection) -> None:
+        conn.execute(
+            "UPDATE llm_blocks SET active_variant_id = ?, updated_at = ? WHERE id = ?",
+            (self.variant_id, _now(), self.block_id),
+        )
+
+
+@dataclass
+class CreateConversationOp:
+    title: str = ""
+
+    def apply(self, conn: sqlite3.Connection) -> int:
+        ts = _now()
+        cur = conn.execute(
+            "INSERT INTO llm_conversations (title, created_at, updated_at) VALUES (?, ?, ?)",
+            (self.title, ts, ts),
+        )
+        return cur.lastrowid
+
+
+@dataclass
+class RenameConversationOp:
+    conversation_id: int
+    title: str
+
+    def apply(self, conn: sqlite3.Connection) -> None:
+        conn.execute(
+            "UPDATE llm_conversations SET title = ?, updated_at = ? WHERE id = ?",
+            (self.title, _now(), self.conversation_id),
+        )
+
+
+@dataclass
+class DeleteConversationOp:
+    conversation_id: int
+
+    def apply(self, conn: sqlite3.Connection) -> None:
+        conn.execute("DELETE FROM llm_conversations WHERE id = ?", (self.conversation_id,))
+
+
+@dataclass
+class AppendMessageOp:
+    """Append a message and bump the conversation's updated_at. meta is JSON-encoded.
+    Returns the new message id."""
+    conversation_id: int
+    role: str
+    content: str
+    meta: Optional[Dict[str, Any]] = None
+
+    def apply(self, conn: sqlite3.Connection) -> int:
+        import json
+        ts = _now()
+        cur = conn.execute(
+            "INSERT INTO llm_messages (conversation_id, role, content, meta, created_at)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (self.conversation_id, self.role, self.content,
+             json.dumps(self.meta) if self.meta is not None else None, ts),
+        )
+        conn.execute(
+            "UPDATE llm_conversations SET updated_at = ? WHERE id = ?",
+            (ts, self.conversation_id),
+        )
+        return cur.lastrowid
+
+
+@dataclass
+class DeleteMessageOp:
+    """Delete a single message (used by regenerate to drop the trailing assistant turn)."""
+    message_id: int
+
+    def apply(self, conn: sqlite3.Connection) -> None:
+        conn.execute("DELETE FROM llm_messages WHERE id = ?", (self.message_id,))
+
+
+# ---------------------------------------------------------------------------
 # Read APIs
 # ---------------------------------------------------------------------------
 
@@ -856,11 +1116,11 @@ def get_prompt_overrides(owner_node_id: int) -> Dict[int, Dict[str, Any]]:
     conn = _db.connect_read(_db_path())
     try:
         rows = conn.execute(
-            "SELECT prompt_id, enabled, weight, order_index FROM prompt_overrides WHERE owner_node_id = ?",
+            "SELECT prompt_id, enabled, weight, order_index, sep_after FROM prompt_overrides WHERE owner_node_id = ?",
             (owner_node_id,),
         ).fetchall()
         return {r["prompt_id"]: {"enabled": r["enabled"], "weight": r["weight"],
-                                 "order_index": r["order_index"]} for r in rows}
+                                 "order_index": r["order_index"], "sep_after": r["sep_after"]} for r in rows}
     finally:
         conn.close()
 
@@ -1211,6 +1471,83 @@ def find_usages(node_id: int) -> Dict[str, Any]:
                 })
 
         return {"entries": entries_out, "usages": usages_out}
+    finally:
+        conn.close()
+
+
+def count_llm_blocks() -> int:
+    """Number of LLM template blocks (used to decide whether to seed defaults)."""
+    conn = _db.connect_read(_db_path())
+    try:
+        (n,) = conn.execute("SELECT COUNT(*) FROM llm_blocks").fetchone()
+        return int(n)
+    finally:
+        conn.close()
+
+
+def get_llm_blocks() -> List[Dict[str, Any]]:
+    """Return all blocks (ordered by order_index) joined with their active variant text."""
+    conn = _db.connect_read(_db_path())
+    try:
+        rows = conn.execute(
+            """
+            SELECT b.id, b.kind, b.name, b.enabled, b.order_index, b.active_variant_id,
+                   b.keep_turns, b.created_at, b.updated_at,
+                   v.text AS text, v.variant_name AS variant_name
+            FROM llm_blocks b
+            LEFT JOIN llm_block_variants v ON v.id = b.active_variant_id
+            ORDER BY b.order_index, b.id
+            """
+        ).fetchall()
+        return _rows_to_list(rows)
+    finally:
+        conn.close()
+
+
+def get_block_variants(block_id: int) -> List[Dict[str, Any]]:
+    """Return all saved variants of a block, oldest first."""
+    conn = _db.connect_read(_db_path())
+    try:
+        rows = conn.execute(
+            "SELECT * FROM llm_block_variants WHERE block_id = ? ORDER BY id",
+            (block_id,),
+        ).fetchall()
+        return _rows_to_list(rows)
+    finally:
+        conn.close()
+
+
+def get_conversations() -> List[Dict[str, Any]]:
+    """Return all conversations, most-recently-updated first."""
+    conn = _db.connect_read(_db_path())
+    try:
+        rows = conn.execute(
+            "SELECT * FROM llm_conversations ORDER BY updated_at DESC, id DESC"
+        ).fetchall()
+        return _rows_to_list(rows)
+    finally:
+        conn.close()
+
+
+def get_messages(conversation_id: int) -> List[Dict[str, Any]]:
+    """Return a conversation's full message log in order; meta JSON is parsed back."""
+    import json
+    conn = _db.connect_read(_db_path())
+    try:
+        rows = conn.execute(
+            "SELECT * FROM llm_messages WHERE conversation_id = ? ORDER BY id",
+            (conversation_id,),
+        ).fetchall()
+        out: List[Dict[str, Any]] = []
+        for r in rows:
+            d = dict(r)
+            if d.get("meta"):
+                try:
+                    d["meta"] = json.loads(d["meta"])
+                except Exception:
+                    pass
+            out.append(d)
+        return out
     finally:
         conn.close()
 

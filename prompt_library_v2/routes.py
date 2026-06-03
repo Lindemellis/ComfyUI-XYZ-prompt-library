@@ -538,12 +538,14 @@ async def _put_override(request: web.Request) -> web.Response:
     enabled = body.get("enabled", None)
     weight = body.get("weight", None)
     order_index = body.get("order_index", None)
+    sep_after = body.get("sep_after", None)
     op = _repo.SetPromptOverrideOp(
         owner_node_id=nid,
         prompt_id=pid,
         enabled=None if enabled is None else bool(enabled),
         weight=None if weight is None else float(weight),
         order_index=None if order_index is None else int(order_index),
+        sep_after=None if sep_after is None else int(sep_after),
         clear=bool(body.get("clear", False)),
     )
     try:
@@ -839,8 +841,11 @@ async def _resolve_template(request: web.Request) -> web.Response:
     seed = int(body.get("seed", 0))
     output_index = int(body.get("output_index", 0))
 
-    text = _engine.resolve_template(template, seed, output_index)
-    return _ok({"text": text})
+    deps: set = set()
+    text = _engine.resolve_template(template, seed, output_index, deps=deps)
+    # node_ids = every entry this resolution walked through (+ template-prompt
+    # origin nodes). The preview uses it to know which entry edits must re-resolve.
+    return _ok({"text": text, "node_ids": sorted(deps)})
 
 
 async def _resolve_ref(request: web.Request) -> web.Response:

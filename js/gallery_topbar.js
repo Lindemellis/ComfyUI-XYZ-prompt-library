@@ -85,6 +85,8 @@ function createDropdownButton() {
         action: () => { try { window.plv2?.windows?.editor?.show(null); } catch {} } },
       { label: 'Prompt Library V2 — Library',
         action: () => { try { window.plv2?.windows?.library?.show(); } catch {} } },
+      { label: 'Prompt Library V2 — LLM Prompt',
+        action: () => { try { window.plv2?.windows?.llm?.show(); } catch {} } },
       { separator: true },
       { label: 'Prompt Library V1 Manager',
         action: () => { try { window.xyzV1Library?.show(); } catch {} } },

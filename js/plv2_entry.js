@@ -93,6 +93,11 @@ async function _loadData() {
   _prompts  = pr?.prompts  ?? [];
   _triggers = tr?.triggers ?? [];
   const all = nr?.nodes ?? [];
+  // Refresh the open entry's own fields (raw_text, delimiter, format, …) from the DB —
+  // an edit elsewhere (e.g. the editor's inline ref island) updated raw_text, and without
+  // this the stale _node.raw_text makes _initialText render the OLD text-box layout.
+  const fresh = all.find(n => n.id === nid);
+  if (fresh) Object.assign(_node, fresh);
   _children = all.filter(n => n.parent_id === nid && n.has_prompts);
   // Formats already used by other entries → format-input autocomplete (feature #1).
   _entryFormats = [...new Set(
@@ -116,123 +121,37 @@ async function _loadData() {
 
 function _delim() { return _node?.delimiter ?? ', '; }
 
-function _parsePromptPart(raw) {
-  const m = raw.match(/^\(\s*(.+?)\s*:([\d.]+)\s*\)$/);
-  if (m) return { content: m[1], weight: parseFloat(m[2]) || 1.0 };
-  return { content: raw.trim(), weight: 1.0 };
-}
+// Delegates to the shared sync module (single source of truth with the editor's
+// inline ref-expansion islands — see js/plv2_raw_sync.js).
+function _parsePromptPart(raw) { return window.plv2.rawSync.parsePromptPart(raw); }
 
+// Render the enabled own + inherited template prompts into the text-box string
+// (delegates to the shared module — single source with the editor's inline islands).
 function _buildText() {
-  // Enabled OWN + enabled INHERITED template prompts, interleaved by the unified
-  // order_index (= text box position) so template prompts appear in the box (#2/#3).
-  const enabled = [
-    ..._prompts.filter(p => p.enabled).map(p => ({ content: p.content, weight: p.weight, order_index: p.order_index, sep_after: p.sep_after })),
-    ..._tplPrompts.filter(p => p.enabled).map(p => ({ content: p.content, weight: p.weight, order_index: p.order_index, sep_after: 0 })),
-  ].sort((a, b) => (a.order_index ?? 1e9) - (b.order_index ?? 1e9));
-  const D = _delim();
-  const Dtrim = D.replace(/[ \t]+$/, '');   // drop trailing space before a newline
-  let out = '';
-  for (let i = 0; i < enabled.length; i++) {
-    const p = enabled[i];
-    const w = p.weight ?? 1.0;
-    out += Math.abs(w - 1.0) < 0.001 ? p.content : `(${p.content}:${parseFloat(w.toFixed(2))})`;
-    const sep = p.sep_after ?? 0;          // newlines after this prompt (feature B)
-    if (i < enabled.length - 1) out += sep > 0 ? Dtrim + '\n'.repeat(sep) : D;
-    else if (sep > 0)           out += '\n'.repeat(sep);
-  }
-  return out;
+  return window.plv2.rawSync.buildText({ ownPrompts: _prompts, tplPrompts: _tplPrompts, delimiter: _delim() });
 }
 
 // Parse the text box into prompt parts, recording how many newlines follow each
 // prompt (sepAfter) so the layout survives list-ops and resolve (feature B).
-function _parseRawParts(text, delim) {
-  const out = [];
-  const lines = String(text).split(/\r?\n/);
-  let last = null;
-  for (let li = 0; li < lines.length; li++) {
-    for (const seg of lines[li].split(delim)) {
-      const s = seg.trim();
-      if (!s) continue;
-      const p = _parsePromptPart(s);
-      last = { content: p.content, weight: p.weight, sepAfter: 0 };
-      out.push(last);
-    }
-    if (li < lines.length - 1 && last) last.sepAfter += 1;  // newline ends this line
-  }
-  return out;
-}
+function _parseRawParts(text, delim) { return window.plv2.rawSync.parseRawParts(text, delim); }
 
 async function _syncTextToList() {
   if (_syncLock || !_promptTextarea || !_node) return;
-  // Structured parse: prompt parts + the newline count after each (feature B).
-  const rawParts = _parseRawParts(_promptTextarea.value, _delim());
-
-  // Normalise (skip refs/patterns) + drop duplicates (#6), keeping first occurrence.
-  const seen = new Set();
-  const parts = [];
-  let changed = false;
-  for (const part of rawParts) {
-    const norm = window.plv2.cleanPrompt(part.content);
-    if (norm !== part.content) changed = true;
-    part.content = norm;
-    if (!part.content) { changed = true; continue; }
-    if (seen.has(part.content)) { changed = true; continue; }
-    seen.add(part.content);
-    parts.push(part);   // { content, weight, sepAfter }
+  // Normalise the box display (full→half, "，"→", ", escape…) before reconciling, but
+  // ONLY when the user isn't actively typing in it (a blur/list-op-triggered sync) so
+  // the caret is never disrupted mid-edit. Newline/ref layout is preserved.
+  if (document.activeElement !== _promptTextarea) {
+    const nv = window.plv2.normalizePrompt(_promptTextarea.value);
+    if (nv !== _promptTextarea.value) _promptTextarea.value = nv;
   }
-
-  const ownByContent = new Map(_prompts.map(p => [p.content.trim(), p]));
-  const tplByContent = new Map(_tplPrompts.map(p => [p.content.trim(), p]));
-  const inText       = new Set(parts.map(p => p.content));
-
-  // Create brand-new OWN prompts (parts that match neither an own nor a template prompt)
-  for (const { content, weight } of parts) {
-    if (ownByContent.has(content) || tplByContent.has(content)) continue;
-    try {
-      const r = await _api().createPrompt(_node.id, { content, enabled: true, weight, order_index: 0, sep_after: 0 });
-      const created = r?.prompt ?? { id: Date.now() + Math.random(), content, enabled: true, order_index: 0, weight, sep_after: 0 };
-      _prompts.push(created);
-      ownByContent.set(content, created);
-    } catch(e) { console.error('[PLv2]', e); }
-  }
-
-  // Walk parts in order, assigning a UNIFIED position (idx) to own + template
-  // prompts alike; template prompts persist via per-entry overrides (#2/#3).
-  const ops = [];     // own prompt PATCHes
-  const ov  = [];     // template override POSTs
-  const seenTpl = new Set();
-  let idx = 0;
-  for (const { content, weight, sepAfter } of parts) {
-    const tp = tplByContent.get(content);
-    if (tp) {
-      seenTpl.add(tp.id);
-      const body = {};
-      if (!tp.enabled)              { body.enabled = true; tp.enabled = true; }
-      if (tp.order_index !== idx)   { body.order_index = idx; tp.order_index = idx; }
-      if (Math.abs((tp.weight ?? 1) - weight) > 0.001) { body.weight = weight; tp.weight = weight; }
-      if (Object.keys(body).length) ov.push(_api().setOverride(_node.id, tp.id, body));
-      idx++;
-      continue;
-    }
-    const p = ownByContent.get(content);
-    if (!p) continue;
-    const upd = {};
-    if (!p.enabled)              { upd.enabled = true;  p.enabled = true; }
-    if (p.order_index !== idx)   { upd.order_index = idx; p.order_index = idx; }
-    if (Math.abs((p.weight ?? 1) - weight) > 0.001) { upd.weight = weight; p.weight = weight; }
-    if ((p.sep_after ?? 0) !== sepAfter) { upd.sep_after = sepAfter; p.sep_after = sepAfter; }
-    if (Object.keys(upd).length) ops.push(_api().updatePrompt(p.id, upd));
-    idx++;
-  }
-  // Own prompts removed from the text → disable.
-  for (const p of _prompts) {
-    if (p.enabled && !inText.has(p.content.trim())) { p.enabled = false; ops.push(_api().updatePrompt(p.id, { enabled: false })); }
-  }
-  // Template prompts removed from the text → disable via override.
-  for (const tp of _tplPrompts) {
-    if (tp.enabled && !seenTpl.has(tp.id)) { tp.enabled = false; ov.push(_api().setOverride(_node.id, tp.id, { enabled: false })); }
-  }
-  await Promise.all([...ops, ...ov]);
+  // Shared reconciliation (single source of truth with the editor's inline ref
+  // islands): parse raw_text → create/update/disable own prompts + template
+  // overrides. Mutates _prompts / _tplPrompts in place (same arrays the list reads).
+  const { changed } = await window.plv2.rawSync.syncRawText({
+    api: _api(), cleanPrompt: window.plv2.cleanPrompt, normalizePrompt: window.plv2.normalizePrompt,
+    nodeId: _node.id, delimiter: _delim(), rawText: _promptTextarea.value,
+    ownPrompts: _prompts, tplPrompts: _tplPrompts,
+  });
 
   _syncLock = true;
   _renderListBody();
@@ -266,18 +185,10 @@ function _persistRawText() {
 // back to a rebuild when it has drifted from the actual enabled prompts (e.g. a
 // prompt was added from the editor while this entry was closed).
 function _initialText() {
-  const raw = _node?.raw_text || '';
-  if (!raw) return _buildText();
-  const rawSet = new Set(
-    raw.split(/\r?\n/).flatMap(l => l.split(_delim()))
-       .map(s => s.trim()).filter(Boolean)
-       .map(s => window.plv2.cleanPrompt(_parsePromptPart(s).content)).filter(Boolean));
-  const enabledSet = new Set([
-    ..._prompts.filter(p => p.enabled).map(p => String(p.content).trim()),
-    ..._tplPrompts.filter(p => p.enabled).map(p => String(p.content).trim()),
-  ]);
-  const matches = rawSet.size === enabledSet.size && [...enabledSet].every(c => rawSet.has(c));
-  return matches ? raw : _buildText();
+  return window.plv2.rawSync.initialText({
+    rawText: _node?.raw_text || '', ownPrompts: _prompts, tplPrompts: _tplPrompts,
+    delimiter: _delim(), cleanPrompt: window.plv2.cleanPrompt,
+  });
 }
 
 // ─── Format auto-detect (feature d) ───────────────────────────────────────────
@@ -465,8 +376,23 @@ async function _moveSelectionToSubentry(child, selText, start, end) {
 }
 
 function _isReferencedByEditor() {
+  if (!_node) return false;
+
+  // Authoritative path: the preview records the exact set of entries its last
+  // resolution actually walked through (refs of refs, [this.x] / [entry.sub], and
+  // template-inheritance origins). If this entry is one of them, the edit affects
+  // the output — no matter how indirect the reference chain is. This is what makes
+  // a deep edit (e.g. a sub-entry reached only via [elf_and_ranger]→[this.style])
+  // propagate to the preview immediately.
+  try {
+    const deps = window.plv2?.previewDeps?.();
+    if (deps && deps.has(_node.id)) return true;
+  } catch {}
+
+  // Fallback (preview not open / not yet resolved): the cheap direct-name check —
+  // does the editor text mention this entry by any of its own ref names?
   const data = window.plv2Editor?.getPreviewData?.();
-  if (!data || !_node) return false;
+  if (!data) return false;
   const templates = [data.pos, data.neg].filter(Boolean);
   if (!templates.length) return false;
   const refs = new Set();
@@ -485,6 +411,12 @@ function _isReferencedByEditor() {
 function _notifyEditorIfReferenced() {
   if (_isReferencedByEditor()) {
     document.dispatchEvent(new CustomEvent('plv2:editor-changed', { detail: { immediate: true } }));
+  }
+  // Also nudge a node-sourced preview that resolves through this entry (the preview
+  // gates by its own dependency set, so this is a no-op unless it actually depends
+  // on us). Covers a node text box referencing this entry indirectly.
+  if (_node) {
+    document.dispatchEvent(new CustomEvent('plv2:entry-content-changed', { detail: { nodeId: _node.id } }));
   }
 }
 
@@ -699,9 +631,12 @@ function _render() {
     getDelimiter: () => _delim(),
     getThisRefs: () => [..._children.map(c => c.name), ..._tplChildren.map(c => c.name)],
   });
+  // Blur just SCHEDULES the sync (no synchronous DOM mutation here — mutating the box
+  // value during the blur that a list click triggers made the first click get eaten,
+  // needing a second click). The box display is normalised inside _syncTextToList.
   _promptTextarea.addEventListener('blur', () => {
     clearTimeout(_blurTimer);
-    _blurTimer = setTimeout(_syncTextToList, 80);
+    _blurTimer = setTimeout(() => { _blurTimer = null; _syncTextToList(); }, 80);
   });
   // Adding/removing a line break is a structural layout change — sync promptly so
   // the (snapped) preview window reflects it without waiting for blur (#3). Plain
@@ -712,7 +647,7 @@ function _render() {
     if (nl === _nlCount) return;
     _nlCount = nl;
     clearTimeout(_blurTimer);
-    _blurTimer = setTimeout(_syncTextToList, 250);
+    _blurTimer = setTimeout(() => { _blurTimer = null; _syncTextToList(); }, 250);
   });
   // Right-click a selection → move/create a sub-entry (feature c).
   _promptTextarea.addEventListener('contextmenu', (e) => {
@@ -1417,9 +1352,11 @@ async function _setPromptEnabled(p, enabled) {
     await _api().updatePrompt(real.id, { enabled });
   }
   await _renumberEnabled();
-  _syncListToText();
+  _syncListToText();   // rebuilds the box from the list + persists raw_text
   _renderListBody();
-  document.dispatchEvent(new CustomEvent('plv2:editor-changed', { detail: { immediate: true } }));
+  // Notify editor/preview (and the editor's inline ref islands) that THIS entry's content
+  // changed — dispatches plv2:entry-content-changed {nodeId} so an open island refreshes.
+  _notifyEditorIfReferenced();
 }
 
 async function _setPromptWeight(p, weight) {

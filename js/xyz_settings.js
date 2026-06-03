@@ -103,6 +103,16 @@ function sectionTitle(text, desc) {
     desc ? el('div', { style: { color: C.sub, fontSize: '12px', marginTop: '3px' } }, desc) : null);
 }
 
+function textCtrl(get, set, { width = '220px', type = 'text', placeholder = '' } = {}) {
+  const inp = el('input', { type, placeholder, style: {
+    width, background: C.input, color: C.text, border: `1px solid ${C.border}`,
+    borderRadius: '6px', padding: '5px 8px', fontSize: '13px',
+  }});
+  if (get() != null) inp.value = get();
+  inp.addEventListener('change', () => set(inp.value));
+  return inp;
+}
+
 // ─── the page ─────────────────────────────────────────────────────────────────
 
 const NAV = [
@@ -112,6 +122,7 @@ const NAV = [
   ['related',      '🔗', 'Related'],
   ['preview',      '🖼', 'Preview'],
   ['dataset',      '🗄', 'Tag dataset'],
+  ['llm',          '🤖', 'LLM'],
   ['about',        'ⓘ',  'About'],
 ];
 
@@ -167,6 +178,7 @@ class SettingsPage {
       b.style.background = (k === key) ? C.accent : 'transparent';
       b.style.color = (k === key) ? '#11111b' : C.text;
     }
+    if (key === 'llm') delete this.panes[key];  // always re-fetch server-side settings
     if (!this.panes[key]) this.panes[key] = this._buildPane(key);
     this.content.innerHTML = '';
     this.content.append(this.panes[key]);
@@ -249,6 +261,8 @@ class SettingsPage {
       const host = el('div', { style: { marginTop: '6px' } });
       wrap.append(host);
       try { tagdbManager.renderInto(host); } catch (e) { host.append(el('div', { style: { color: '#f88' } }, 'manager failed: ' + e.message)); }
+    } else if (key === 'llm') {
+      return this._buildLlmPane();
     } else if (key === 'about') {
       wrap.append(
         sectionTitle('About'),
@@ -258,6 +272,131 @@ class SettingsPage {
            el('br'), el('a', { href: 'https://github.com/zhupeter010903/ComfyUI-XYZ-prompt-library', target: '_blank', style: { color: C.accent } }, 'GitHub repository')),
       );
     }
+    return wrap;
+  }
+
+  _buildLlmPane() {
+    // Server-backed (keys never touch localStorage). Build async after a fetch.
+    const wrap = el('div', {});
+    const loading = el('div', { style: { color: C.sub, fontSize: '13px' } }, 'Loading LLM settings…');
+    wrap.append(loading);
+
+    const post = (patch) => fetch('/xyz/llm/settings', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(patch),
+    }).catch(() => {});
+    const provUpdate = (id, field, value) => post({ provider_update: { id, [field]: value } });
+
+    fetch('/xyz/llm/settings').then((r) => r.json()).then((ls) => {
+      ls = ls || {};
+      const src = ls.lookup_sources || {};
+      const dbs = ls.db_status || {};
+      const provs = ls.providers || {};
+      const ids = ls.provider_ids || Object.keys(provs);
+      let active = ls.provider || ids[0];
+      wrap.innerHTML = '';
+
+      wrap.append(sectionTitle('LLM provider',
+        'Pick a model provider and enter its API key. Keys are stored server-side (never in your browser); each provider keeps its own key + model so you can switch freely.'));
+
+      // provider selector
+      const provSel = el('select', { style: {
+        background: C.input, color: C.text, border: `1px solid ${C.border}`,
+        borderRadius: '6px', padding: '5px 8px', fontSize: '13px', width: '220px',
+      }});
+      for (const id of ids) {
+        const o = el('option', {}, provs[id]?.label || id); o.value = id; provSel.append(o);
+      }
+      provSel.value = active;
+      wrap.append(row('Provider', 'Which API to call.', provSel));
+
+      // per-provider section (rebuilt on provider switch)
+      const provSection = el('div', {});
+      wrap.append(provSection);
+
+      const renderProvider = (id) => {
+        provSection.innerHTML = '';
+        const p = provs[id] || {};
+        const keyPlaceholder = p.has_key ? `saved ${p.api_key_masked || '••••'} (leave blank to keep)` : 'not set — paste your API key';
+        // model datalist
+        const dl = el('datalist'); dl.id = 'llm-models-' + id;
+        for (const m of (p.model_suggestions || [])) { const o = el('option'); o.value = m; dl.append(o); }
+        const modelInp = textCtrl(() => p.model || '', (v) => provUpdate(id, 'model', (v || '').trim()),
+          { placeholder: (p.model_suggestions && p.model_suggestions[0]) || 'model id', width: '220px' });
+        modelInp.setAttribute('list', dl.id);
+
+        provSection.append(
+          row('API key', 'Type a new key to replace the stored one.',
+              textCtrl(() => '', (v) => { const t = (v || '').trim(); if (t) provUpdate(id, 'api_key', t); },
+                       { type: 'password', placeholder: keyPlaceholder, width: '240px' })),
+          row('Base URL', p.is_custom ? 'Your endpoint base (OpenAI-compatible adds /chat/completions; Anthropic adds /v1/messages).' : 'Endpoint base (leave blank to use the default).',
+              textCtrl(() => p.base_url || '', (v) => provUpdate(id, 'base_url', (v || '').trim()),
+                       { placeholder: p.preset_base_url || 'https://…', width: '240px' })),
+          row('Model', 'Model id passed to the API (editable).', (() => { const c = el('span', {}, modelInp, dl); return c; })()),
+        );
+        if (p.is_custom) {
+          const kindSel = el('select', { style: {
+            background: C.input, color: C.text, border: `1px solid ${C.border}`,
+            borderRadius: '6px', padding: '5px 8px', fontSize: '13px', width: '200px',
+          }});
+          for (const [val, lbl] of [['openai', 'OpenAI-compatible'], ['anthropic', 'Anthropic (Claude)']]) {
+            const o = el('option', {}, lbl); o.value = val; kindSel.append(o);
+          }
+          kindSel.value = p.kind || 'openai';
+          kindSel.addEventListener('change', () => provUpdate(id, 'kind', kindSel.value));
+          provSection.append(row('API format', 'Wire protocol of your custom endpoint.', kindSel));
+        }
+
+        // test connection
+        const testBtn = el('button', { style: {
+          background: C.accent, color: '#11111b', border: 'none', borderRadius: '6px',
+          padding: '5px 12px', cursor: 'pointer', fontSize: '12px', fontWeight: '600',
+        }}, 'Test connection');
+        const testOut = el('span', { style: { marginLeft: '10px', fontSize: '12px', color: C.sub } });
+        testBtn.addEventListener('click', async () => {
+          testOut.style.color = C.sub; testOut.textContent = 'testing…';
+          try {
+            const r = await fetch('/xyz/llm/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }).then((x) => x.json());
+            if (r.ok) { testOut.style.color = '#a6e3a1'; testOut.textContent = `✓ ${r.model || 'ok'} — “${r.reply || ''}”`; }
+            else { testOut.style.color = '#f38ba8'; testOut.textContent = '✗ ' + (r.error?.message || 'failed'); }
+          } catch (e) { testOut.style.color = '#f38ba8'; testOut.textContent = '✗ ' + (e?.message || e); }
+        });
+        provSection.append(row('Connection', 'Send a tiny request to verify the key/model.', el('span', {}, testBtn, testOut)));
+      };
+      renderProvider(active);
+      provSel.addEventListener('change', () => { active = provSel.value; post({ provider: active }); renderProvider(active); });
+
+      // shared sampling
+      wrap.append(
+        sectionTitle('Sampling', 'Shared across providers.'),
+        row('Temperature', 'Sampling temperature (0–2).',
+            sliderCtrl(() => ls.temperature ?? 1.0, (v) => post({ temperature: v }), { min: 0, max: 2, step: 0.1 })),
+        row('top_p', 'Nucleus sampling (0–1).',
+            sliderCtrl(() => ls.top_p ?? 1.0, (v) => post({ top_p: v }), { min: 0, max: 1, step: 0.05 })),
+      );
+
+      // Tag lookup
+      wrap.append(
+        sectionTitle('Tag lookup', 'Let the model verify danbooru tags against your local database (keeps tags real).'),
+        row('Enable tag lookup', 'When off, the model relies only on its own knowledge (no tool calls).',
+            toggle(() => ls.lookup_enabled !== false, (v) => post({ lookup_enabled: v }))),
+      );
+      const srcRow = (label, srcKey, available) => {
+        if (!available) {
+          return row(label, 'Database not found — download/build it under Tag dataset first.',
+            el('span', { style: { color: C.sub, fontSize: '12px' } }, 'unavailable'));
+        }
+        return row(label, 'Merge this source when looking up tags (danbooru is authoritative).',
+          toggle(() => !!src[srcKey], (v) => post({ lookup_sources: { [srcKey]: v } })));
+      };
+      wrap.append(
+        srcRow('danbooru database', 'danbooru', !!dbs.danbooru),
+        srcRow('gelbooru database', 'gelbooru', !!dbs.gelbooru),
+        el('div', { style: { color: C.sub, fontSize: '12px', marginTop: '10px' } },
+           'Lookup takes English queries only; the model translates Chinese/Japanese concepts into English tags itself, and the database just verifies existence + post_count.'),
+      );
+    }).catch((e) => { loading.textContent = 'Failed to load LLM settings: ' + (e?.message || e); });
+
     return wrap;
   }
 

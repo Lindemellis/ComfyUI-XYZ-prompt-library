@@ -2,12 +2,13 @@
 
 **English** | [中文](README_zh.md)
 
-A ComfyUI custom-node pack with three larger tools — **Danbooru (+ optional Gelbooru) tag autocomplete**, a **hierarchical prompt library (V2)**, and an **image gallery**.
+A ComfyUI custom-node pack with four larger tools — **Danbooru (+ optional Gelbooru) tag autocomplete**, a **hierarchical prompt library (V2)**, an **LLM prompt assistant** (multi-provider, with local tag grounding), and an **image gallery**.
 
 Each tool has its own manual:
 
 - 📖 [Tag Autocomplete & Dataset](tagdb/README.md)
 - 📖 [Prompt Library V2](prompt_library_v2/README.md)
+- 📖 [LLM Prompt Assistant](llm/README.md)
 - 📖 [Image Gallery](gallery/README.md)
 
 ## Installation
@@ -34,6 +35,7 @@ On the **first run**, the prebuilt Danbooru tag dataset (~66 MB, ~118K tags with
 |---|---|---|
 | **Tag autocomplete** | Danbooru tag suggestions as you type in any prompt box, with a versioned local dataset, updates, snapshots, and date-based "time-machine" reconstruction. | [tagdb](tagdb/README.md) |
 | **Prompt Library V2** | A SQLite-backed hierarchical prompt library with `[ref]` references, trigger aliases, weights, random modes, and a floating text editor. Resolved by two nodes at execution time. | [plv2](prompt_library_v2/README.md) |
+| **LLM Prompt Assistant** | A floating window that uses an LLM (DeepSeek / OpenAI / Claude / Grok / custom) to generate or optimize txt2img prompts, grounding danbooru tags against your local dataset so they stay real. | [llm](llm/README.md) |
 | **Image Gallery** | Browse and manage ComfyUI output/input images — filters, tags, bulk operations, and metadata viewing. | [gallery](gallery/README.md) |
 
 ## Where things live
@@ -44,6 +46,7 @@ After restarting ComfyUI, two buttons appear in the top bar:
 - **XYZ Tools** (menu) — opens:
   - *Prompt Library V2 — Library*
   - *Prompt Library V2 — Text Editor*
+  - *Prompt Library V2 — LLM Prompt*
   - *Prompt Library V1 Manager* (legacy)
   - *XYZ Prompt Tools Settings*
 
@@ -57,9 +60,10 @@ The **settings window** (also reachable from the ComfyUI command palette: *"Open
 | Related | Click-a-tag related lookups + cache freshness |
 | Preview | Artist-works / tag preview images on hover (both **off** by default) |
 | Tag dataset | **Danbooru / Gelbooru tabs**: credentials, prebuilt dataset, updates, snapshots, reconstruct |
+| LLM | **Provider** (DeepSeek / OpenAI / Claude / Grok / custom), API key, model, **Test connection**, temperature/top_p, tag-lookup sources |
 | About | Version / info |
 
-Each Prompt Library V2 node also has its own **Library / Editor / Preview** buttons.
+Each Prompt Library V2 node also has its own **Library / Editor / Preview / LLM** buttons.
 
 ## Nodes
 

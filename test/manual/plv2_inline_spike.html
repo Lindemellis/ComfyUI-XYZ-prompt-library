@@ -1,0 +1,302 @@
+<!DOCTYPE html>
+<!--
+  PLv2 inline ref-expansion — Phase 0 SPIKE v2 (throwaway)
+
+  Open directly in a browser (double-click). No backend, mock entries.
+
+  v2 adds the REAL cringy-risk that v1 dodged (user feedback 2026-06-02):
+    • [ref] is EDITABLE flowing text (arrow/click INTO it, edit the name) — not an atom.
+    • Newly-typed [xxx] is live-recognized: highlighted, and a chevron appears if it
+      resolves in the mock store.
+    • Editing a ref's name re-validates live (unknown → red, no chevron; its open
+      island collapses).
+
+  Technique under test: "re-render the current level + restore caret by char-offset",
+  IME-guarded. One rerenderLevel(container, depth) used recursively for the editor and
+  every island's inner editor.
+
+  Still validated from v1: expand/collapse islands, nested expansion tinted by depth,
+  serialized template SKIPS islands (output stays clean), island edits mirror to the store.
+
+  Judge: type inside a [ref], delete a ']', type a brand-new [ref2]/[ref1] in plain
+  text, expand/nest — does the caret stay put? Does highlighting track without flicker?
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>PLv2 inline ref expansion — spike v2</title>
+<style>
+  :root {
+    --bg:#1e1e2e; --bg2:#181825; --bg3:#313244; --line:#45475a;
+    --fg:#cdd6f4; --mute:#6c7086; --mauve:#cba6f7; --green:#a6e3a1; --red:#f38ba8;
+  }
+  * { box-sizing:border-box; }
+  body {
+    margin:0; background:var(--bg2); color:var(--fg);
+    font-family:ui-sans-serif,system-ui,sans-serif; font-size:13px;
+    display:flex; flex-direction:column; min-height:100vh;
+  }
+  header { padding:12px 18px; background:var(--bg); border-bottom:1px solid var(--bg3); }
+  header h1 { margin:0 0 4px; font-size:15px; color:var(--mauve); }
+  header p { margin:0; font-size:12px; color:var(--mute); line-height:1.5; }
+  main { flex:1; display:flex; gap:14px; padding:18px; min-height:0; }
+  .col { flex:1; display:flex; flex-direction:column; min-width:0; gap:8px; }
+  .label { font-size:11px; font-weight:600; color:var(--mute); text-transform:uppercase; letter-spacing:.04em; }
+
+  #editor {
+    flex:1; min-height:240px; background:var(--bg); border:1px solid var(--line);
+    border-radius:8px; padding:14px 16px; outline:none; overflow:auto;
+    font-family:"Fira Code","Cascadia Code",Consolas,monospace; font-size:14px;
+    line-height:2.0; white-space:pre-wrap; word-break:break-word; caret-color:var(--fg);
+  }
+
+  /* [ref] — EDITABLE colored text (NOT an atom). user can place caret inside & edit. */
+  .ref { background:#2d1b5e; color:var(--mauve); border-radius:3px; padding:1px 1px; }
+  .ref.bad { background:#3d1520; color:var(--red); text-decoration:underline wavy #f38ba888; }
+
+  /* chevron — the only non-editable atom next to a (resolvable) ref. */
+  .chev {
+    display:inline-block; cursor:pointer; user-select:none; color:var(--mute);
+    font-size:11px; width:14px; text-align:center; transition:transform .12s, color .12s;
+    vertical-align:middle;
+  }
+  .chev:hover { color:var(--mauve); }
+  .chev.open { transform:rotate(180deg); color:var(--mauve); }
+
+  /* Expansion island — contenteditable=false wrapper; inner re-enables editing. */
+  .island { display:inline; border-radius:4px; padding:0 2px; margin:0 1px; user-select:none; }
+  .brace { color:var(--mute); user-select:none; font-weight:700; }
+  .island-edit { display:inline; outline:none; padding:0 3px; border-radius:3px; user-select:text; }
+  .d0 { background:rgba(137,180,250,.10); } .d0 > .brace { color:#89b4fa; }
+  .d1 { background:rgba(203,166,247,.12); } .d1 > .brace { color:#cba6f7; }
+  .d2 { background:rgba(148,226,213,.12); } .d2 > .brace { color:#94e2d5; }
+  .d3 { background:rgba(250,179,135,.12); } .d3 > .brace { color:#fab387; }
+
+  #out, #raw {
+    flex:1; min-height:110px; background:var(--bg); border:1px solid var(--line);
+    border-radius:8px; padding:12px 14px; overflow:auto;
+    font-family:"Fira Code",Consolas,monospace; font-size:12px; line-height:1.7;
+    white-space:pre-wrap; word-break:break-word; color:var(--green);
+  }
+  #raw { color:#89b4fa; }
+</style>
+</head>
+<body>
+<header>
+  <h1>PLv2 inline ref expansion — Phase 0 spike v2</h1>
+  <p>
+    <b>[ref] is editable now.</b> Click/arrow INTO a <span style="color:var(--mauve)">[ref]</span> and change its name — watch it re-validate live (unknown turns <span style="color:var(--red)">red</span>, its island collapses).
+    Type a brand-new <span style="color:var(--mauve)">[ref2]</span> / <span style="color:var(--mauve)">[ref4]</span> in plain text — a chevron should appear. Delete a <code>]</code> — the chip should de-highlight.
+    Expand with <span style="color:var(--mauve)">⌄</span>; nesting tints by depth. Right panel = serialized template (islands skipped → output stays clean).
+    <b>The thing to judge: does the caret stay put while highlighting tracks your typing?</b>
+  </p>
+</header>
+<main>
+  <div class="col">
+    <div class="label">Editor (contentEditable) — refs editable, live-recognized</div>
+    <div id="editor" contenteditable="true" spellcheck="false"></div>
+  </div>
+  <div class="col" style="flex:0 0 360px">
+    <div class="label">Serialized template (node output — islands skipped)</div>
+    <pre id="out"></pre>
+    <div class="label">Mock entry store (raw_text per ref)</div>
+    <pre id="raw"></pre>
+  </div>
+</main>
+
+<script>
+// ── Mock entry store: ref name → raw_text (may contain nested refs) ──
+const STORE = {
+  ref1: 'toki, blue eyes, [ref3]',
+  ref2: 'solo, looking at viewer',
+  ref3: 'smile, blush, [ref4]',
+  ref4: 'detailed background',
+};
+const TEMPLATE = '1girl, [ref1], [ref2], blonde hair';
+
+const editor = document.getElementById('editor');
+const out    = document.getElementById('out');
+const rawBox = document.getElementById('raw');
+const REF_RE = /\[([^\[\]\n]*)\]/g;
+let composing = false;   // IME guard — never re-render mid-composition
+
+// ── Char-offset caret model, scoped to ONE level ──────────────────────────────
+// The "level string" of a container = concatenation of its text, INCLUDING text
+// inside .ref spans (those are editable), but SKIPPING nested .chev and .island
+// subtrees (chrome / other levels). Caret offsets are indices into that string.
+
+function isSkipped(node, root) {
+  for (let p = node.parentNode; p && p !== root; p = p.parentNode) {
+    if (p.classList && (p.classList.contains('chev') || p.classList.contains('island'))) return true;
+  }
+  return false;
+}
+function levelTextNodes(root) {
+  const w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+    acceptNode: n => isSkipped(n, root) ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT,
+  });
+  const out = []; let n; while ((n = w.nextNode())) out.push(n); return out;
+}
+function levelString(root) {
+  return levelTextNodes(root).map(n => n.textContent).join('');
+}
+// Caret offset within `root`'s level, or null if the caret isn't in this level
+// (e.g. it's inside a nested island → that level handles itself).
+function caretOffset(root) {
+  const sel = window.getSelection();
+  if (!sel.rangeCount) return null;
+  const r = sel.getRangeAt(0);
+  let node = r.endContainer, off = r.endOffset;
+  if (node.nodeType === 1) {                 // element container → descend to a text node
+    if (node === root && off === 0) return 0;
+    const probe = node.childNodes[off - 1] || node.childNodes[0];
+    if (!probe) return 0;
+    if (probe.nodeType === 3) { node = probe; off = probe.textContent.length; }
+    else return null;
+  }
+  if (!root.contains(node) || isSkipped(node, root)) return null;
+  let acc = 0;
+  for (const tn of levelTextNodes(root)) {
+    if (tn === node) return acc + off;
+    acc += tn.textContent.length;
+  }
+  return null;
+}
+function setCaret(root, target) {
+  let acc = 0;
+  const nodes = levelTextNodes(root);
+  for (const tn of nodes) {
+    const len = tn.textContent.length;
+    if (target <= acc + len) {
+      const r = document.createRange();
+      r.setStart(tn, Math.max(0, target - acc)); r.collapse(true);
+      const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r);
+      return;
+    }
+    acc += len;
+  }
+  // past the end → place at the very end
+  const last = nodes[nodes.length - 1];
+  if (last) {
+    const r = document.createRange();
+    r.setStart(last, last.textContent.length); r.collapse(true);
+    const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r);
+  } else { root.focus(); }
+}
+
+// ── Render a level string into `target` (text + editable ref spans + chevrons) ──
+// Returns the ordered list of resolvable refs: [{name, chev}] for island re-attach.
+function buildLevel(target, text, depth) {
+  const refs = [];
+  let last = 0, m; REF_RE.lastIndex = 0;
+  while ((m = REF_RE.exec(text)) !== null) {
+    if (m.index > last) target.appendChild(document.createTextNode(text.slice(last, m.index)));
+    const name = m[1].trim();
+    const span = document.createElement('span');
+    span.className = 'ref' + (STORE[name] ? '' : ' bad');
+    span.textContent = '[' + m[1] + ']';     // keep raw inner so editing round-trips
+    span.dataset.ref = name;
+    target.appendChild(span);
+    if (STORE[name]) {
+      const chev = document.createElement('span');
+      chev.className = 'chev'; chev.textContent = '⌄';
+      chev.title = 'Expand / collapse inline';
+      chev.dataset.depth = String(depth);
+      chev.addEventListener('mousedown', e => { e.preventDefault(); toggleIsland(chev, name, depth); });
+      target.appendChild(chev);
+      refs.push({ name, chev });
+    }
+    last = m.index + m[0].length;
+  }
+  if (last < text.length) target.appendChild(document.createTextNode(text.slice(last)));
+  return refs;
+}
+
+// ── Re-render ONE level, preserving caret + keeping open islands attached ───────
+function rerenderLevel(container, depth) {
+  const off = caretOffset(container);   // null → caret elsewhere; still safe to redraw
+  // Snapshot currently-open islands by their ref-occurrence index at this level.
+  const openByIndex = new Map();
+  let idx = -1;
+  for (const ch of container.childNodes) {
+    if (ch.nodeType !== 1) continue;
+    if (ch.classList.contains('ref')) idx++;
+    if (ch.classList.contains('island')) openByIndex.set(idx, ch);  // island follows its ref(+chev)
+  }
+  const text = levelString(container);
+  container.innerHTML = '';
+  const refs = buildLevel(container, text, depth);
+  // Re-attach islands whose ref (by occurrence index) is still the SAME resolvable name.
+  // Build a ref-occurrence list incl. unresolvable ones so indices line up with snapshot.
+  let occ = -1, ri = 0;
+  for (const node of [...container.childNodes]) {
+    if (node.nodeType === 1 && node.classList.contains('ref')) {
+      occ++;
+      const island = openByIndex.get(occ);
+      if (island && STORE[node.dataset.ref] && island.dataset.ref === node.dataset.ref) {
+        // chevron is the next sibling for resolvable refs
+        const chev = node.nextSibling;
+        if (chev && chev.classList && chev.classList.contains('chev')) {
+          chev.classList.add('open');
+          chev.after(island);
+        }
+      }
+    }
+  }
+  if (off != null) setCaret(container, off);
+}
+
+// ── Expand / collapse ──
+function toggleIsland(chev, name, depth) {
+  if (!STORE[name]) return;
+  const next = chev.nextSibling;
+  if (next && next.classList && next.classList.contains('island') && next.dataset.ref === name) {
+    next.remove(); chev.classList.remove('open'); serialize(); return;
+  }
+  const island = document.createElement('span');
+  island.className = 'island d' + (depth % 4);
+  island.contentEditable = 'false';
+  island.dataset.ref = name;
+  const lb = document.createElement('span'); lb.className = 'brace'; lb.textContent = '{';
+  const rb = document.createElement('span'); rb.className = 'brace'; rb.textContent = '}';
+  const inner = document.createElement('span');
+  inner.className = 'island-edit'; inner.contentEditable = 'true'; inner.dataset.ref = name;
+  buildLevel(inner, STORE[name], depth + 1);
+  inner.addEventListener('compositionstart', () => { composing = true; });
+  inner.addEventListener('compositionend',   () => { composing = false; onInnerInput(inner, name, depth); });
+  inner.addEventListener('input', () => onInnerInput(inner, name, depth));
+  island.append(lb, inner, rb);
+  chev.after(island);
+  chev.classList.add('open');
+  serialize();
+  setCaret(inner, levelString(inner).length);   // drop caret into the island
+  inner.focus();
+}
+function onInnerInput(inner, name, depth) {
+  if (composing) return;
+  STORE[name] = levelString(inner);     // island → store (raw_text mirror)
+  rerenderLevel(inner, depth + 1);       // live-highlight refs typed inside the island
+  refreshRaw(); serialize();
+}
+
+// ── Serialization: top-level template, islands SKIPPED → clean node output ──
+function serialize() { out.textContent = levelString(editor) || '(empty)'; }
+function refreshRaw() { rawBox.textContent = Object.entries(STORE).map(([k, v]) => `${k} → ${v}`).join('\n'); }
+
+// ── Top-level editing ──
+editor.addEventListener('compositionstart', () => { composing = true; });
+editor.addEventListener('compositionend',   () => { composing = false; topInput(); });
+editor.addEventListener('input', topInput);
+function topInput() {
+  if (composing) return;
+  if (caretOffset(editor) == null) return;   // caret is inside an island → that level handles it
+  rerenderLevel(editor, 0);
+  serialize();
+}
+
+// ── Boot ──
+buildLevel(editor, TEMPLATE, 0);
+serialize(); refreshRaw();
+</script>
+</body>
+</html>

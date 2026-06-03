@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<!--
+  PLv2 rich editor — Phase 2a harness (throwaway)
+
+  Loads the REAL component (js/plv2_richedit.js) with a MOCK backend, so the
+  contentEditable editor + inline ref expansion can be validated without ComfyUI.
+
+  Open directly in a browser (double-click). Tests:
+    • editable, live-highlighted refs (type [ref2] / edit [ref1] → re-validates async)
+    • chevron appears on resolvable refs; click to expand an island inline
+    • nested expansion tinted by depth; caret stays put while typing
+    • island edit → mirrors to the mock store (debounced) — see right panel
+    • "Simulate external edit" → editor.refreshIsland() updates an OPEN island whose
+      target was changed elsewhere (the bidirectional path Phase 2b wires to events)
+    • serialized template (getValue) SKIPS islands → clean node output
+    • Ctrl+Z / Ctrl+Y undo/redo
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>PLv2 rich editor — harness</title>
+<style>
+  :root { --bg:#1e1e2e; --bg2:#181825; --bg3:#313244; --line:#45475a; --fg:#cdd6f4; --mute:#6c7086; --mauve:#cba6f7; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg2); color:var(--fg); font-family:ui-sans-serif,system-ui,sans-serif; font-size:13px; display:flex; flex-direction:column; min-height:100vh; }
+  header { padding:12px 18px; background:var(--bg); border-bottom:1px solid var(--bg3); }
+  header h1 { margin:0 0 4px; font-size:15px; color:var(--mauve); }
+  header p { margin:0; font-size:12px; color:var(--mute); line-height:1.5; }
+  main { flex:1; display:flex; gap:14px; padding:18px; min-height:0; }
+  .col { flex:1; display:flex; flex-direction:column; min-width:0; gap:8px; }
+  .label { font-size:11px; font-weight:600; color:var(--mute); text-transform:uppercase; letter-spacing:.04em; }
+  #host { flex:1; min-height:240px; background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:14px 16px;
+          font-family:"Fira Code","Cascadia Code",Consolas,monospace; font-size:14px; overflow:auto; }
+  #out, #raw { flex:1; min-height:110px; background:var(--bg); border:1px solid var(--line); border-radius:8px; padding:12px 14px;
+               overflow:auto; font-family:"Fira Code",Consolas,monospace; font-size:12px; line-height:1.7; white-space:pre-wrap; word-break:break-word; color:#a6e3a1; }
+  #raw { color:#89b4fa; }
+  button { background:var(--bg3); border:1px solid var(--line); border-radius:4px; color:var(--fg); font-size:12px; padding:4px 10px; cursor:pointer; }
+  button:hover { background:var(--line); }
+  .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+  select { background:var(--bg3); border:1px solid var(--line); border-radius:4px; color:var(--fg); font-size:12px; padding:3px 6px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>PLv2 rich editor — Phase 2a harness (real component + mock backend)</h1>
+  <p>Edit refs, type new ones, expand with ⌄, nest, undo/redo. Right = serialized template (islands skipped) + mock store. Use "Simulate external edit" to test the bidirectional island refresh.</p>
+</header>
+<main>
+  <div class="col">
+    <div class="label">Rich editor (contentEditable component)</div>
+    <div id="host"></div>
+    <div class="row">
+      <button id="undoBtn">Undo</button>
+      <button id="redoBtn">Redo</button>
+      <span style="color:var(--mute)">|</span>
+      <span style="color:var(--mute)">Simulate external edit to</span>
+      <select id="extSel"></select>
+      <button id="extBtn">append ", EXTERNAL"</button>
+    </div>
+  </div>
+  <div class="col" style="flex:0 0 360px">
+    <div class="label">getValue() — serialized template (islands skipped)</div>
+    <pre id="out"></pre>
+    <div class="label">Mock entry store (raw_text per ref)</div>
+    <pre id="raw"></pre>
+  </div>
+</main>
+
+<script type="module">
+import { createRichEditor } from '../../js/plv2_richedit.js';
+
+const STORE = {
+  ref1: 'toki, blue eyes, [ref3]',
+  ref2: 'solo, looking at viewer',
+  ref3: 'smile, blush, [ref4]',
+  ref4: 'detailed background',
+};
+const TEMPLATE = '1girl, [ref1], [ref2], blonde hair';
+
+const out = document.getElementById('out');
+const raw = document.getElementById('raw');
+const refreshRaw = () => raw.textContent = Object.entries(STORE).map(([k,v]) => `${k} → ${v}`).join('\n');
+
+const editor = createRichEditor({
+  placeholder: 'e.g. 1girl, [toki], solo',
+  resolveRef: async (name) => Object.prototype.hasOwnProperty.call(STORE, name),
+  loadEntry:  async (name) => STORE[name] ?? '',
+  saveEntry:  (name, text) => {
+    STORE[name] = text;
+    refreshRaw();
+    // bidirectional: other open islands for the same ref follow
+    editor.refreshIsland(name, text);
+  },
+  normalize: (t) => t,   // no-op here
+});
+editor.el.style.minHeight = '210px';
+document.getElementById('host').appendChild(editor.el);
+editor.onChange(v => { out.textContent = v || '(empty)'; });
+editor.setValue(TEMPLATE);
+out.textContent = editor.getValue();
+refreshRaw();
+
+document.getElementById('undoBtn').onclick = () => editor.undo();
+document.getElementById('redoBtn').onclick = () => editor.redo();
+
+const extSel = document.getElementById('extSel');
+for (const k of Object.keys(STORE)) { const o = document.createElement('option'); o.value = k; o.textContent = k; extSel.appendChild(o); }
+document.getElementById('extBtn').onclick = () => {
+  const name = extSel.value;
+  STORE[name] = (STORE[name] || '') + ', EXTERNAL';
+  refreshRaw();
+  editor.refreshIsland(name, STORE[name]);
+};
+</script>
+</body>
+</html>

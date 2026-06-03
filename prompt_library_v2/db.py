@@ -265,6 +265,74 @@ def _migrate_v5(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE prompt_overrides ADD COLUMN order_index INTEGER")
 
 
+def _migrate_v6(conn: sqlite3.Connection) -> None:
+    # sep_after: per-entry newline layout for an INHERITED (template) prompt. The
+    # override row is the only per-entry storage an inherited prompt has, so without
+    # this a newline that follows an inherited prompt in the entry text box is lost on
+    # rebuild (the template prompt's own sep_after can't capture a downstream entry's
+    # layout). NULL = inherit the template prompt's own sep_after.
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(prompt_overrides)")}
+    if "sep_after" not in cols:
+        conn.execute("ALTER TABLE prompt_overrides ADD COLUMN sep_after INTEGER")
+
+
+def _migrate_v7(conn: sqlite3.Connection) -> None:
+    # LLM Prompt Assistant storage (the 🤖 LLM window). Lives in the same plv2.db.
+    #
+    # A "block" is one section of the system/template the user composes (header,
+    # jailbreak, task, tooldoc, base_prompt, user_request, history, custom…). Its
+    # TEXT lives ONLY in llm_block_variants — every block points at one active
+    # variant (active_variant_id), and the variant dropdown lets the user keep
+    # several saved texts per block. (active_variant_id is a soft pointer managed in
+    # app logic — intentionally no FK so block/variant creation order is unconstrained.)
+    #
+    # keep_turns: history block only — NULL = all, else N>=0 turns kept when assembling.
+    # Conversations are NOT bound to any node. Messages keep the full role log incl.
+    # tool round-trips (meta JSON = model, tool_calls/trace, token usage).
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS llm_blocks (
+            id                INTEGER PRIMARY KEY AUTOINCREMENT,
+            kind              TEXT    NOT NULL DEFAULT 'custom',
+            name              TEXT    NOT NULL,
+            enabled           INTEGER NOT NULL DEFAULT 1,
+            order_index       INTEGER NOT NULL DEFAULT 0,
+            active_variant_id INTEGER,
+            keep_turns        INTEGER,
+            created_at        INTEGER NOT NULL,
+            updated_at        INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS llm_block_variants (
+            id           INTEGER PRIMARY KEY AUTOINCREMENT,
+            block_id     INTEGER NOT NULL REFERENCES llm_blocks(id) ON DELETE CASCADE,
+            variant_name TEXT    NOT NULL DEFAULT 'default',
+            text         TEXT    NOT NULL DEFAULT '',
+            created_at   INTEGER NOT NULL,
+            updated_at   INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_llm_variants_block ON llm_block_variants(block_id);
+
+        CREATE TABLE IF NOT EXISTS llm_conversations (
+            id         INTEGER PRIMARY KEY AUTOINCREMENT,
+            title      TEXT    NOT NULL DEFAULT '',
+            created_at INTEGER NOT NULL,
+            updated_at INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS llm_messages (
+            id              INTEGER PRIMARY KEY AUTOINCREMENT,
+            conversation_id INTEGER NOT NULL REFERENCES llm_conversations(id) ON DELETE CASCADE,
+            role            TEXT    NOT NULL,
+            content         TEXT    NOT NULL,
+            meta            TEXT,
+            created_at      INTEGER NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_llm_messages_conv ON llm_messages(conversation_id, id);
+        """
+    )
+
+
 # ---------------------------------------------------------------------------
 # Migration framework (mirrors gallery/db.py)
 # ---------------------------------------------------------------------------
@@ -275,6 +343,8 @@ MIGRATIONS: Dict[int, Callable[[sqlite3.Connection], None]] = {
     3: _migrate_v3,
     4: _migrate_v4,
     5: _migrate_v5,
+    6: _migrate_v6,
+    7: _migrate_v7,
 }
 
 SCHEMA_VERSION: int = max(MIGRATIONS)
