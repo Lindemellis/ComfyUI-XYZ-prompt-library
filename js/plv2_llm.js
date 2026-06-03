@@ -553,8 +553,9 @@ async function _doSend(request, base, pendingLabel) {
       body: JSON.stringify({ conversation_id: _activeConvId, base_prompt: base, user_request: request }),
       signal: _abort.signal,
     });
-    const j = await resp.json();
     pending.remove();
+    if (resp.status === 404) { _logEl.append(_errBubble('Chat endpoint not found — restart ComfyUI to load the LLM routes.')); return; }
+    const j = await resp.json().catch(() => ({ error: { message: 'bad response from server (restart ComfyUI?)' } }));
     if (j.error) {
       if (j.error.code === 'no_api_key') {
         _logEl.append(_errBubble('No API key set. Open Settings → LLM.'));

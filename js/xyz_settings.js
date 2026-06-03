@@ -39,6 +39,24 @@ function syncPlv2(key, val) {
   } catch {}
 }
 
+// Robust POST helper for the LLM endpoints. Returns { ok, json, message } and never
+// throws — a missing route (server not restarted) returns "404: Not Found" as plain
+// text, so we check status + parse defensively instead of letting JSON.parse explode.
+async function llmFetch(url, body = {}) {
+  let resp;
+  try {
+    resp = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  } catch (e) {
+    return { ok: false, json: null, message: 'network error: ' + (e?.message || e) };
+  }
+  if (resp.status === 404) return { ok: false, json: null, message: 'endpoint not found — restart ComfyUI to load the new routes' };
+  let json = null;
+  try { json = await resp.json(); } catch { return { ok: false, json: null, message: resp.ok ? 'bad response (restart ComfyUI?)' : `HTTP ${resp.status}` }; }
+  if (json && json.error) return { ok: false, json, message: json.error.message || 'request failed' };
+  if (!resp.ok) return { ok: false, json, message: `HTTP ${resp.status}` };
+  return { ok: true, json, message: '' };
+}
+
 // ─── styled controls ────────────────────────────────────────────────────────────
 
 const C = {
@@ -334,13 +352,14 @@ class SettingsPage {
         const fetchModels = async (silent) => {
           if (!p.has_key) { if (!silent) { modelStatus.style.color = C.sub; modelStatus.textContent = 'set a key first'; } return; }
           modelStatus.style.color = C.sub; modelStatus.textContent = '…';
-          try {
-            const r = await fetch('/xyz/llm/models', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }).then((x) => x.json());
-            if (r.models) {
-              setOptions(Array.from(new Set([...(r.models || []), ...(p.model_suggestions || [])])));
-              modelStatus.style.color = '#a6e3a1'; modelStatus.textContent = `${r.models.length} models — click the field`;
-            } else { modelStatus.style.color = '#f38ba8'; modelStatus.textContent = r.error?.message || 'failed'; }
-          } catch (e) { modelStatus.style.color = '#f38ba8'; modelStatus.textContent = String(e?.message || e); }
+          const r = await llmFetch('/xyz/llm/models');
+          if (r.ok && Array.isArray(r.json?.models)) {
+            const models = r.json.models;
+            setOptions(Array.from(new Set([...models, ...(p.model_suggestions || [])])));
+            modelStatus.style.color = '#a6e3a1'; modelStatus.textContent = `${models.length} models — click the field`;
+          } else {
+            modelStatus.style.color = '#f38ba8'; modelStatus.textContent = r.message;
+          }
         };
         fetchBtn.addEventListener('click', () => fetchModels(false));
 
@@ -375,11 +394,9 @@ class SettingsPage {
         const testOut = el('span', { style: { marginLeft: '10px', fontSize: '12px', color: C.sub } });
         testBtn.addEventListener('click', async () => {
           testOut.style.color = C.sub; testOut.textContent = 'testing…';
-          try {
-            const r = await fetch('/xyz/llm/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }).then((x) => x.json());
-            if (r.ok) { testOut.style.color = '#a6e3a1'; testOut.textContent = `✓ ${r.model || 'ok'} — “${r.reply || ''}”`; }
-            else { testOut.style.color = '#f38ba8'; testOut.textContent = '✗ ' + (r.error?.message || 'failed'); }
-          } catch (e) { testOut.style.color = '#f38ba8'; testOut.textContent = '✗ ' + (e?.message || e); }
+          const r = await llmFetch('/xyz/llm/test');
+          if (r.ok && r.json?.ok) { testOut.style.color = '#a6e3a1'; testOut.textContent = `✓ ${r.json.model || 'ok'} — “${r.json.reply || ''}”`; }
+          else { testOut.style.color = '#f38ba8'; testOut.textContent = '✗ ' + r.message; }
         });
         provSection.append(row('Connection', 'Send a tiny request to verify the key/model.', el('span', {}, testBtn, testOut)));
 
