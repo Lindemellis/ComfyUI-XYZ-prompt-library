@@ -72,6 +72,31 @@ def test_anthropic_adapter():
     print("ok: anthropic adapter in/out conversion")
 
 
+def test_list_models():
+    # OpenAI-compatible shape: {data:[{id}]}
+    client._get = lambda url, headers, timeout: {"data": [{"id": "deepseek-v4-pro"}, {"id": "deepseek-v4-flash"}]}
+    out = client.list_models({"kind": "openai", "api_key": "k", "base_url": "https://api.deepseek.com"})
+    assert out == ["deepseek-v4-flash", "deepseek-v4-pro"]  # sorted+deduped
+
+    # Anthropic shape (also {data:[{id}]}) — verify it hits /v1/models with x-api-key
+    seen = {}
+    def fake_get(url, headers, timeout):
+        seen["url"] = url; seen["headers"] = headers
+        return {"data": [{"id": "claude-opus-4-1"}, {"id": "claude-sonnet-4-5"}]}
+    client._get = fake_get
+    out = client.list_models({"kind": "anthropic", "api_key": "sk-ant", "base_url": "https://api.anthropic.com"})
+    assert seen["url"].endswith("/v1/models") and seen["headers"]["x-api-key"] == "sk-ant"
+    assert "claude-opus-4-1" in out
+
+    # no key → LlmError
+    try:
+        client.list_models({"kind": "openai", "api_key": "", "base_url": "x"})
+        assert False
+    except client.LlmError:
+        pass
+    print("ok: list_models (openai + anthropic shapes + no-key)")
+
+
 def test_settings_multiprovider():
     tmp = tempfile.mkdtemp(prefix="llm_mp_")
     settings._DATA_DIR = Path(tmp)
@@ -130,6 +155,7 @@ def test_legacy_migration():
 
 def main():
     test_anthropic_adapter()
+    test_list_models()
     test_settings_multiprovider()
     test_legacy_migration()
     print("\nALL PROVIDER CHECKS PASSED")

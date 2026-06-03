@@ -393,6 +393,22 @@ async def _post_test(request: web.Request) -> web.Response:
         return _err(502, "api_error", str(e))
 
 
+async def _post_models(request: web.Request) -> web.Response:
+    """POST /xyz/llm/models — fetch the active provider's available model ids."""
+    pcfg = _settings.active_provider_config()
+    if not (pcfg.get("api_key") or "").strip():
+        return _err(400, "no_api_key", f"No API key set for {pcfg.get('provider')}.")
+    loop = asyncio.get_event_loop()
+    try:
+        models = await loop.run_in_executor(None, lambda: _client.list_models(pcfg))
+        return _ok({"provider": pcfg["provider"], "models": models})
+    except _client.LlmError as e:
+        code = "no_api_key" if str(e) == "no_api_key" else "api_error"
+        return _err(400 if code == "no_api_key" else 502, code, str(e))
+    except Exception as e:
+        return _err(502, "api_error", str(e))
+
+
 async def _delete_last_assistant(request: web.Request) -> web.Response:
     """DELETE /xyz/llm/conversations/{id}/last-assistant — drop the trailing assistant
     turn (and any tool messages after the last user turn) so the client can regenerate.
@@ -453,6 +469,7 @@ def register(server) -> None:
 
     r.post("/xyz/llm/chat")(_post_chat)
     r.post("/xyz/llm/test")(_post_test)
+    r.post("/xyz/llm/models")(_post_models)
 
     _registered = True
     logger.info("LLM routes registered")

@@ -31,8 +31,9 @@ format yourself.
 ### Setup
 
 1. Open *Settings → LLM* (gear icon in the window, top-bar menu, or the command palette).
-2. Choose a **Provider**, paste its **API key**, and adjust the **Model** if needed (the
-   field is editable with suggestions).
+2. Choose a **Provider**, paste its **API key**, and pick a **Model** — the field is
+   editable, and **↻** pulls the provider's live model list into the dropdown (e.g.
+   DeepSeek returns both `deepseek-v4-pro` and `deepseek-v4-flash`).
 3. Click **Test connection** to verify the key/model with a tiny live request.
 4. *(Optional)* Set **Temperature** / **top_p** (shared across providers).
 

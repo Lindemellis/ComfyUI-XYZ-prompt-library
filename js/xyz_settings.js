@@ -318,12 +318,31 @@ class SettingsPage {
         provSection.innerHTML = '';
         const p = provs[id] || {};
         const keyPlaceholder = p.has_key ? `saved ${p.api_key_masked || '••••'} (leave blank to keep)` : 'not set — paste your API key';
-        // model datalist
+        // model field — editable input + datalist; ↻ pulls the provider's live model list
         const dl = el('datalist'); dl.id = 'llm-models-' + id;
-        for (const m of (p.model_suggestions || [])) { const o = el('option'); o.value = m; dl.append(o); }
+        const setOptions = (list) => { dl.innerHTML = ''; for (const m of list) { const o = el('option'); o.value = m; dl.append(o); } };
+        setOptions(p.model_suggestions || []);
         const modelInp = textCtrl(() => p.model || '', (v) => provUpdate(id, 'model', (v || '').trim()),
-          { placeholder: (p.model_suggestions && p.model_suggestions[0]) || 'model id', width: '220px' });
+          { placeholder: (p.model_suggestions && p.model_suggestions[0]) || 'model id', width: '200px' });
         modelInp.setAttribute('list', dl.id);
+        const fetchBtn = el('button', { style: {
+          background: C.border, color: C.text, border: 'none', borderRadius: '6px',
+          padding: '5px 9px', cursor: 'pointer', fontSize: '12px', marginLeft: '6px',
+        }}, '↻');
+        fetchBtn.title = 'Fetch the provider\'s available models';
+        const modelStatus = el('span', { style: { marginLeft: '8px', fontSize: '11px', color: C.sub } });
+        const fetchModels = async (silent) => {
+          if (!p.has_key) { if (!silent) { modelStatus.style.color = C.sub; modelStatus.textContent = 'set a key first'; } return; }
+          modelStatus.style.color = C.sub; modelStatus.textContent = '…';
+          try {
+            const r = await fetch('/xyz/llm/models', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }).then((x) => x.json());
+            if (r.models) {
+              setOptions(Array.from(new Set([...(r.models || []), ...(p.model_suggestions || [])])));
+              modelStatus.style.color = '#a6e3a1'; modelStatus.textContent = `${r.models.length} models — click the field`;
+            } else { modelStatus.style.color = '#f38ba8'; modelStatus.textContent = r.error?.message || 'failed'; }
+          } catch (e) { modelStatus.style.color = '#f38ba8'; modelStatus.textContent = String(e?.message || e); }
+        };
+        fetchBtn.addEventListener('click', () => fetchModels(false));
 
         provSection.append(
           row('API key', 'Type a new key to replace the stored one.',
@@ -332,7 +351,8 @@ class SettingsPage {
           row('Base URL', p.is_custom ? 'Your endpoint base (OpenAI-compatible adds /chat/completions; Anthropic adds /v1/messages).' : 'Endpoint base (leave blank to use the default).',
               textCtrl(() => p.base_url || '', (v) => provUpdate(id, 'base_url', (v || '').trim()),
                        { placeholder: p.preset_base_url || 'https://…', width: '240px' })),
-          row('Model', 'Model id passed to the API (editable).', (() => { const c = el('span', {}, modelInp, dl); return c; })()),
+          row('Model', 'Editable. ↻ pulls the provider\'s live model list into the dropdown.',
+              el('span', {}, modelInp, dl, fetchBtn, modelStatus)),
         );
         if (p.is_custom) {
           const kindSel = el('select', { style: {
@@ -362,9 +382,12 @@ class SettingsPage {
           } catch (e) { testOut.style.color = '#f38ba8'; testOut.textContent = '✗ ' + (e?.message || e); }
         });
         provSection.append(row('Connection', 'Send a tiny request to verify the key/model.', el('span', {}, testBtn, testOut)));
+
+        // auto-pull the live model list when this provider already has a key
+        if (p.has_key) fetchModels(true);
       };
       renderProvider(active);
-      provSel.addEventListener('change', () => { active = provSel.value; post({ provider: active }); renderProvider(active); });
+      provSel.addEventListener('change', async () => { active = provSel.value; await post({ provider: active }); renderProvider(active); });
 
       // shared sampling
       wrap.append(

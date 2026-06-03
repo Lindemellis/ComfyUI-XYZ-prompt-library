@@ -89,6 +89,7 @@ const api = {
     getSettings:        ()              => _req('GET',    '/xyz/llm/settings'),
     saveSettings:       (body)          => _req('POST',   '/xyz/llm/settings', body),
     testConnection:     ()              => _req('POST',   '/xyz/llm/test', {}),
+    listModels:         ()              => _req('POST',   '/xyz/llm/models', {}),
     getBlocks:          ()              => _req('GET',    '/xyz/llm/blocks'),
     createBlock:        (body)          => _req('POST',   '/xyz/llm/blocks', body),
     updateBlock:        (id, body)      => _req('PATCH',  `/xyz/llm/blocks/${id}`, body),

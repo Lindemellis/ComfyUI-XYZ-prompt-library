@@ -37,12 +37,7 @@ def _import_session():
         ) from exc
 
 
-def _post(url: str, headers: Dict[str, str], payload: Dict[str, Any], timeout: int) -> Dict[str, Any]:
-    cffi = _import_session()
-    try:
-        resp = cffi.post(url, data=json.dumps(payload), headers=headers, timeout=timeout)
-    except Exception as exc:
-        raise LlmError(f"network error: {exc}") from exc
+def _raise_for_status(resp) -> Dict[str, Any]:
     status = getattr(resp, "status_code", 0)
     text = getattr(resp, "text", "") or ""
     if status < 200 or status >= 300:
@@ -57,6 +52,51 @@ def _post(url: str, headers: Dict[str, str], payload: Dict[str, Any], timeout: i
         return json.loads(text)
     except Exception as exc:
         raise LlmError(f"bad JSON from API: {exc}") from exc
+
+
+def _post(url: str, headers: Dict[str, str], payload: Dict[str, Any], timeout: int) -> Dict[str, Any]:
+    cffi = _import_session()
+    try:
+        resp = cffi.post(url, data=json.dumps(payload), headers=headers, timeout=timeout)
+    except Exception as exc:
+        raise LlmError(f"network error: {exc}") from exc
+    return _raise_for_status(resp)
+
+
+def _get(url: str, headers: Dict[str, str], timeout: int) -> Dict[str, Any]:
+    cffi = _import_session()
+    try:
+        resp = cffi.get(url, headers=headers, timeout=timeout)
+    except Exception as exc:
+        raise LlmError(f"network error: {exc}") from exc
+    return _raise_for_status(resp)
+
+
+def list_models(cfg: Dict[str, Any], *, timeout: int = 20) -> List[str]:
+    """Fetch the provider's available model ids (GET /models or /v1/models).
+
+    Works for OpenAI-compatible and Anthropic endpoints. Returns a sorted list of ids."""
+    api_key = (cfg or {}).get("api_key") or ""
+    if not api_key:
+        raise LlmError("no_api_key")
+    base_url = (cfg.get("base_url") or "").rstrip("/")
+    if (cfg.get("kind") or "openai").lower() == "anthropic":
+        url = base_url + "/v1/models"
+        headers = {"x-api-key": api_key, "anthropic-version": ANTHROPIC_VERSION}
+    else:
+        url = base_url + "/models"
+        headers = {"Authorization": f"Bearer {api_key}"}
+    data = _get(url, headers, timeout)
+    items = data.get("data") or data.get("models") or []
+    ids: List[str] = []
+    for it in items:
+        if isinstance(it, dict):
+            mid = it.get("id") or it.get("name")
+            if mid:
+                ids.append(mid)
+        elif isinstance(it, str):
+            ids.append(it)
+    return sorted(set(ids))
 
 
 def complete(
