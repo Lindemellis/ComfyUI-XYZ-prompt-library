@@ -39,6 +39,13 @@ function syncPlv2(key, val) {
   } catch {}
 }
 
+// Transient status (test result, model-fetch result) shown as a toast so it never
+// reflows the settings rows.
+function toastMsg(severity, detail) {
+  try { app.extensionManager.toast.add({ severity, summary: 'LLM', detail, life: 4000 }); }
+  catch { console.log('[LLM]', severity, detail); }
+}
+
 // Robust POST helper for the LLM endpoints. Returns { ok, json, message } and never
 // throws — a missing route (server not restarted) returns "404: Not Found" as plain
 // text, so we check status + parse defensively instead of letting JSON.parse explode.
@@ -336,30 +343,44 @@ class SettingsPage {
         provSection.innerHTML = '';
         const p = provs[id] || {};
         const keyPlaceholder = p.has_key ? `saved ${p.api_key_masked || '••••'} (leave blank to keep)` : 'not set — paste your API key';
-        // model field — editable input + datalist; ↻ pulls the provider's live model list
-        const dl = el('datalist'); dl.id = 'llm-models-' + id;
-        const setOptions = (list) => { dl.innerHTML = ''; for (const m of list) { const o = el('option'); o.value = m; dl.append(o); } };
-        setOptions(p.model_suggestions || []);
-        const modelInp = textCtrl(() => p.model || '', (v) => provUpdate(id, 'model', (v || '').trim()),
-          { placeholder: (p.model_suggestions && p.model_suggestions[0]) || 'model id', width: '200px' });
-        modelInp.setAttribute('list', dl.id);
+        // model field — a real <select> dropdown (live models + suggestions + Custom…);
+        // ↻ pulls the live list. Fixed-width controls, results go to a toast → no reflow.
+        let knownModels = [...(p.model_suggestions || [])];
+        const modelSel = el('select', { style: {
+          background: C.input, color: C.text, border: `1px solid ${C.border}`,
+          borderRadius: '6px', padding: '5px 8px', fontSize: '13px', width: '220px',
+        }});
+        const populateModels = () => {
+          const cur = p.model || '';
+          const all = Array.from(new Set([cur, ...knownModels].filter(Boolean)));
+          modelSel.innerHTML = '';
+          for (const m of all) { const o = el('option', {}, m); o.value = m; modelSel.append(o); }
+          const customOpt = el('option', {}, '✎ Custom model id…'); customOpt.value = '__custom__'; modelSel.append(customOpt);
+          modelSel.value = cur || (all[0] || '');
+        };
+        populateModels();
+        modelSel.addEventListener('change', async () => {
+          if (modelSel.value === '__custom__') {
+            const v = (await window.plv2?.inlinePrompt?.('Model id:', p.model || '')) || '';
+            if (v.trim()) { p.model = v.trim(); if (!knownModels.includes(p.model)) knownModels.unshift(p.model); provUpdate(id, 'model', p.model); }
+            populateModels();
+            return;
+          }
+          p.model = modelSel.value; provUpdate(id, 'model', p.model);
+        });
         const fetchBtn = el('button', { style: {
           background: C.border, color: C.text, border: 'none', borderRadius: '6px',
-          padding: '5px 9px', cursor: 'pointer', fontSize: '12px', marginLeft: '6px',
+          padding: '5px 9px', cursor: 'pointer', fontSize: '12px', marginLeft: '6px', flexShrink: '0',
         }}, '↻');
         fetchBtn.title = 'Fetch the provider\'s available models';
-        const modelStatus = el('span', { style: { marginLeft: '8px', fontSize: '11px', color: C.sub } });
         const fetchModels = async (silent) => {
-          if (!p.has_key) { if (!silent) { modelStatus.style.color = C.sub; modelStatus.textContent = 'set a key first'; } return; }
-          modelStatus.style.color = C.sub; modelStatus.textContent = '…';
+          if (!p.has_key) { if (!silent) toastMsg('warn', 'Set an API key first.'); return; }
           const r = await llmFetch('/xyz/llm/models');
           if (r.ok && Array.isArray(r.json?.models)) {
-            const models = r.json.models;
-            setOptions(Array.from(new Set([...models, ...(p.model_suggestions || [])])));
-            modelStatus.style.color = '#a6e3a1'; modelStatus.textContent = `${models.length} models — click the field`;
-          } else {
-            modelStatus.style.color = '#f38ba8'; modelStatus.textContent = r.message;
-          }
+            knownModels = Array.from(new Set([...r.json.models, ...(p.model_suggestions || [])]));
+            populateModels();
+            if (!silent) toastMsg('success', `Loaded ${r.json.models.length} model(s).`);
+          } else if (!silent) toastMsg('warn', r.message);
         };
         fetchBtn.addEventListener('click', () => fetchModels(false));
 
@@ -370,8 +391,8 @@ class SettingsPage {
           row('Base URL', p.is_custom ? 'Your endpoint base (OpenAI-compatible adds /chat/completions; Anthropic adds /v1/messages).' : 'Endpoint base (leave blank to use the default).',
               textCtrl(() => p.base_url || '', (v) => provUpdate(id, 'base_url', (v || '').trim()),
                        { placeholder: p.preset_base_url || 'https://…', width: '240px' })),
-          row('Model', 'Editable. ↻ pulls the provider\'s live model list into the dropdown.',
-              el('span', {}, modelInp, dl, fetchBtn, modelStatus)),
+          row('Model', '↻ pulls the provider\'s live model list; pick "Custom…" to type any id.',
+              el('span', { style: { display: 'inline-flex', alignItems: 'center' } }, modelSel, fetchBtn)),
         );
         if (p.is_custom) {
           const kindSel = el('select', { style: {
@@ -386,19 +407,21 @@ class SettingsPage {
           provSection.append(row('API format', 'Wire protocol of your custom endpoint.', kindSel));
         }
 
-        // test connection
+        // test connection — result shown via toast so the button never shifts
         const testBtn = el('button', { style: {
           background: C.accent, color: '#11111b', border: 'none', borderRadius: '6px',
           padding: '5px 12px', cursor: 'pointer', fontSize: '12px', fontWeight: '600',
+          minWidth: '120px', textAlign: 'center',
         }}, 'Test connection');
-        const testOut = el('span', { style: { marginLeft: '10px', fontSize: '12px', color: C.sub } });
         testBtn.addEventListener('click', async () => {
-          testOut.style.color = C.sub; testOut.textContent = 'testing…';
+          if (testBtn.disabled) return;
+          testBtn.disabled = true; testBtn.style.opacity = '0.6'; testBtn.textContent = 'testing…';
           const r = await llmFetch('/xyz/llm/test');
-          if (r.ok && r.json?.ok) { testOut.style.color = '#a6e3a1'; testOut.textContent = `✓ ${r.json.model || 'ok'} — “${r.json.reply || ''}”`; }
-          else { testOut.style.color = '#f38ba8'; testOut.textContent = '✗ ' + r.message; }
+          testBtn.disabled = false; testBtn.style.opacity = '1'; testBtn.textContent = 'Test connection';
+          if (r.ok && r.json?.ok) toastMsg('success', `✓ ${r.json.model || 'OK'} — “${r.json.reply || ''}”`);
+          else toastMsg('warn', '✗ ' + r.message);
         });
-        provSection.append(row('Connection', 'Send a tiny request to verify the key/model.', el('span', {}, testBtn, testOut)));
+        provSection.append(row('Connection', 'Send a tiny request to verify the key/model.', testBtn));
 
         // auto-pull the live model list when this provider already has a key
         if (p.has_key) fetchModels(true);

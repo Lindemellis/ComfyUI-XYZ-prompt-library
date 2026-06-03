@@ -28,9 +28,10 @@ Anthropic 兼容端点——自行设置 base URL、模型 id 和 API 格式。
 ### 配置步骤
 
 1. 打开 *设置 → LLM*（窗口里的齿轮、顶栏菜单，或命令面板）。
-2. 选择**提供方**，粘贴**API key**，选择**模型**——输入框可编辑，点 **↻** 会拉取该提供方的
-   实时模型列表填进下拉（例如 DeepSeek 会返回 `deepseek-v4-pro` 和 `deepseek-v4-flash` 两个）。
-3. 点 **Test connection** 用一次极小的真实请求验证 key/模型。
+2. 选择**提供方**，粘贴**API key**，从下拉里选**模型**——点 **↻** 会拉取该提供方的实时模型
+   列表（例如 DeepSeek 返回 `deepseek-v4-pro` 和 `deepseek-v4-flash`），选「Custom model id…」
+   可手动输入任意 id。
+3. 点 **Test connection** 验证 key/模型——结果以 toast 弹出显示。
 4. *（可选）* 设置 **Temperature** / **top_p**（各提供方共用）。
 
 ## 标签页 1 — 板块（Blocks）
