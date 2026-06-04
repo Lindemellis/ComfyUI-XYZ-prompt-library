@@ -27,6 +27,20 @@ class LlmError(Exception):
     """Raised for missing key, network failure, or a non-2xx API response."""
 
 
+def _deepseek_thinking(cfg: Dict[str, Any]) -> Dict[str, Any]:
+    """DeepSeek V4 thinking controls, derived from cfg['reasoning_effort']
+    (off | high | max). Only emitted for the DeepSeek provider — other OpenAI-compatible
+    endpoints (OpenAI/Grok/custom) would reject the unknown `thinking` field."""
+    if (cfg or {}).get("provider") != "deepseek":
+        return {}
+    eff = (cfg.get("reasoning_effort") or "high").lower()
+    if eff == "off":
+        return {"thinking": {"type": "disabled"}}
+    if eff in ("high", "max"):
+        return {"thinking": {"type": "enabled"}, "reasoning_effort": eff}
+    return {}
+
+
 def _import_session():
     try:
         from curl_cffi import requests as cffi_requests  # noqa: PLC0415
@@ -99,6 +113,131 @@ def list_models(cfg: Dict[str, Any], *, timeout: int = 20) -> List[str]:
     return sorted(set(ids))
 
 
+def complete_stream(
+    cfg: Dict[str, Any],
+    messages: List[Dict[str, Any]],
+    *,
+    tools: Optional[List[Dict[str, Any]]] = None,
+    timeout: int = 300,
+):
+    """Streaming variant — a generator that yields delta events and finally a result.
+
+    Events: {"type":"reasoning"|"content", "delta": str} during the stream, then exactly
+    one {"type":"result", "message":{role,content,reasoning?,tool_calls?}, "usage", "model",
+    "finish_reason"} at the end. The result message is assembled from the deltas (tool-call
+    fragments accumulated by index), so the caller's tool loop works unchanged.
+
+    Anthropic (Claude) has a different event protocol — for `kind=='anthropic'` we fall back
+    to a single non-streaming call and emit its content as one event.
+    """
+    api_key = (cfg or {}).get("api_key") or ""
+    if not api_key:
+        raise LlmError("no_api_key")
+    if (cfg.get("kind") or "openai").lower() == "anthropic":
+        res = _complete_anthropic(cfg, messages, tools, timeout)
+        msg = res.get("message") or {}
+        if msg.get("content"):
+            yield {"type": "content", "delta": msg["content"]}
+        yield {"type": "result", "message": msg, "usage": res.get("usage"),
+               "model": res.get("model"), "finish_reason": res.get("finish_reason", "")}
+        return
+
+    base_url = (cfg.get("base_url") or "https://api.openai.com/v1").rstrip("/")
+    url = base_url + "/chat/completions"
+    payload: Dict[str, Any] = {
+        "model": cfg.get("model") or "gpt-4o",
+        "messages": messages,
+        "temperature": cfg.get("temperature", 1.0),
+        "top_p": cfg.get("top_p", 1.0),
+        "stream": True,
+        "stream_options": {"include_usage": True},
+        **_deepseek_thinking(cfg),
+    }
+    if tools:
+        payload["tools"] = tools
+    headers = {"Authorization": f"Bearer {cfg['api_key']}", "Content-Type": "application/json"}
+
+    cffi = _import_session()
+    try:
+        resp = cffi.post(url, data=json.dumps(payload), headers=headers, timeout=timeout, stream=True)
+    except Exception as exc:
+        raise LlmError(f"network error: {exc}") from exc
+    status = getattr(resp, "status_code", 0)
+    if status < 200 or status >= 300:
+        try:
+            body = resp.text or ""
+        except Exception:
+            body = ""
+        msg = body
+        try:
+            err = json.loads(body)
+            msg = err.get("error", {}).get("message") or err.get("message") or body
+        except Exception:
+            pass
+        raise LlmError(f"API {status}: {msg}"[:500])
+
+    content_parts: List[str] = []
+    reasoning_parts: List[str] = []
+    tool_acc: Dict[int, Dict[str, Any]] = {}
+    finish = ""
+    usage = None
+    model = None
+    for raw in resp.iter_lines():
+        if not raw:
+            continue
+        line = raw.decode("utf-8", "replace") if isinstance(raw, (bytes, bytearray)) else raw
+        if not line.startswith("data:"):
+            continue
+        data = line[5:].strip()
+        if data == "[DONE]":
+            break
+        try:
+            obj = json.loads(data)
+        except Exception:
+            continue
+        if obj.get("usage"):
+            usage = obj["usage"]
+        if obj.get("model"):
+            model = obj["model"]
+        choices = obj.get("choices") or []
+        if not choices:
+            continue
+        ch = choices[0]
+        if ch.get("finish_reason"):
+            finish = ch["finish_reason"]
+        delta = ch.get("delta") or {}
+        rc = delta.get("reasoning_content")
+        if rc:
+            reasoning_parts.append(rc)
+            yield {"type": "reasoning", "delta": rc}
+        c = delta.get("content")
+        if c:
+            content_parts.append(c)
+            yield {"type": "content", "delta": c}
+        for tc in (delta.get("tool_calls") or []):
+            idx = tc.get("index", 0)
+            slot = tool_acc.setdefault(idx, {"id": None, "name": None, "args": ""})
+            if tc.get("id"):
+                slot["id"] = tc["id"]
+            fn = tc.get("function") or {}
+            if fn.get("name"):
+                slot["name"] = fn["name"]
+            if fn.get("arguments"):
+                slot["args"] += fn["arguments"]
+
+    message: Dict[str, Any] = {"role": "assistant", "content": "".join(content_parts)}
+    if reasoning_parts:
+        message["reasoning"] = "".join(reasoning_parts)
+    if tool_acc:
+        message["tool_calls"] = [
+            {"id": slot["id"] or f"call_{i}", "type": "function",
+             "function": {"name": slot["name"], "arguments": slot["args"] or "{}"}}
+            for i, slot in sorted(tool_acc.items())
+        ]
+    yield {"type": "result", "message": message, "usage": usage,
+           "model": model or payload["model"], "finish_reason": finish}
+
+
 def complete(
     cfg: Dict[str, Any],
     messages: List[Dict[str, Any]],
@@ -128,6 +267,7 @@ def _complete_openai(cfg, messages, tools, timeout) -> Dict[str, Any]:
         "temperature": cfg.get("temperature", 1.0),
         "top_p": cfg.get("top_p", 1.0),
         "stream": False,
+        **_deepseek_thinking(cfg),
     }
     if tools:
         payload["tools"] = tools
@@ -139,6 +279,9 @@ def _complete_openai(cfg, messages, tools, timeout) -> Dict[str, Any]:
         finish = choice.get("finish_reason", "")
     except Exception as exc:
         raise LlmError(f"unexpected API shape: {exc}") from exc
+    # Normalize DeepSeek's reasoning field so the rest of the stack sees `reasoning`.
+    if message.get("reasoning_content") and not message.get("reasoning"):
+        message["reasoning"] = message.get("reasoning_content")
     return {
         "message": message,
         "finish_reason": finish,

@@ -16,6 +16,9 @@ def setup(server=None) -> None:
     try:
         from . import store
         store.seed_defaults_if_needed()
+        store.seed_anima_variants_if_needed()
+        store.reflow_existing_presets_if_needed()
+        store.sync_anima_preset_if_outdated()
     except Exception as e:
         print(f"[LLM] default seed skipped: {e}")
 

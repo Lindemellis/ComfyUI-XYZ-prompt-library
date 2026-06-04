@@ -438,6 +438,18 @@ class SettingsPage {
             sliderCtrl(() => ls.top_p ?? 1.0, (v) => post({ top_p: v }), { min: 0, max: 1, step: 0.05 })),
       );
 
+      // Thinking intensity (DeepSeek V4 only — translated to thinking/reasoning_effort)
+      const thinkSel = el('select', { style: {
+        background: C.input, color: C.text, border: `1px solid ${C.border}`,
+        borderRadius: '6px', padding: '5px 8px', fontSize: '13px', width: '220px',
+      }});
+      for (const [v, lbl] of [['off', 'Off — no thinking (fastest)'], ['high', 'High (default)'], ['max', 'Max (hardest problems)']]) {
+        const o = el('option', {}, lbl); o.value = v; thinkSel.append(o);
+      }
+      thinkSel.value = ls.reasoning_effort || 'high';
+      thinkSel.addEventListener('change', () => post({ reasoning_effort: thinkSel.value }));
+      wrap.append(row('Thinking', 'Reasoning effort for DeepSeek V4: Off skips the chain-of-thought (fastest), Max for hard problems. Ignored by non-DeepSeek providers.', thinkSel));
+
       // Tag lookup
       wrap.append(
         sectionTitle('Tag lookup', 'Let the model verify danbooru tags against your local database (keeps tags real).'),
@@ -457,6 +469,13 @@ class SettingsPage {
         srcRow('gelbooru database', 'gelbooru', !!dbs.gelbooru),
         el('div', { style: { color: C.sub, fontSize: '12px', marginTop: '10px' } },
            'Lookup takes English queries only; the model translates Chinese/Japanese concepts into English tags itself, and the database just verifies existence + post_count.'),
+      );
+
+      // Web search (keyless DuckDuckGo scrape)
+      wrap.append(
+        sectionTitle('Web search', 'Give the model a live web-search tool for facts the tag database can\'t answer (unfamiliar concepts, a character\'s appearance, artists in a given style).'),
+        row('Enable web search', 'Off by default. Uses a keyless DuckDuckGo scrape; results can be flaky and add latency. The model is told to prefer "danbooru …" queries and to confirm any name with a tag lookup before using it.',
+            toggle(() => !!ls.web_search_enabled, (v) => post({ web_search_enabled: v }))),
       );
     }).catch((e) => { loading.textContent = 'Failed to load LLM settings: ' + (e?.message || e); });
 

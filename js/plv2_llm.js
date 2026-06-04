@@ -23,6 +23,7 @@ const PLV2_TYPES = new Set([
 const SPECIAL = new Set(['history', 'base_prompt', 'user_request']);
 const BASE_H_KEY = 'plv2_llm_base_h';
 const BASE_COLLAPSE_KEY = 'plv2_llm_base_collapsed';
+const STREAM_KEY = 'plv2_llm_stream';
 const C = {
   bg: '#1e1e2e', panel: '#181825', border: '#313244', text: '#cdd6f4', sub: '#6c7086',
   accent: '#cba6f7', accent2: '#89b4fa', input: '#11111b', userBubble: '#313244',
@@ -66,6 +67,7 @@ let _baseText = '';
 let _baseTextEl = null, _nodeSelectEl = null;
 let _sending = false, _abort = null;
 let _sendBtn = null, _stopBtn = null;
+let _streamOn = (localStorage.getItem(STREAM_KEY) ?? '1') !== '0';
 
 // ─── top-level render ───────────────────────────────────────────────────────────
 function _render(body) {
@@ -179,7 +181,7 @@ function _blockCard(b) {
   del.title = 'Delete block';
   del.addEventListener('click', async () => {
     if (!await askConfirm(`Delete block "${b.name}"?`, { okLabel: 'Delete', danger: true })) return;
-    await api().deleteBlock(b.id); card.remove();
+    await api().deleteBlock(b.id); _floatEditors[b.id]?.close(); card.remove();
   });
   head.append(del);
 
@@ -228,6 +230,7 @@ function _textBody(b, head) {
     const vs = (await api().getVariants(b.id))?.variants ?? [];
     const v = vs.find(x => x.id === activeVid);
     ta.value = v ? (v.text || '') : '';
+    ta._floatWin?.sync();
   });
 
   const saveVar = debounce(() => {
@@ -251,11 +254,18 @@ function _textBody(b, head) {
     const vs = (await api().getVariants(b.id))?.variants ?? [];
     activeVid = vs[vs.length - 1]?.id;
     if (activeVid) { vsel.value = String(activeVid); ta.value = vs.find(x => x.id === activeVid)?.text || ''; }
+    ta._floatWin?.sync();
   });
   delVar.title = 'Delete the current variant';
 
-  vrow.append(el('span', `font-size:10px;color:${C.sub};`, 'variant'), vsel, newVar, delVar);
+  const popOut = btn('⊞', `padding:3px 7px;`, () => _openFloatingEditor(b, vsel, ta, saveVar));
+  popOut.title = 'Edit this variant in a floating window';
+
+  vrow.append(el('span', `font-size:10px;color:${C.sub};`, 'variant'), vsel, newVar, delVar, popOut);
   reloadVariants();
+  // if a floating editor for this block is already open (e.g. cards were rebuilt on a
+  // tab switch), re-attach it to this fresh textarea so the two stay live-synced.
+  if (_floatEditors[b.id]) _floatEditors[b.id].rebind(vsel, ta, saveVar);
 
   // collapse
   let collapsed = false;
@@ -279,6 +289,92 @@ async function _addBlock() {
   const count = _blocksHost.children.length;
   await api().createBlock({ kind: 'custom', name: name.trim(), text: '', enabled: true, order_index: count });
   _loadBlocks();
+}
+
+// ── floating variant editor ───────────────────────────────────────────────────
+// A standalone draggable/resizable window holding a big textarea, two-way live-synced
+// with a block's inline textarea. Editing here writes into the inline textarea and runs
+// its debounced save; programmatic changes to the inline textarea (variant switch /
+// delete) call ta._floatWin.sync() to refresh this window. The controller is keyed by
+// block id and rebinds to the fresh textarea when the Blocks tab re-renders its cards.
+let _floatZ = 100000;
+const _floatEditors = {};  // blockId -> controller
+
+function _openFloatingEditor(b, vsel, ta, saveVar) {
+  const existing = _floatEditors[b.id];
+  if (existing) { existing.rebind(vsel, ta, saveVar); existing.focus(); return; }
+
+  // mutable bindings to the *current* inline controls (swapped by rebind on re-render)
+  let cur = { vsel, ta, saveVar };
+
+  const win = el('div', `position:fixed;left:50%;top:18%;transform:translateX(-50%);width:560px;height:420px;` +
+    `display:flex;flex-direction:column;background:${C.bg};border:1px solid ${C.accent};` +
+    `border-radius:9px;box-shadow:0 14px 48px rgba(0,0,0,.55);z-index:${++_floatZ};overflow:hidden;`);
+
+  const head = el('div', `display:flex;align-items:center;gap:8px;padding:8px 11px;background:${C.panel};` +
+    `border-bottom:1px solid ${C.border};cursor:move;user-select:none;flex-shrink:0;`);
+  const title = el('span', `flex:1;font-size:12px;font-weight:600;color:${C.text};overflow:hidden;text-overflow:ellipsis;white-space:nowrap;`);
+  const setTitle = () => { title.textContent = `✎ ${b.name} — ${cur.vsel.options[cur.vsel.selectedIndex]?.text || 'default'}`; };
+  const closeBtn = el('span', `cursor:pointer;color:${C.sub};font-size:16px;line-height:1;padding:0 2px;`, '✕');
+  closeBtn.title = 'Close';
+  head.append(title, closeBtn);
+
+  const fta = el('textarea', `flex:1;width:100%;box-sizing:border-box;resize:none;background:${C.input};color:${C.text};` +
+    `border:none;padding:11px 13px;font-family:"Fira Code",Consolas,monospace;font-size:13px;line-height:1.55;outline:none;`);
+  fta.spellcheck = false;
+  fta.value = ta.value;
+  setTitle();
+
+  // edits in the floating window → mirror into the inline textarea + persist
+  fta.addEventListener('input', () => { cur.ta.value = fta.value; cur.saveVar(); });
+
+  // resize grip (bottom-right)
+  const grip = el('div', `position:absolute;right:2px;bottom:2px;width:14px;height:14px;cursor:nwse-resize;` +
+    `background:linear-gradient(135deg,transparent 50%,${C.sub} 50%);opacity:.6;`);
+  grip.addEventListener('mousedown', (e) => {
+    e.preventDefault(); e.stopPropagation();
+    const sx = e.clientX, sy = e.clientY, sw = win.offsetWidth, sh = win.offsetHeight;
+    const onMove = (ev) => {
+      win.style.width = Math.max(320, sw + (ev.clientX - sx)) + 'px';
+      win.style.height = Math.max(200, sh + (ev.clientY - sy)) + 'px';
+    };
+    const onUp = () => { document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); document.body.style.userSelect = ''; };
+    document.body.style.userSelect = 'none';
+    document.addEventListener('mousemove', onMove); document.addEventListener('mouseup', onUp);
+  });
+
+  // drag by header
+  head.addEventListener('mousedown', (e) => {
+    if (e.target === closeBtn) return;
+    e.preventDefault();
+    const r = win.getBoundingClientRect();
+    win.style.transform = 'none'; win.style.left = r.left + 'px'; win.style.top = r.top + 'px';
+    const ox = e.clientX - r.left, oy = e.clientY - r.top;
+    const onMove = (ev) => { win.style.left = (ev.clientX - ox) + 'px'; win.style.top = Math.max(0, ev.clientY - oy) + 'px'; };
+    const onUp = () => { document.removeEventListener('mousemove', onMove); document.removeEventListener('mouseup', onUp); document.body.style.userSelect = ''; };
+    document.body.style.userSelect = 'none';
+    document.addEventListener('mousemove', onMove); document.addEventListener('mouseup', onUp);
+  });
+  win.addEventListener('mousedown', () => { win.style.zIndex = String(++_floatZ); });
+
+  const ctrl = {
+    focus: () => { win.style.zIndex = String(++_floatZ); fta.focus(); },
+    // refresh from the inline textarea after a programmatic change (skip if typing here)
+    sync: () => { if (document.activeElement !== fta) fta.value = cur.ta.value; setTitle(); },
+    rebind: (vsel2, ta2, saveVar2) => {
+      cur = { vsel: vsel2, ta: ta2, saveVar: saveVar2 };
+      ta2._floatWin = ctrl;
+      ctrl.sync();
+    },
+    close: () => { win.remove(); delete _floatEditors[b.id]; if (cur.ta) cur.ta._floatWin = null; },
+  };
+  closeBtn.addEventListener('click', ctrl.close);
+  ta._floatWin = ctrl;
+  _floatEditors[b.id] = ctrl;
+
+  win.append(head, fta, grip);
+  document.body.append(win);
+  fta.focus();
 }
 
 // drag reorder
@@ -389,9 +485,21 @@ function _buildComposer() {
   const ta = el('textarea', `flex:1;box-sizing:border-box;height:54px;resize:vertical;background:${C.input};color:${C.text};border:1px solid ${C.border};border-radius:6px;padding:7px 9px;font-size:12px;outline:none;`);
   ta.placeholder = 'Describe what to generate / how to optimize… (Enter = newline, click Send)';
   wrap._ta = ta;
+  // right column: stream toggle on top of the Send/Stop button
+  const rightCol = el('div', 'display:flex;flex-direction:column;gap:4px;align-items:stretch;');
+  const streamLbl = el('label', `display:flex;align-items:center;gap:4px;font-size:10px;color:${C.sub};cursor:pointer;user-select:none;justify-content:center;`);
+  const streamChk = el('input'); streamChk.type = 'checkbox'; streamChk.checked = _streamOn;
+  streamChk.style.cssText = 'cursor:pointer;accent-color:' + C.accent + ';margin:0;';
+  streamChk.title = 'Stream the reply token-by-token (and show the model\'s reasoning live)';
+  streamChk.addEventListener('change', () => {
+    _streamOn = streamChk.checked;
+    try { localStorage.setItem(STREAM_KEY, _streamOn ? '1' : '0'); } catch {}
+  });
+  streamLbl.append(streamChk, document.createTextNode('流式'));
   _sendBtn = btn('Send', `background:${C.accent};color:#11111b;font-weight:600;padding:7px 14px;`, () => _send(ta));
   _stopBtn = btn('Stop', `background:${C.danger};color:#11111b;font-weight:600;padding:7px 14px;display:none;`, _stop);
-  wrap.append(ta, _sendBtn, _stopBtn);
+  rightCol.append(streamLbl, _sendBtn, _stopBtn);
+  wrap.append(ta, rightCol);
   return wrap;
 }
 
@@ -476,12 +584,15 @@ function _msgBubble(m, isLastAsst) {
   const meta = m.meta || {};
   if (Array.isArray(meta.trace) && meta.trace.length) {
     const n = meta.trace.reduce((s, t) => s + ((t.results || []).length), 0);
-    const tr = el('div', `font-size:10px;color:${C.sub};cursor:pointer;`, `🔎 looked up ${n} tag(s) in ${meta.trace.length} call(s) — show`);
-    const detail = el('div', `display:none;font-size:10px;color:${C.sub};background:#11111b;border-radius:5px;padding:5px 7px;margin-top:3px;white-space:pre-wrap;`);
-    detail.textContent = meta.trace.map(t => `${t.name}(${JSON.stringify(t.args?.queries || [])}) → ${(t.results || []).map(r => r.name).join(', ')}`).join('\n');
+    const tr = el('div', `font-size:10px;color:${C.sub};cursor:pointer;`, `🔎 ${n} result(s) from ${meta.trace.length} tool call(s) — show`);
+    const detail = el('div', `display:none;font-size:10px;color:${C.sub};background:#11111b;border-radius:5px;padding:5px 7px;margin-top:3px;white-space:pre-wrap;word-break:break-word;`);
+    // tag-lookup results carry .name; web_search results carry .title/.url
+    const summarize = (r) => r.name || (r.url ? `${r.title || r.url} (${r.url})` : (r.title || r._note)) || '';
+    detail.textContent = meta.trace.map(t => `${t.name}(${JSON.stringify(t.args?.queries || [])}) → ${(t.results || []).map(summarize).join(', ')}`).join('\n');
     tr.addEventListener('click', () => { detail.style.display = detail.style.display === 'none' ? 'block' : 'none'; });
     wrap.append(tr, detail);
   }
+  if (meta.reasoning) wrap.append(_reasoningBox(meta.reasoning, false));
   if (meta.capped) bubble.append(el('div', `font-size:10px;color:${C.danger};margin-bottom:4px;`, '⚠ tool loop hit its limit — answer forced'));
 
   _renderAssistantContent(bubble, m.content);
@@ -495,8 +606,19 @@ function _msgBubble(m, isLastAsst) {
   return wrap;
 }
 
+// strip DeepSeek's leaked DSML tool-call markup from already-persisted messages
+// (new replies are cleaned server-side; this covers old ones). `｜` is U+FF5C.
+function _stripDsml(content) {
+  if (!content || content.indexOf('｜｜DSML') === -1) return content;
+  return content
+    .replace(/<｜｜DSML｜｜tool_calls>[\s\S]*?<\/｜｜DSML｜｜tool_calls>/g, '')
+    .replace(/<\/?｜｜DSML｜｜[^>]*>/g, '')
+    .trim();
+}
+
 // split content into text + ```prompt fenced blocks (with Copy/Apply)
 function _renderAssistantContent(host, content) {
+  content = _stripDsml(content);
   const re = /```prompt\s*\n?([\s\S]*?)```/g;
   let last = 0, m;
   while ((m = re.exec(content)) !== null) {
@@ -520,6 +642,32 @@ function _promptBox(text) {
   return box;
 }
 
+// collapsible chain-of-thought box (reused by static render + live streaming)
+function _reasoningBox(text, open) {
+  const box = el('div', 'align-self:flex-start;max-width:88%;width:88%;');
+  const toggle = el('div', `font-size:10px;color:${C.accent2};cursor:pointer;user-select:none;`);
+  const pre = el('div', `display:${open ? 'block' : 'none'};font-size:10.5px;color:${C.sub};background:#11111b;` +
+    `border-left:2px solid ${C.accent};border-radius:5px;padding:6px 9px;margin-top:3px;white-space:pre-wrap;` +
+    `word-break:break-word;line-height:1.5;max-height:280px;overflow-y:auto;`);
+  pre.textContent = text || '';
+  const setLbl = () => { toggle.textContent = (pre.style.display === 'none' ? '💭 思维链 ▸' : '💭 思维链 ▾'); };
+  setLbl();
+  toggle.addEventListener('click', () => { pre.style.display = pre.style.display === 'none' ? 'block' : 'none'; setLbl(); });
+  box.append(toggle, pre);
+  box._pre = pre; box._setLbl = setLbl;
+  return box;
+}
+
+function _handleChatError(j) {
+  if (j?.error?.code === 'no_api_key') {
+    _logEl.append(_errBubble('No API key set. Open Settings → LLM.'));
+    toast('warn', 'No API key', 'Set it in Settings → LLM.');
+    try { window.xyzSettingsPage?.show(); } catch {}
+  } else {
+    _logEl.append(_errBubble(j?.error?.message || 'request failed'));
+  }
+}
+
 // ── send / stop / regenerate ──
 async function _send(ta) {
   if (_sending) return;
@@ -539,7 +687,11 @@ async function _send(ta) {
   _loadConversations();  // refresh titles/order
 }
 
-async function _doSend(request, base, pendingLabel) {
+function _doSend(request, base, pendingLabel) {
+  return _streamOn ? _doSendStream(request, base) : _doSendJson(request, base, pendingLabel);
+}
+
+async function _doSendJson(request, base, pendingLabel) {
   _setSending(true);
   if (request) _logEl.append(_msgBubble({ role: 'user', content: request }, false));
   const pending = el('div', `align-self:flex-start;color:${C.sub};font-size:11px;padding:6px;`, pendingLabel);
@@ -556,15 +708,7 @@ async function _doSend(request, base, pendingLabel) {
     pending.remove();
     if (resp.status === 404) { _logEl.append(_errBubble('Chat endpoint not found — restart ComfyUI to load the LLM routes.')); return; }
     const j = await resp.json().catch(() => ({ error: { message: 'bad response from server (restart ComfyUI?)' } }));
-    if (j.error) {
-      if (j.error.code === 'no_api_key') {
-        _logEl.append(_errBubble('No API key set. Open Settings → LLM.'));
-        toast('warn', 'No API key', 'Set it in Settings → LLM.');
-        try { window.xyzSettingsPage?.show(); } catch {}
-      } else {
-        _logEl.append(_errBubble(j.error.message || 'request failed'));
-      }
-    }
+    if (j.error) _handleChatError(j);
     await _loadMessages();  // reload from server (route persisted everything)
   } catch (e) {
     pending.remove();
@@ -573,6 +717,90 @@ async function _doSend(request, base, pendingLabel) {
   } finally {
     _setSending(false);
     _abort = null;
+  }
+}
+
+// streaming send: SSE from /xyz/llm/chat (stream:true) → live reasoning + content + trace.
+async function _doSendStream(request, base) {
+  _setSending(true);
+  if (request) _logEl.append(_msgBubble({ role: 'user', content: request }, false));
+
+  // live assistant bubble: reasoning (collapsible, open while streaming) + trace + content
+  const wrap = el('div', 'display:flex;flex-direction:column;gap:3px;align-items:flex-start;width:100%;');
+  const reason = _reasoningBox('', true); reason.style.display = 'none';
+  const traceLine = el('div', `font-size:10px;color:${C.sub};display:none;`);
+  const bubble = el('div', `max-width:88%;border-radius:9px;padding:8px 11px;font-size:12px;line-height:1.55;` +
+    `white-space:pre-wrap;word-break:break-word;background:${C.asstBubble};color:${C.text};`);
+  const cursor = el('span', 'opacity:.5;', '▍');
+  bubble.append(cursor);
+  wrap.append(reason, traceLine, bubble);
+  _logEl.append(wrap);
+  _logEl.scrollTop = _logEl.scrollHeight;
+
+  const atBottom = () => _logEl.scrollHeight - _logEl.scrollTop - _logEl.clientHeight < 80;
+  let contentBuf = '', toolCount = 0;
+  const setContent = () => { bubble.textContent = contentBuf; bubble.append(cursor); };
+
+  _abort = new AbortController();
+  let stopped = false;
+  try {
+    const resp = await fetch('/xyz/llm/chat', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ conversation_id: _activeConvId, base_prompt: base, user_request: request, stream: true }),
+      signal: _abort.signal,
+    });
+    if (resp.status === 404) { wrap.remove(); _logEl.append(_errBubble('Chat endpoint not found — restart ComfyUI to load the LLM routes.')); return; }
+    const ct = resp.headers.get('Content-Type') || '';
+    if (!resp.body || ct.indexOf('text/event-stream') === -1) {
+      // server build without streaming → fall back to the JSON shape
+      wrap.remove();
+      const j = await resp.json().catch(() => ({ error: { message: 'bad response (restart ComfyUI?)' } }));
+      if (j.error) _handleChatError(j);
+      await _loadMessages();
+      return;
+    }
+    const reader = resp.body.getReader();
+    const dec = new TextDecoder();
+    let buf = '';
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let i;
+      while ((i = buf.indexOf('\n\n')) >= 0) {
+        const block = buf.slice(0, i); buf = buf.slice(i + 2);
+        const data = block.split('\n').filter(l => l.startsWith('data:')).map(l => l.slice(5)).join('');
+        if (!data.trim()) continue;
+        let ev; try { ev = JSON.parse(data.trim()); } catch { continue; }
+        const stick = atBottom();
+        if (ev.type === 'reasoning') {
+          reason.style.display = ''; reason._pre.style.display = 'block'; reason._setLbl();
+          reason._pre.textContent += ev.delta; reason._pre.scrollTop = reason._pre.scrollHeight;
+        } else if (ev.type === 'content') {
+          contentBuf += ev.delta; setContent();
+        } else if (ev.type === 'round_reset') {
+          contentBuf = ''; setContent();
+        } else if (ev.type === 'tool') {
+          toolCount++; const n = (ev.results || []).length;
+          traceLine.style.display = ''; traceLine.textContent = `🔎 ${ev.name} ×${toolCount} (last: ${n} result(s))`;
+        } else if (ev.type === 'done') {
+          reason._pre.style.display = 'none'; reason._setLbl();  // collapse CoT when finished
+        } else if (ev.type === 'error') {
+          wrap.remove(); _handleChatError({ error: { message: ev.message } });
+        }
+        if (stick) _logEl.scrollTop = _logEl.scrollHeight;
+      }
+    }
+    cursor.remove();
+    await _loadMessages();  // authoritative render (prompt boxes, copy/apply, persisted CoT)
+  } catch (e) {
+    cursor.remove();
+    if (e.name === 'AbortError') { stopped = true; }
+    else { wrap.remove(); _logEl.append(_errBubble(String(e.message || e))); }
+  } finally {
+    _setSending(false);
+    _abort = null;
+    if (stopped) { _logEl.append(el('div', `align-self:flex-start;color:${C.sub};font-size:11px;`, '⏹ stopped')); }
   }
 }
 
@@ -685,5 +913,15 @@ app.registerExtension({
     document.addEventListener('plv2:node-edited', (e) => {
       if (_boundNodeId != null && e.detail?.nodeId === _boundNodeId) _resolveBaseDebounced();
     });
+    // The bound node's resolved output also changes when its template is edited in the Text
+    // Editor (writes the widget + emits editor-changed, NOT node-edited) or when any library
+    // entry it resolves through is edited (entry detail box / prompt-list / island). Mirror the
+    // preview window: re-resolve the bound node on these too. (A library re-resolve is cheap;
+    // we don't track which entries the template references, so just re-resolve when bound.)
+    const _reresolveIfBound = () => { if (_boundNodeId != null) _resolveBaseDebounced(); };
+    document.addEventListener('plv2:editor-changed', _reresolveIfBound);
+    document.addEventListener('plv2:entry-content-changed', _reresolveIfBound);
+    document.addEventListener('plv2:entry-changed', _reresolveIfBound);
+    document.addEventListener('plv2:node-renamed', _reresolveIfBound);
   },
 });

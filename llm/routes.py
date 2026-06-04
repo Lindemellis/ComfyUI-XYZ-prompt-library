@@ -282,14 +282,43 @@ async def _post_message(request: web.Request) -> web.Response:
 # Chat proxy (tool loop)
 # ---------------------------------------------------------------------------
 
+def _persist_assistant(conversation_id, content, trace, *, model, usage, capped, reasoning):
+    """Persist the tool messages (for the verified-tag digest) + the assistant turn.
+    Returns the assistant message id. Shared by the streaming and non-streaming paths."""
+    for t in trace or []:
+        try:
+            _repo.enqueue_write(
+                _repo.MID,
+                _repo.AppendMessageOp(
+                    conversation_id=conversation_id, role="tool",
+                    content=json.dumps(t.get("results") or [], ensure_ascii=False),
+                    meta={"name": t.get("name"), "args": t.get("args")},
+                ),
+            ).result(timeout=5)
+        except Exception:
+            logger.exception("failed to persist tool message")
+    meta = {"model": model, "usage": usage, "trace": trace or [], "capped": bool(capped)}
+    if reasoning:
+        meta["reasoning"] = reasoning
+    return _repo.enqueue_write(
+        _repo.MID,
+        _repo.AppendMessageOp(conversation_id=conversation_id, role="assistant",
+                              content=content, meta=meta),
+    ).result(timeout=5)
+
+
 async def _post_chat(request: web.Request) -> web.Response:
     """POST /xyz/llm/chat — assemble messages from blocks+history, run the tool loop,
-    persist (when conversation_id given), and return the assistant message + trace."""
+    persist (when conversation_id given), return the assistant message + trace.
+
+    With `stream: true` the response is a text/event-stream of delta events (see
+    chat.run_chat_stream); otherwise a single JSON object."""
     b = await _json(request)
     conversation_id = b.get("conversation_id")
     conversation_id = int(conversation_id) if conversation_id else None
     base_prompt = str(b.get("base_prompt", "") or "")
     user_request = str(b.get("user_request", "") or "")
+    stream = bool(b.get("stream"))
     if not user_request.strip() and not base_prompt.strip():
         return _err(400, "empty", "user_request (or base_prompt) is required")
 
@@ -301,6 +330,7 @@ async def _post_chat(request: web.Request) -> web.Response:
 
     sources = _tools.resolve_sources(shared)
     enable_tools = bool(shared.get("lookup_enabled", True)) and len(sources) > 0
+    enable_web_search = bool(shared.get("web_search_enabled", False))
 
     messages = _assembly.build_messages(conversation_id, base_prompt, user_request)
 
@@ -317,11 +347,16 @@ async def _post_chat(request: web.Request) -> web.Response:
         except Exception as e:
             return _err(500, "persist_failed", str(e))
 
+    if stream:
+        return await _stream_chat(request, conversation_id, messages, pcfg,
+                                  enable_tools, sources, enable_web_search)
+
     loop = asyncio.get_event_loop()
     try:
         result = await loop.run_in_executor(
             None,
-            lambda: _chat.run_chat(pcfg, messages, enable_tools=enable_tools, sources=sources),
+            lambda: _chat.run_chat(pcfg, messages, enable_tools=enable_tools, sources=sources,
+                                   enable_web_search=enable_web_search),
         )
     except _client.LlmError as e:
         code = "no_api_key" if str(e) == "no_api_key" else "api_error"
@@ -336,33 +371,17 @@ async def _post_chat(request: web.Request) -> web.Response:
 
     assistant_msg_id = None
     if conversation_id:
-        # Persist tool results (for the verified-tag digest) then the assistant message.
-        for t in trace:
-            try:
-                _repo.enqueue_write(
-                    _repo.MID,
-                    _repo.AppendMessageOp(
-                        conversation_id=conversation_id, role="tool",
-                        content=json.dumps(t.get("results") or [], ensure_ascii=False),
-                        meta={"name": t.get("name"), "args": t.get("args")},
-                    ),
-                ).result(timeout=5)
-            except Exception:
-                logger.exception("failed to persist tool message")
         try:
-            assistant_msg_id = _repo.enqueue_write(
-                _repo.MID,
-                _repo.AppendMessageOp(
-                    conversation_id=conversation_id, role="assistant", content=content,
-                    meta={"model": result.get("model"), "usage": result.get("usage"),
-                          "trace": trace, "capped": result.get("capped", False)},
-                ),
-            ).result(timeout=5)
+            assistant_msg_id = _persist_assistant(
+                conversation_id, content, trace, model=result.get("model"),
+                usage=result.get("usage"), capped=result.get("capped", False),
+                reasoning=assistant.get("reasoning"))
         except Exception as e:
             return _err(500, "persist_failed", str(e))
 
     return _ok({
         "message": {"role": "assistant", "content": content},
+        "reasoning": assistant.get("reasoning"),
         "usage": result.get("usage"),
         "model": result.get("model"),
         "trace": trace,
@@ -370,6 +389,69 @@ async def _post_chat(request: web.Request) -> web.Response:
         "user_msg_id": user_msg_id,
         "assistant_msg_id": assistant_msg_id,
     })
+
+
+async def _stream_chat(request, conversation_id, messages, pcfg,
+                       enable_tools, sources, enable_web_search) -> web.StreamResponse:
+    """Run run_chat_stream in a worker thread, relay events to the client as SSE, and
+    persist the final turn (before forwarding `done`, so a follow-up reload sees it)."""
+    loop = asyncio.get_event_loop()
+    queue: "asyncio.Queue" = asyncio.Queue()
+    aborted = {"v": False}
+
+    def producer():
+        try:
+            for ev in _chat.run_chat_stream(
+                pcfg, messages, enable_tools=enable_tools, sources=sources,
+                enable_web_search=enable_web_search, should_abort=lambda: aborted["v"]):
+                loop.call_soon_threadsafe(queue.put_nowait, ev)
+        except _chat.ChatAborted:
+            pass
+        except _client.LlmError as e:
+            loop.call_soon_threadsafe(queue.put_nowait, {"type": "error", "message": str(e)})
+        except Exception as e:  # pragma: no cover
+            loop.call_soon_threadsafe(queue.put_nowait, {"type": "error", "message": str(e)})
+        finally:
+            loop.call_soon_threadsafe(queue.put_nowait, {"type": "_end"})
+
+    resp = web.StreamResponse(status=200, headers={
+        "Content-Type": "text/event-stream; charset=utf-8",
+        "Cache-Control": "no-cache",
+        "X-Accel-Buffering": "no",
+    })
+    await resp.prepare(request)
+    loop.run_in_executor(None, producer)
+
+    async def _send(ev):
+        await resp.write(("data: " + json.dumps(ev, ensure_ascii=False) + "\n\n").encode("utf-8"))
+
+    try:
+        while True:
+            ev = await queue.get()
+            if ev.get("type") == "_end":
+                break
+            if ev.get("type") == "done" and conversation_id:
+                # persist BEFORE forwarding so the client's reload sees the final turn
+                try:
+                    aid = _persist_assistant(
+                        conversation_id, ev["message"]["content"], ev.get("trace"),
+                        model=ev.get("model"), usage=ev.get("usage"),
+                        capped=ev.get("capped", False), reasoning=ev.get("reasoning"))
+                    ev = dict(ev); ev["assistant_msg_id"] = aid
+                except Exception:
+                    logger.exception("failed to persist streamed assistant turn")
+            try:
+                await _send(ev)
+            except (ConnectionResetError, asyncio.CancelledError, RuntimeError):
+                aborted["v"] = True
+                break
+    finally:
+        aborted["v"] = True
+        try:
+            await resp.write_eof()
+        except Exception:
+            pass
+    return resp
 
 
 async def _post_test(request: web.Request) -> web.Response:

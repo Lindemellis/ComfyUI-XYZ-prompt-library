@@ -51,9 +51,14 @@ _SHARED_DEFAULTS: Dict[str, Any] = {
     "provider": "deepseek",
     "temperature": 1.0,
     "top_p": 1.0,
+    "reasoning_effort": "high",   # DeepSeek V4 thinking: off | high | max
     "lookup_enabled": True,
     "lookup_sources": {"danbooru": True, "gelbooru": False},
+    "web_search_enabled": False,
     "seeded": False,
+    "anima_seeded": False,
+    "preset_reflowed": False,
+    "anima_preset_version": 0,
 }
 
 
@@ -144,6 +149,7 @@ def active_provider_config() -> Dict[str, Any]:
         "model": saved.get("model") or (models[0] if models else ""),
         "temperature": s.get("temperature", 1.0),
         "top_p": s.get("top_p", 1.0),
+        "reasoning_effort": s.get("reasoning_effort", "high"),
     }
 
 
@@ -188,8 +194,10 @@ def public() -> Dict[str, Any]:
         "providers": providers_pub,
         "temperature": s["temperature"],
         "top_p": s["top_p"],
+        "reasoning_effort": s["reasoning_effort"],
         "lookup_enabled": s["lookup_enabled"],
         "lookup_sources": s["lookup_sources"],
+        "web_search_enabled": s["web_search_enabled"],
         "db_status": db_status(),
     }
 
@@ -213,8 +221,12 @@ def update(patch: Dict[str, Any]) -> Dict[str, Any]:
         if "top_p" in p:
             try: data["top_p"] = float(p["top_p"])
             except Exception: pass
+        if p.get("reasoning_effort") in ("off", "high", "max"):
+            data["reasoning_effort"] = p["reasoning_effort"]
         if "lookup_enabled" in p:
             data["lookup_enabled"] = bool(p["lookup_enabled"])
+        if "web_search_enabled" in p:
+            data["web_search_enabled"] = bool(p["web_search_enabled"])
         if isinstance(p.get("lookup_sources"), dict):
             src = dict(data.get("lookup_sources", {}))
             for sk, sv in p["lookup_sources"].items():
@@ -223,6 +235,10 @@ def update(patch: Dict[str, Any]) -> Dict[str, Any]:
             data["lookup_sources"] = src
         if "seeded" in p:
             data["seeded"] = bool(p["seeded"])
+        if "anima_seeded" in p:
+            data["anima_seeded"] = bool(p["anima_seeded"])
+        if "preset_reflowed" in p:
+            data["preset_reflowed"] = bool(p["preset_reflowed"])
 
         pu = p.get("provider_update")
         if isinstance(pu, dict) and pu.get("id") in _PROVIDER_IDS:
@@ -250,3 +266,39 @@ def mark_seeded() -> None:
 
 def is_seeded() -> bool:
     return bool(load().get("seeded"))
+
+
+def mark_anima_seeded() -> None:
+    with _LOCK:
+        data = _read_raw()
+        data["anima_seeded"] = True
+        _write_raw(data)
+
+
+def is_anima_seeded() -> bool:
+    return bool(load().get("anima_seeded"))
+
+
+def mark_preset_reflowed() -> None:
+    with _LOCK:
+        data = _read_raw()
+        data["preset_reflowed"] = True
+        _write_raw(data)
+
+
+def is_preset_reflowed() -> bool:
+    return bool(load().get("preset_reflowed"))
+
+
+def get_anima_preset_version() -> int:
+    try:
+        return int(load().get("anima_preset_version", 0))
+    except Exception:
+        return 0
+
+
+def set_anima_preset_version(version: int) -> None:
+    with _LOCK:
+        data = _read_raw()
+        data["anima_preset_version"] = int(version)
+        _write_raw(data)
