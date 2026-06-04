@@ -1373,7 +1373,14 @@ class TagAutocompleteUI {
     // `lookupName` is what related tags are fetched for (may differ from the clicked
     // token when an "@artist" token resolves to a differently-named artist tag).
     let lookupName = name;
-    let selfTag = (await searchTags(name, 5)).find(t => t.name === name);
+    let selfTag = (await searchTags(name, 20)).find(t => t.name === name);
+    // Short artist/character names (e.g. "nigiri", "rity") get out-ranked by higher
+    // post_count substring matches in the general search, so the exact tag may not appear
+    // in the first results. Retry within the artist category explicitly before giving up.
+    if (!selfTag) {
+      const arts = await searchTags(name, 20, 1);   // category 1 = artist
+      selfTag = arts.find(t => t.name === name) || null;
+    }
 
     // Anima "@artist": if the literal "@xxx" isn't itself a tag, treat "xxx" as an
     // artist tag / alias / old-name and show THAT artist's detail + related tags.
@@ -1498,6 +1505,16 @@ function _fmtCount(n) {
 
 // ─── Event handler ────────────────────────────────────────────────────────────
 
+// True if `node` is, or is nested inside, an attached autocomplete host (textarea or the
+// rich-editor root). Used so focus moving into a nested ref island (whose inner editor is
+// not itself hooked) still counts as "inside an AC host".
+function _inAcHost(node) {
+  for (let p = node; p; p = p.parentNode || (p.host || null)) {
+    if (p._xyzTagACHooked) return true;
+  }
+  return false;
+}
+
 class TagACHandler {
   constructor() {
     this.ui        = new TagAutocompleteUI();
@@ -1620,11 +1637,17 @@ class TagACHandler {
   }
 
   handleBlur(e) {
-    // Short delay so mousedown on the list fires first
+    // Short delay so mousedown on the list (and focus moves) settle first.
     setTimeout(() => {
-      if (!this.ui._root.contains(document.activeElement)) {
-        this.ui.hide();
-      }
+      const ae = document.activeElement;
+      if (!ae) return;                              // window lost focus → leave it as-is
+      if (this.ui._root.contains(ae)) return;       // focus moved into the dropdown
+      // Focus moved into ANY AC host — including a nested ref-expansion island, whose
+      // inner editor is itself contentEditable but not directly hooked (so check ancestors,
+      // not just the element). That host (the text editor) now owns the dropdown, so a
+      // previously-focused host (e.g. the entry detail box) must not hide it (#flash).
+      if (_inAcHost(ae)) return;
+      this.ui.hide();
     }, 160);
   }
 }
@@ -1633,6 +1656,19 @@ class TagACHandler {
 
 const handler = new TagACHandler();
 handler.ui._handler = handler;   // let the UI suppress the re-trigger after a commit
+
+// Click-outside to dismiss: clicking anywhere that is NOT the dropdown, the active host,
+// or another AC host closes the panel. Bubble phase so a row's own mousedown
+// (stopPropagation) is respected and still inserts; the host's own click re-opens as needed.
+document.addEventListener('mousedown', (e) => {
+  const ui = handler.ui;
+  if (!ui.isVisible()) return;
+  const t = e.target;
+  if (ui._root.contains(t)) return;                       // inside the dropdown
+  if (ui._target && ui._target.contains && ui._target.contains(t)) return;  // inside the active host
+  if (t.closest && t.closest('[data-tagac-index]')) return;
+  ui.hide();
+});
 
 // opts.related  — this textarea supports click-a-token → related tags
 // opts.getDelimiter — function returning the delimiter to use for insertions

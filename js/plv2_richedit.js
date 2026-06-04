@@ -526,6 +526,10 @@ export function createRichEditor(opts = {}) {
     // and round-trips to the entry's raw_text / detail box.
     inner.addEventListener('blur', () => {
       const content = levelString(inner);
+      // Only save if the content ACTUALLY changed. Merely placing the caret in an island
+      // and clicking away (e.g. to the entry detail box) must not fire a save → entry-changed
+      // → entry-detail full reload, which would destroy the box the user just clicked (#3).
+      if (content === entryTextCache.get(entryRef)) return;
       entryTextCache.set(entryRef, content);   // keep the cache in sync with the just-saved text
       saveEntry(entryRef, content);
     });
