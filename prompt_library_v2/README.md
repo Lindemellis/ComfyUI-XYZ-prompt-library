@@ -90,6 +90,8 @@ Create a child entry named `_template` inside a folder and it becomes that folde
 - Opening the editor from a node's **📝 Editor** button focuses that node: in single mode it switches to the node's positive/negative tab and loads it; in split mode it just focuses the matching pane (no tab switch).
 - `[ref]` **highlighting** — valid references are tinted; the backdrop tracks the text.
 - **Undo / redo** per pane, **find / replace** (case / word / selection), and **smart insert** that adds delimiters based on the cursor context.
+- **Ctrl+↑ / Ctrl+↓** — bump the weight of the selection (or the tag at the cursor) in `(text:1.2)` style, in steps of 0.1; stepping back to 1.0 removes the wrap.
+- **Copy / cut / paste** stay inside the editor (paste is inserted as plain text) and no longer leak to ComfyUI's canvas — so pasting can't create a stray node.
 - **Right-click** — add selection to an entry, create a new entry from it, or open the referenced entry in detail.
 
 ### Autocomplete in the editor

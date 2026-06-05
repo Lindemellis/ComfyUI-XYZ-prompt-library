@@ -269,7 +269,7 @@ function _textBody(b, head) {
 
   // collapse
   let collapsed = false;
-  const collapseBtn = el('span', `cursor:pointer;color:${C.sub};font-size:12px;padding:0 2px;`, '▾');
+  const collapseBtn = el('span', `cursor:pointer;color:${C.text};font-size:18px;line-height:1;padding:0 4px;`, '▾');
   collapseBtn.title = 'Collapse / expand';
   collapseBtn.addEventListener('click', () => {
     collapsed = !collapsed;
@@ -876,6 +876,9 @@ async function _resolveBase() {
 }
 function _applyToBoundNode(text) {
   if (_boundNodeId == null) { toast('warn', 'No node bound', 'Bind a node in the Base prompt selector first.'); return; }
+  // Normalise the model's prompt on apply — underscores, bracket escaping, full-width
+  // punctuation and comma spacing per the user's PLv2 normalization settings.
+  try { text = window.plv2.normalizePrompt(text); } catch {}
   const n = _plv2Nodes().find(x => x.id === _boundNodeId);
   const w = n?.widgets?.find(x => x.name === 'prompt_template');
   if (!w) { toast('warn', 'Node not found', ''); return; }

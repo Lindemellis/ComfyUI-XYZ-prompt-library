@@ -103,8 +103,9 @@ The preset auto-updates on new releases (only for variants you haven't hand-edit
   **Send** (Enter = newline). While generating you can **Stop**; the last reply has a
   **↻ regenerate**. When the model wraps its result in a ```prompt fenced block, **Copy** and
   **Apply** buttons appear — **Apply** writes it straight into the bound node's prompt
-  template. The bound base prompt re-resolves live when you edit the node, the Text Editor,
-  or any library entry it references.
+  template, first running your normalization settings over it (underscore→space, bracket
+  escaping, full-width→half-width, comma spacing). The bound base prompt re-resolves live when
+  you edit the node, the Text Editor, or any library entry it references.
 - **流式 (streaming)** toggle (next to Send): when on, the reply streams in token-by-token and
   the model's reasoning appears live in a collapsible **💭 思维链** box (which also shows on
   past replies that have reasoning). Turn it off for a single non-streaming response.

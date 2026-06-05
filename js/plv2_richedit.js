@@ -162,6 +162,31 @@ export function createRichEditor(opts = {}) {
     const r = sel.getRangeAt(0);
     return pointOffset(scope, r.endContainer, r.endOffset);
   }
+  // {start,end} char range of the current selection within `scope` (collapsed at the
+  // caret if either endpoint isn't in this level). Works for any scope (root or island).
+  function selectionIn(scope) {
+    const sel = window.getSelection();
+    const fallback = () => { const c = caretOffsetIn(scope) ?? 0; return { start: c, end: c }; };
+    if (!sel || !sel.rangeCount) return fallback();
+    const r = sel.getRangeAt(0);
+    const a = pointOffset(scope, r.startContainer, r.startOffset);
+    const b = pointOffset(scope, r.endContainer, r.endOffset);
+    if (a == null || b == null) return fallback();
+    return { start: Math.min(a, b), end: Math.max(a, b) };
+  }
+  // Select [start, end) within `scope` (handles <br> 'before'/'after' anchors).
+  function setSelectionIn(scope, start, end) {
+    const a = locate(scope, start), b = locate(scope, end);
+    if (!a || !b) return;
+    const r = document.createRange();
+    const put = (which, loc) => {
+      if (loc.off === 'after')       r[which + 'After'](loc.node);
+      else if (loc.off === 'before') r[which + 'Before'](loc.node);
+      else                           r[which](loc.node, loc.off);
+    };
+    put('setStart', a); put('setEnd', b);
+    const sel = window.getSelection(); sel.removeAllRanges(); sel.addRange(r);
+  }
   function setCaretIn(scope, target) {
     const loc = locate(scope, target);
     if (!loc) { scope.focus(); return; }
@@ -575,7 +600,86 @@ export function createRichEditor(opts = {}) {
     const k = e.key.toLowerCase();
     if (k === 'z' && !e.shiftKey) { e.preventDefault(); undo(); }
     else if (k === 'y' || (k === 'z' && e.shiftKey)) { e.preventDefault(); redo(); }
+    // Ctrl+↑ / Ctrl+↓ — bump the weight of the selection (A1111/ComfyUI style).
+    else if (k === 'arrowup')   { e.preventDefault(); adjustSelectionWeight(WEIGHT_STEP); }
+    else if (k === 'arrowdown') { e.preventDefault(); adjustSelectionWeight(-WEIGHT_STEP); }
   });
+
+  // ── Clipboard ──────────────────────────────────────────────────────────────
+  // This editor is a contentEditable DIV, not a <textarea>, so ComfyUI's global
+  // window-level copy/cut/paste handlers (which early-return only for INPUT/TEXTAREA)
+  // would otherwise hijack the clipboard to operate on graph nodes — copying a selected
+  // node and pasting it as a stray node (the "111 text box" bug). Stop the events at the
+  // editor so its own clipboard behaviour wins. For paste we also insert as PLAIN text so
+  // rich HTML never corrupts the flat-text model.
+  root.addEventListener('copy', e => e.stopPropagation());
+  root.addEventListener('cut',  e => e.stopPropagation());
+  root.addEventListener('paste', e => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (composing) return;
+    let text = '';
+    try { text = (e.clipboardData || window.clipboardData)?.getData('text/plain') ?? ''; } catch {}
+    if (!text) return;
+    text = text.replace(/\r\n?/g, '\n');
+    const scope = activeScope();
+    const { start, end } = selectionIn(scope);
+    spliceActive(start, end, text);   // root: island-preserving + undo; island: rerender (blur saves)
+    scope.focus();
+  });
+
+  // ── Selection weighting (Ctrl+↑ / Ctrl+↓) ────────────────────────────────────
+  const WEIGHT_STEP = 0.1;
+  const WEIGHT_GROUP_RE = /^\((.*):(-?\d+(?:\.\d+)?)\)$/s;   // a full "(inner:1.2)" group
+  function _fmtWeight(w) {
+    let s = (Math.round(w * 100) / 100).toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
+    if (!s.includes('.')) s += '.0';   // keep at least one decimal (1 → "1.0")
+    return s;
+  }
+  // Wrap the selection (or the token at the caret) in "(text:weight)" and bump the weight
+  // by `delta`. Re-detects an existing wrap — both when the whole "(text:w)" is selected and
+  // when only its inner text is — so repeated presses keep stepping the same group. Unwraps
+  // back to bare text at weight 1.0. Operates on whichever level the caret is in.
+  function adjustSelectionWeight(delta) {
+    const scope = activeScope();
+    const v = levelString(scope);
+    let { start, end } = selectionIn(scope);
+    // No selection → expand to the comma/newline-delimited token at the caret.
+    if (start === end) {
+      const bound = c => c === ',' || c === '\n';
+      while (start > 0 && !bound(v[start - 1])) start--;
+      while (end < v.length && !bound(v[end])) end++;
+    }
+    // Trim surrounding whitespace from the working range.
+    while (start < end && /\s/.test(v[start])) start++;
+    while (end > start && /\s/.test(v[end - 1])) end--;
+    if (start >= end) return;
+
+    let inner = v.slice(start, end);
+    let wStart = start, wEnd = end, weight = 1.0;
+    const gm = inner.match(WEIGHT_GROUP_RE);
+    if (gm) {
+      inner = gm[1]; weight = parseFloat(gm[2]);
+    } else {
+      // Only the inner text is selected, with the "(…:w)" wrap sitting just outside it.
+      const am = v.slice(end).match(/^:(-?\d+(?:\.\d+)?)\)/);
+      if (v[start - 1] === '(' && am) { wStart = start - 1; wEnd = end + am[0].length; weight = parseFloat(am[1]); }
+    }
+    weight = Math.round((weight + delta) * 100) / 100;
+
+    let replacement, selStart, selEnd;
+    if (Math.abs(weight - 1) < 1e-9) {               // back to neutral → drop the wrap
+      replacement = inner; selStart = wStart; selEnd = wStart + inner.length;
+    } else {
+      replacement = '(' + inner + ':' + _fmtWeight(weight) + ')';
+      selStart = wStart + 1; selEnd = selStart + inner.length;
+    }
+    const nv = v.slice(0, wStart) + replacement + v.slice(wEnd);
+    rerenderLevel(scope, depthOf(scope), nv, selStart);   // island-preserving rebuild
+    setSelectionIn(scope, selStart, selEnd);              // keep the inner text selected
+    if (scope === root) recordUndo(true);
+    emitChange();
+  }
   // The editable level (root, or the island inner) the caret is in.
   function activeScope() {
     const sel = window.getSelection();
