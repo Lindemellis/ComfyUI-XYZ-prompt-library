@@ -656,6 +656,27 @@ export const DetailView = defineComponent({
       if (p != null && String(p).length) return String(p);
       return null;
     });
+    // LoRA syntax is embedded in the raw positive prompt as
+    // ``<lora:name:weight>`` (also ``<lyco:…>`` / ``<hypernet:…>``) — the §8.8
+    // normalisation pipeline strips it, so we always parse the RAW prompt
+    // (independent of the 原文/归一化 toggle) to surface it as its own row.
+    const loras = computed(() => {
+      const m = meta.value;
+      const src = m && m.positive_prompt;
+      if (!src) return [];
+      const out = [];
+      const re = /<(?:lora|lyco|hypernet):([^:>]+)(?::([^:>]+))?(?::([^>]+))?>/gi;
+      let mm;
+      while ((mm = re.exec(String(src))) !== null) {
+        const name = (mm[1] || '').trim();
+        if (!name) continue;
+        const w = mm[2] != null ? String(mm[2]).trim() : '';
+        out.push({ name, weight: w || null, raw: mm[0] });
+      }
+      return out;
+    });
+    const lorasText = computed(() => loras.value.map((l) => l.raw).join(', '));
+
     const gallery = computed(() => (record.value && record.value.gallery) || {});
     const size = computed(() => (record.value && record.value.size) || {});
     const folder = computed(() => (record.value && record.value.folder) || {});
@@ -737,7 +758,7 @@ export const DetailView = defineComponent({
 
     return {
       loading, error, record, meta, gallery, size, folder,
-      posView, displayPositive,
+      posView, displayPositive, loras, lorasText,
       prevId, nextId, neighborsLoading,
       scale, tx, ty, scalePct,
       asideWidthPx, onAsideSplitDown,
@@ -931,6 +952,23 @@ export const DetailView = defineComponent({
               <dl class="dv-meta">
                 <dt>Model</dt>
                 <dd><code v-if="meta.model">{{ meta.model }}</code><span v-else class="muted">—</span></dd>
+                <template v-if="loras.length">
+                  <dt>
+                    LoRA
+                    <button type="button" class="dv-copy"
+                            @click="copy('loras', lorasText)">
+                      {{ copiedKey === 'loras' ? 'Copied!' : 'Copy' }}
+                    </button>
+                  </dt>
+                  <dd>
+                    <ul class="dv-loras">
+                      <li v-for="(l, i) in loras" :key="'lora-'+i+'-'+l.name" class="dv-lora">
+                        <code class="dv-lora-name" :title="l.raw">{{ l.name }}</code>
+                        <span v-if="l.weight != null" class="dv-lora-w">{{ l.weight }}</span>
+                      </li>
+                    </ul>
+                  </dd>
+                </template>
                 <dt>
                   Seed
                   <button type="button" class="dv-copy"
