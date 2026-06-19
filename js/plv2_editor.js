@@ -31,6 +31,13 @@ const ORIENT_KEY = 'plv2_editor_orientation_v1';
 const SPLIT_KEY  = 'plv2_editor_split_v1';
 const _REF_RE = /^\[([^\]]*)\]$/;
 
+// A bracket expression containing ':' or '|' is prompt scheduling / alternation
+// syntax ([red:blue:0.5], [cat|dog:0.1]) for downstream nodes, NOT a PLv2 [entry]
+// reference (paths/trigger names never contain either). Don't treat it as a ref.
+function _isScheduleSyntax(inner) {
+  return inner != null && (inner.indexOf(':') !== -1 || inner.indexOf('|') !== -1);
+}
+
 // ─── State ────────────────────────────────────────────────────────────────────
 
 let _built       = false;
@@ -508,7 +515,7 @@ async function _computeInsert(s, pos, ins, D) {
   let leadDelim = D;
   if (plan.beforeCore !== '') {
     const m = plan.precedingToken.match(_REF_RE);
-    if (m) leadDelim = (await _resolveRefDelim(m[1])) ?? D;   // entry2's own delimiter
+    if (m && !_isScheduleSyntax(m[1])) leadDelim = (await _resolveRefDelim(m[1])) ?? D;   // entry2's own delimiter
   }
   return window.plv2.insert.assemble(plan, ins, leadDelim, D);
 }
@@ -754,6 +761,7 @@ function _refAtCaret(s, pos) {
   const re = /\[([^\[\]\n]*)\]/g;
   let m;
   while ((m = re.exec(s)) !== null) {
+    if (_isScheduleSyntax(m[1])) continue;   // schedule syntax, not a ref
     const start = m.index, end = m.index + m[0].length;
     if (pos >= start && pos <= end) return m[1];   // inside, or just before '[' / just after ']'
   }

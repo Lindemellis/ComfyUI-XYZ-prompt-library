@@ -307,11 +307,19 @@ async function resolveRefEntry(refInner) {
   } catch { return null; }
 }
 
+// A bracket expression containing ':' or '|' is prompt scheduling / alternation
+// syntax ([red:blue:0.5], [cat|dog:0.1]) for downstream nodes, NOT a PLv2 [entry]
+// reference (paths/trigger names never contain either). Don't treat it as a ref.
+function _isScheduleSyntax(inner) {
+  return inner != null && (inner.indexOf(':') !== -1 || inner.indexOf('|') !== -1);
+}
+
 // Extract the inner text of a [ref] at caret position.
 function _refAtCaret(text, pos) {
   const re = /\[([^\[\]\n]*)\]/g;
   let m;
   while ((m = re.exec(text)) !== null) {
+    if (_isScheduleSyntax(m[1])) continue;   // schedule syntax, not a ref
     if (pos >= m.index && pos <= m.index + m[0].length) return m[1];
   }
   return null;
@@ -661,8 +669,13 @@ function _analyzeToken(el) {
   const lastOpen  = text.lastIndexOf('[', pos - 1);
   const lastClose = text.lastIndexOf(']', pos - 1);
   if (lastOpen > lastClose) {
-    return { mode: 'ref', refKind: 'bracket',
-             query: text.substring(lastOpen + 1, pos).trim(), rangeStart: lastOpen };
+    const inner = text.substring(lastOpen + 1, pos);
+    // Inside prompt scheduling/alternation syntax ([red:blue:0.5], [cat|dog:0.1]):
+    // not a PLv2 [ref], so don't offer library-entry suggestions — fall through.
+    if (!_isScheduleSyntax(inner)) {
+      return { mode: 'ref', refKind: 'bracket',
+               query: inner.trim(), rangeStart: lastOpen };
+    }
   }
   const start = _tokenStart(text, pos);
   const seg = text.substring(start, pos);

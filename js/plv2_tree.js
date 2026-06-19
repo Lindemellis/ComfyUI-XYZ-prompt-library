@@ -237,7 +237,11 @@ let _inUseSet = new Set();   // node ids referenced by the editors (resolved lik
 // "rio" match too — they aren't equal to the node's full_path). Async.
 async function _recomputeInUse() {
   const text = _inUseText();
-  const refs = [...new Set([...text.matchAll(/\[([^\]\n]+)\]/g)].map(m => m[1].trim()).filter(Boolean))];
+  // Skip prompt scheduling / alternation syntax ([red:blue:0.5], [cat|dog:0.1]):
+  // those reuse brackets but aren't PLv2 [entry] refs (a ref never contains ':' or '|').
+  const refs = [...new Set([...text.matchAll(/\[([^\]\n]+)\]/g)]
+    .map(m => m[1].trim())
+    .filter(s => s && s.indexOf(':') === -1 && s.indexOf('|') === -1))];
   const ids = new Set();
   await Promise.all(refs.map(async ref => {
     try { const node = (await window.plv2.api.resolveRef(ref))?.node; if (node) ids.add(node.id); }

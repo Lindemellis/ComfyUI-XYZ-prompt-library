@@ -27,6 +27,14 @@
 
 const REF_RE = /\[([^\[\]\n]*)\]/g;
 
+// A bracket expression that contains ':' or '|' is prompt scheduling / alternation
+// syntax (e.g. [red:blue:0.5], [cat|dog:0.1]) belonging to downstream nodes, NOT a
+// PLv2 [entry] reference — a real ref is a path/trigger name that never contains
+// either. Such expressions must pass through verbatim (not highlighted/expanded).
+function isScheduleSyntax(inner) {
+  return inner.indexOf(':') !== -1 || inner.indexOf('|') !== -1;
+}
+
 function injectStyleOnce() {
   if (document.getElementById('plv2-rich-style')) return;
   const s = document.createElement('style');
@@ -327,6 +335,9 @@ export function createRichEditor(opts = {}) {
     if (text.endsWith('\n')) { text = text.slice(0, -1); trailNL = true; }
     let last = 0, m; REF_RE.lastIndex = 0;
     while ((m = REF_RE.exec(text)) !== null) {
+      // Schedule/alternation syntax → leave unflushed so it folds into the next
+      // plain text node instead of becoming an (invalid) ref span.
+      if (isScheduleSyntax(m[1])) continue;
       if (m.index > last) target.appendChild(document.createTextNode(text.slice(last, m.index)));
       const name = m[1].trim();
       // `[this(.x)]` is a self-reference resolved relative to the owning entry at generation

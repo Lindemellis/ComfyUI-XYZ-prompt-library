@@ -225,6 +225,16 @@ def _expand_refs(
     def _replacer(m: re.Match) -> str:
         token = m.group(1).strip()
 
+        # Not a PLv2 entry reference: prompt scheduling / alternation syntax
+        # (e.g. `[red:blue:0.5]`, `[cat|dog:0.1]`, `[SEQ:a:0.3:b:0.6]`) reuses
+        # square brackets but belongs to downstream nodes (comfyui-prompt-control).
+        # A real ref is a path / trigger name, which never contains ':' or '|'
+        # (trigger names forbid '|'; paths use '.' as separator, never ':').
+        # Leave such expressions untouched so they pass through verbatim instead
+        # of resolving to nothing and being silently dropped.
+        if ":" in token or "|" in token:
+            return m.group(0)
+
         # Resolve the trigger/path to a (node_id, sub_path) pair
         resolution = resolve_trigger(token)
         if resolution is None:
