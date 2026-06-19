@@ -1310,19 +1310,39 @@ app.registerExtension({
       getValue: () => '', setValue: () => {}, serialize: false,
     });
     w.computeSize = () => [node.size[0], 34];
+    // ComfyUI v2.0 (Vue) node renderer lays out every widget whose
+    // computeLayoutSize is a function in a stretchable 'auto' grid row, which
+    // expands to fill the node and leaves a big blank gap below our fixed-height
+    // button bar. Shadow the inherited prototype method with a non-function so
+    // the new renderer treats this widget as min-content. The classic renderer
+    // ignores this and keeps using computeSize above.
+    w.computeLayoutSize = undefined;
 
-    // Hook the node's prompt_template textbox (#9): live sync to the editor + blur
-    // normalisation. inputEl may appear a frame or two after nodeCreated.
-    const hook = (tries = 0) => {
-      const tw = node.widgets?.find(x => x.name === 'prompt_template');
+    // node → editor live sync (#9). The prompt_template widget fires its
+    // `callback` on every edit in BOTH renderers: the classic one (textarea
+    // input handler) and ComfyUI v2.0 (Vue) where WidgetTextarea routes edits
+    // through the widget's updateHandler → callback. The old approach listened on
+    // `inputEl`, which in the Vue renderer is an orphan (never-mounted) element,
+    // so node → editor sync silently broke. Chain onto callback instead.
+    const tw = node.widgets?.find(x => x.name === 'prompt_template');
+    if (tw) {
+      const origCb = tw.callback;
+      tw.callback = function (v) {
+        const r = origCb ? origCb.apply(this, arguments) : undefined;
+        const val = (typeof v === 'string') ? v : tw.value;
+        document.dispatchEvent(new CustomEvent('plv2:node-edited', { detail: { nodeId: node.id, value: val } }));
+        return r;
+      };
+    }
+
+    // Blur-time normalisation on the classic-renderer textarea. inputEl may
+    // appear a frame or two after nodeCreated; in the Vue renderer it is the
+    // orphan element so this listener simply never fires there (harmless).
+    const hookBlur = (tries = 0) => {
       const ta = tw?.inputEl;
-      if (!ta) { if (tries < 60) requestAnimationFrame(() => hook(tries + 1)); return; }
+      if (!ta) { if (tries < 60) requestAnimationFrame(() => hookBlur(tries + 1)); return; }
       if (ta._plv2Hooked) return;
       ta._plv2Hooked = true;
-      // user typing in the node box → mirror into the editor pane showing this node
-      ta.addEventListener('input', () => {
-        document.dispatchEvent(new CustomEvent('plv2:node-edited', { detail: { nodeId: node.id, value: ta.value } }));
-      });
       // normalise on blur (skips [refs]/{patterns}); programmatic value sets don't fire 'input'
       ta.addEventListener('blur', () => {
         const v = normalizePrompt(ta.value);
@@ -1334,7 +1354,7 @@ app.registerExtension({
         }
       });
     };
-    hook();
+    hookBlur();
   },
 
   async setup() {

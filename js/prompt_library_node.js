@@ -155,6 +155,11 @@ app.registerExtension({
       setValue: () => {},
     });
     widget.computeSize = () => [node.size[0], 60];
+    // ComfyUI v2.0 (Vue) node renderer stretches any widget that exposes
+    // computeLayoutSize into an 'auto' grid row, leaving a big blank gap below
+    // this fixed-height header. Shadow the inherited method so the new renderer
+    // treats it as min-content; the classic renderer keeps using computeSize.
+    widget.computeLayoutSize = undefined;
   },
 
   syncOutputCount(node) {

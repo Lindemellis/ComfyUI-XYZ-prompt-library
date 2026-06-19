@@ -1698,32 +1698,44 @@ app.registerExtension({
   name: EXT_NAME,
 
   setup() {
-    // Primary hook: ComfyWidgets.STRING override
+    // Attach only to genuine, editable node textareas (skips read-only / non-textarea).
+    const maybeAttach = (ta) => {
+      if (ta?.tagName === 'TEXTAREA' && !ta.readOnly && !ta._xyzTagACHooked) attachTo(ta);
+    };
+    // Discover node textareas inside an added subtree. Two flavours:
+    //   • classic renderer: <textarea class="comfy-multiline-input">
+    //   • ComfyUI v2.0 (Vue) renderer: WidgetTextarea.vue renders a plain <textarea>
+    //     (no comfy-multiline-input class) inside a .lg-node-widget cell.
+    const discover = (root) => {
+      if (root.matches?.('.comfy-multiline-input')) maybeAttach(root);
+      root.querySelectorAll?.('.comfy-multiline-input').forEach(maybeAttach);
+      if (root.matches?.('textarea') && root.closest?.('.lg-node-widget')) maybeAttach(root);
+      root.querySelectorAll?.('.lg-node-widget textarea').forEach(maybeAttach);
+    };
+
+    // Primary hook: ComfyWidgets.STRING override (classic renderer)
     if (ComfyWidgets?.STRING) {
       const orig = ComfyWidgets.STRING;
       ComfyWidgets.STRING = function(node, inputName, inputData, appInstance) {
         const result = orig.apply(this, arguments);
-        const ta = result?.widget?.inputEl;
-        if (ta && ta.tagName === 'TEXTAREA' && !ta.readOnly) {
-          attachTo(ta);
-        }
+        maybeAttach(result?.widget?.inputEl);
         return result;
       };
     }
 
-    // Fallback: MutationObserver for dynamically added textareas
+    // Fallback: MutationObserver for dynamically added textareas (and the Vue
+    // renderer, which never goes through ComfyWidgets.STRING).
     const obs = new MutationObserver((mutations) => {
       for (const m of mutations) {
         for (const n of m.addedNodes) {
           if (n.nodeType !== Node.ELEMENT_NODE) continue;
-          if (n.matches?.('.comfy-multiline-input')) attachTo(n);
-          n.querySelectorAll?.('.comfy-multiline-input').forEach(attachTo);
+          discover(n);
         }
       }
     });
     obs.observe(document.body, { childList: true, subtree: true });
 
     // Attach to any already-existing textareas
-    document.querySelectorAll('.comfy-multiline-input').forEach(attachTo);
+    discover(document.body);
   },
 });
