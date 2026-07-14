@@ -70,6 +70,12 @@ def _normalise(unique_id: str) -> str:
     return unique_id.strip().strip("{}").replace("-", "").lower()
 
 
+def _short(text: str, limit: int = 40) -> str:
+    """Never echo an unbounded caller-supplied string back into an error."""
+    text = "".join(c if c.isprintable() else "?" for c in text)
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
 def _find(doc, layer_id: str):
     """By uniqueId, or by any unique PREFIX of one.
 
@@ -89,11 +95,11 @@ def _find(doc, layer_id: str):
         return matches[0]
     if not matches:
         raise OpsError(
-            f"layer {layer_id} is not in this document — refresh the layer list "
-            "on the node"
+            f"layer {_short(layer_id)} is not in this document — refresh the layer "
+            "list on the node"
         )
     names = ", ".join(repr(m.name()) for m in matches[:5])
-    raise OpsError(f"layer id {layer_id} is ambiguous; it matches {names}")
+    raise OpsError(f"layer id {_short(layer_id)} is ambiguous; it matches {names}")
 
 
 def _require_u8(node):

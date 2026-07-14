@@ -65,6 +65,14 @@ class _Handler(BaseHTTPRequestHandler):
                 self._json(self.main.call(ops.list_layers))
 
             elif url.path == "/image":
+                # Required, even though the whole document is a valid answer: a
+                # mistyped parameter name must not silently hand back a flattened
+                # document when the caller asked for a layer.
+                if not layer:
+                    return self._error(
+                        "image needs a ?layer=<id>, or ?layer=document for the "
+                        "whole flattened document"
+                    )
                 png = self.main.call(lambda: ops.export_image(layer), timeout=60)
                 self._send(200, png, "image/png")
 

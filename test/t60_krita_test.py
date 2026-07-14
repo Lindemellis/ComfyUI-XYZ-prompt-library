@@ -161,3 +161,27 @@ def test_enable_creates_the_file_when_it_does_not_exist(monkeypatch, tmp_path):
     monkeypatch.setattr(installer, "kritarc_path", lambda: path)
     assert installer._enable_in_kritarc() is True
     assert "[python]" in path.read_text(encoding="utf-8")
+
+
+# ------------------------------------------------------- error-message hygiene
+# The plugin echoes the layer id back in its errors. That id is caller-supplied,
+# so it must not go back unbounded or with control characters in it. `_short`
+# lives in the plugin (which imports krita/PyQt5 and cannot be imported here), so
+# this pins the CONTRACT the plugin's copy has to keep.
+
+
+def _short(text: str, limit: int = 40) -> str:
+    text = "".join(c if c.isprintable() else "?" for c in text)
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def test_a_long_layer_id_is_truncated_in_an_error():
+    assert len(_short("a" * 1000)) == 40
+
+
+def test_control_characters_never_reach_an_error_message():
+    assert _short("a\x00\x01b") == "a??b"
+
+
+def test_a_normal_id_is_untouched():
+    assert _short("9c742cc6") == "9c742cc6"

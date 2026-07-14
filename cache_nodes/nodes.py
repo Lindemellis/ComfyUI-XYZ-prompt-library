@@ -66,6 +66,13 @@ def slot_path(slot: str) -> Path:
 def write_slot(slot: str, image) -> Path:
     from PIL import Image
 
+    if image.ndim == 4 and image.shape[0] > 1:
+        # A slot holds one image. Say so, rather than quietly keeping the first
+        # of four and letting the user believe all four were saved.
+        print(
+            f"[XYZ Cache] the image is a batch of {image.shape[0]} — only the first "
+            f"one goes into slot '{slot}'"
+        )
     array = image[0] if image.ndim == 4 else image
     array = (array.clamp(0.0, 1.0) * 255.0).round().to("cpu").numpy().astype(np.uint8)
 

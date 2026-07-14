@@ -81,12 +81,19 @@ def _decode(png: bytes):
     return Image.open(io.BytesIO(png))
 
 
-def _encode(tensor) -> bytes:
-    """A ComfyUI IMAGE (1, H, W, 3|4) -> PNG bytes."""
+def _encode(tensor, what: str = "image") -> bytes:
+    """A ComfyUI IMAGE (B, H, W, 3|4) -> PNG bytes for the FIRST image."""
     from PIL import Image
 
     array = tensor
     if array.ndim == 4:
+        if array.shape[0] > 1:
+            # Dropping the rest silently would be the worst kind of bug: the run
+            # succeeds and only one of your four pictures made it.
+            print(
+                f"[XYZ Krita] the {what} is a batch of {array.shape[0]} — only the "
+                "first one is used"
+            )
         array = array[0]
     array = (array.clamp(0.0, 1.0) * 255.0).round().to("cpu").numpy().astype(np.uint8)
     mode = "RGBA" if array.shape[2] == 4 else "RGB"

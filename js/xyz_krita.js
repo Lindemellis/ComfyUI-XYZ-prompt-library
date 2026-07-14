@@ -41,9 +41,36 @@ async function loadLayers() {
   const response = await api.fetchApi('/xyz/krita/layers');
   const data = await response.json();
   if (!response.ok || !data.ok) {
-    throw new Error(data.error || `layer list failed (${response.status})`);
+    const error = new Error(data.error || `layer list failed (${response.status})`);
+    // 503 means we never reached Krita; anything else means Krita answered and
+    // said no ("no open document"). Telling the user Krita is not running when it
+    // is sends them off fixing the wrong thing.
+    error.unreachable = response.status === 503;
+    throw error;
   }
   return data;
+}
+
+const BUTTON_LIMIT = 34;
+
+function failureLabel(error) {
+  if (error.unreachable) return 'Krita not running — see console';
+  const message = String(error.message || 'failed');
+  return message.length <= BUTTON_LIMIT
+    ? message
+    : `${message.slice(0, BUTTON_LIMIT - 1)}…`;
+}
+
+// The layer list comes from Krita, so it is NOT serialised with the graph — only
+// the chosen value is. After a reload the combo would hold a valid value but
+// offer nothing but the placeholder, and opening the dropdown would throw the
+// user's choice away. Keep the current value in the list, always.
+function keepCurrentValueListed(widget) {
+  if (!widget) return;
+  const values = widget.options.values;
+  if (widget.value && widget.value !== PLACEHOLDER && !values.includes(widget.value)) {
+    values.unshift(widget.value);
+  }
 }
 
 function applyLayers(node, data) {
@@ -57,12 +84,13 @@ function applyLayers(node, data) {
         ? data.paint_entries // a colour split only makes sense on a painted layer
         : data.mask_entries;
 
-  widget.options.values = entries.length ? entries : [PLACEHOLDER];
-  // Keep the current pick if that layer still exists — a refresh should not
-  // silently repoint the node at a different layer.
-  if (!widget.options.values.includes(widget.value)) {
-    widget.value = widget.options.values[0];
-  }
+  widget.options.values = entries.length ? [...entries] : [PLACEHOLDER];
+
+  // If the chosen layer is gone from Krita, KEEP the dead value rather than
+  // snapping to whatever is first. Silently generating against a different layer
+  // is far worse than failing: the run will now stop with "layer ... is not in
+  // this document", which says exactly what happened.
+  keepCurrentValueListed(widget);
   node.setDirtyCanvas(true, true);
 }
 
@@ -100,7 +128,7 @@ app.registerExtension({
         // Never alert() — it blocks ComfyUI's whole main thread. Report on the
         // button, where the user is already looking, and log the detail.
         console.error('[XYZ Krita]', err);
-        button.name = 'Krita unreachable — see console';
+        button.name = failureLabel(err);
         setTimeout(() => {
           button.name = original;
           node.setDirtyCanvas(true, true);
@@ -110,6 +138,15 @@ app.registerExtension({
     });
     button.computeSize = () => [node.size[0], ROW_H];
     button.computeLayoutSize = undefined;
+
+    // A graph load restores the widget's value after nodeCreated. Put it back in
+    // the dropdown, or the user's saved layer vanishes the moment they open it.
+    const onConfigureLayer = node.onConfigure;
+    node.onConfigure = function (info) {
+      const result = onConfigureLayer?.apply(this, arguments);
+      keepCurrentValueListed(this.widgets?.find((w) => w.name === 'layer'));
+      return result;
+    };
 
     if (node.comfyClass !== COLOR_NODE) return;
 
