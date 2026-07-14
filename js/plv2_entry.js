@@ -1118,10 +1118,15 @@ function _addAliasBtn() {
 // ─── Mode ─────────────────────────────────────────────────────────────────────
 
 function _setMode(mode) {
-  _api().updateNode(_node.id, { random_mode: mode }).then(() => { _node.random_mode = mode; _applyMode(mode); });
+  // UI uses 'off'; the DB CHECK constraint stores it as 'none'. Translate at the
+  // boundary, otherwise PATCHing random_mode:'off' fails the constraint and the
+  // mode silently sticks at its previous value.
+  const dbMode = mode === 'off' ? 'none' : mode;
+  _api().updateNode(_node.id, { random_mode: dbMode }).then(() => { _node.random_mode = dbMode; _applyMode(mode); });
 }
 
 function _applyMode(mode) {
+  if (mode === 'none') mode = 'off';   // normalize stored value → UI value
   for (const [m, btn] of Object.entries(_modeButtons)) {
     btn.style.background = m === mode ? '#7c3aed' : 'none';
     btn.style.color      = m === mode ? '#fff'    : '#a6adc8';
