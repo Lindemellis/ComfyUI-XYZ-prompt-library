@@ -21,7 +21,6 @@ const LAYER_NODES = new Set([IMAGE_NODE, MASK_NODE, COLOR_NODE]);
 const KRITA_NODES = new Set([...LAYER_NODES, SEND_NODE, OPEN_NODE]);
 
 const PLACEHOLDER = '(click Refresh layers)';
-const ROW_H = 30;
 
 // Fetch Color Masks emits `count` masks, so its output slots follow that widget.
 // Unlike the Mask Editor there is nothing to key a link to but its index — the
@@ -157,8 +156,6 @@ app.registerExtension({
       }
     });
     launch.__xyzLabel = 'Launch Krita';
-    launch.computeSize = () => [node.size[0], ROW_H];
-    launch.computeLayoutSize = undefined;
 
     if (!LAYER_NODES.has(node.comfyClass)) return;
 
@@ -192,9 +189,6 @@ app.registerExtension({
       }
       node.setDirtyCanvas(true, true);
     });
-    button.computeSize = () => [node.size[0], ROW_H];
-    button.computeLayoutSize = undefined;
-
     // A graph load restores the widget's value after nodeCreated. Put it back in
     // the dropdown, or the user's saved layer vanishes the moment they open it.
     const onConfigureLayer = node.onConfigure;

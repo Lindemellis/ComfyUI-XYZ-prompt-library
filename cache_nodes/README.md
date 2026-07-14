@@ -33,8 +33,8 @@ Run it. Then, in a *later* run — a different graph, a different day:
 XYZ Cache Slot Read  (slot: "base") → upscale → …
 ```
 
-**Read** shows a **preview** of the slot it is pointing at, and **Browse slots** opens a window with
-every slot that holds an image. Click one and the node switches to it.
+**Read** shows a **live preview** of the slot it is pointing at, and **Browse slots** opens a window
+with every slot that holds an image. Click one and the node switches to it.
 
 Both dropdowns are **live**, and so is the preview. They re-read the folder rather than trusting the
 list ComfyUI built at startup, so a slot you create — or write to — during this session shows up

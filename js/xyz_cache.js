@@ -12,8 +12,12 @@ const WRITE_NODE = 'XYZ Cache Slot Write';
 const CACHE_NODES = new Set([READ_NODE, WRITE_NODE]);
 
 const NO_SLOTS = '(no slots yet — write one first)';
-const ROW_H = 30;
+
+// The picture, and the gap under it. ComfyUI lays the DOM element out a few pixels
+// taller than the height it was given, so the next widget needs breathing room or
+// the image sits on top of the button.
 const PREVIEW_H = 180;
+const PREVIEW_GAP = 10;
 
 // The image at a slot is REPLACED in place, so its URL never changes. Without the
 // mtime the browser would keep showing the picture from three runs ago.
@@ -225,7 +229,8 @@ app.registerExtension({
         setValue: () => {},
         serialize: false,
       });
-      preview.computeSize = () => [node.size[0], PREVIEW_H];
+      // Reserve MORE than the element takes, or the button below is overlapped.
+      preview.computeSize = () => [node.size[0], PREVIEW_H + PREVIEW_GAP];
       preview.computeLayoutSize = undefined;
 
       node.__xyzUpdatePreview = () => {
@@ -260,13 +265,8 @@ app.registerExtension({
         };
       }
 
-      const browse = node.addWidget('button', 'Browse slots', null, () => openBrowser(node));
-      browse.computeSize = () => [node.size[0], ROW_H];
-      browse.computeLayoutSize = undefined;
-
-      const refresh = node.addWidget('button', 'Refresh slots', null, () => refreshAll());
-      refresh.computeSize = () => [node.size[0], ROW_H];
-      refresh.computeLayoutSize = undefined;
+      // No Refresh button: the folder is polled, so there is nothing to refresh.
+      node.addWidget('button', 'Browse slots', null, () => openBrowser(node));
 
       if (node.size[0] < 300) node.size[0] = 300;
     }
@@ -302,8 +302,6 @@ app.registerExtension({
           node.setDirtyCanvas(true, true);
         }
       });
-      create.computeSize = () => [node.size[0], ROW_H];
-      create.computeLayoutSize = undefined;
     }
 
     // Read the folder now rather than trusting the startup list.
