@@ -118,8 +118,20 @@ def expand(group_id: int, preset_id: int | None = None, body: dict | None = None
 
     inner = indent + INDENT
     chunks: list[str] = []
+    run: list[str] = []  # consecutive plain items, waiting to share a line
+
+    def flush() -> None:
+        # A run of prompts goes on ONE line: a 35-item group with one item per line is
+        # a page of scrolling for something you read as a single list. A nested block
+        # breaks the run, and the items after it start a fresh one — so the text still
+        # shows, at a glance, which prompts sit either side of a group.
+        if run:
+            chunks.append(inner + ", ".join(run) + ",")
+            run.clear()
+
     for item in items:
         if item["kind"] == "ref" and item["ref_group_id"]:
+            flush()
             # Spec §3.6: a nested library group is expanded inline but keeps its own
             # header, so the compiler and the detail page still know whose it is.
             child = children_spec.get(str(item["id"])) or {}
@@ -134,7 +146,8 @@ def expand(group_id: int, preset_id: int | None = None, body: dict | None = None
                 )
             )
         else:
-            chunks.append(inner + _item_text(item, weights.get(str(item["id"]))) + ",")
+            run.append(_item_text(item, weights.get(str(item["id"]))))
+    flush()
 
     tail = render_settings(settings)
     if not chunks:

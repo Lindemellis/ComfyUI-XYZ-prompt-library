@@ -73,6 +73,7 @@ def build_v2(path: Path) -> None:
     prompt(9, 7, "best quality", order=0)             # the template's prompt
     prompt(10, 8, "miyu", order=0)
     prompt(11, 8, "[nowhere.missing]", order=1)       # unresolvable
+    prompt(14, 8, "pussy focus,\n\n1girl", order=2)   # ONE v2 row holding several tags
 
     conn.execute("INSERT INTO triggers(node_id, trigger_text) VALUES (2, 'anima_trigger')")
     conn.commit()
@@ -316,3 +317,31 @@ def test_expanding_WITHOUT_the_preset_shows_everything(migrated):
     text = library.expand(int(path_of("anima")["id"]))
     assert "switched off" in text
     assert "score_8_up" in text
+
+
+# --- one v2 row can hold several tags ---------------------------------------
+# In v3 a COMMA IS THE ITEM SEPARATOR. A v2 row holding `a,\n\nb` stored as one v3 item
+# breaks the round-trip: expanding the group and syncing the text back splits it in two
+# and ADDS them — and does it again on every blur.
+
+
+def test_a_row_holding_several_tags_becomes_several_items(migrated):
+    assert "pussy focus" in texts("miyu")
+    assert "1girl" in texts("miyu")
+    assert not any("\n" in t for t in texts("miyu"))
+    assert migrated.split == 1
+
+
+def test_a_choice_group_is_not_split_on_its_inner_commas(migrated):
+    # `{a|b}` migrates to `{a, b}.set{random_select: 1}` — those commas are the group's,
+    # not item separators, so a naive content.split(",") would destroy it.
+    assert any(t.startswith("{smile, grin, laugh}") for t in texts("illya"))
+
+
+def test_expanding_a_migrated_group_and_syncing_it_back_adds_nothing(migrated):
+    # The round-trip is the invariant: the library's own text must not grow the library.
+    for group in repo.list_groups():
+        report = library.sync_text(library.expand(int(group["id"])))
+        for block in report["blocks"]:
+            assert block["added"] == 0, f"{block['path']} grew by {block['added']}"
+            assert block["refs_added"] == 0

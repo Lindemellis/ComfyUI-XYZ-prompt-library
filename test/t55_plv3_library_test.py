@@ -60,10 +60,11 @@ def test_expand_renders_a_block_with_the_identity_header(lib):
     gid = make_group("illya", folder=folder, items=["illya", "blonde hair"])
     repo.write(repo.UpdateGroupOp(group_id=gid, settings={"weight": 1.1}))
 
+    # Consecutive items share a line: one item per line turns a 35-item group into a
+    # page of scrolling.
     assert library.expand(gid) == (
         "[characters.illya]: {\n"
-        "    illya,\n"
-        "    blonde hair,\n"
+        "    illya, blonde hair,\n"
         "}.set{weight: 1.1}"
     )
 
@@ -85,8 +86,7 @@ def test_a_ref_expands_inline_and_keeps_its_own_header(lib):
         "[duo]: {\n"
         "    2girls,\n"
         "    [illya]: {\n"
-        "        illya,\n"
-        "        blonde hair,\n"
+        "        illya, blonde hair,\n"
         "    }\n"
         "}"
     )
@@ -201,7 +201,7 @@ def test_a_preset_is_a_whitelist_and_an_order(lib):
     assert body["items"] == [rows["c"], rows["a"]]  # order preserved, b left out
 
     pid = repo.write(repo.SavePresetOp(group_id=gid, name="short", body=body))
-    assert library.expand(gid, preset_id=pid) == "[g]: {\n    c,\n    a,\n}"
+    assert library.expand(gid, preset_id=pid) == "[g]: {\n    c, a,\n}"
 
 
 def test_a_preset_does_not_pick_up_items_added_to_the_group_later(lib):
@@ -305,3 +305,45 @@ def test_expansion_has_its_own_guard_and_cannot_hang(lib, monkeypatch):
     with pytest.raises(PLv3Error) as exc:
         library.expand(a)
     assert exc.value.diag.code == E02
+
+
+# --- line layout ------------------------------------------------------------
+# A run of prompts shares a line; a nested block breaks the run, and what follows it
+# starts a fresh one. So the text still shows at a glance which prompts sit either
+# side of a group, without a 35-item group becoming a page of scrolling.
+
+
+def test_a_nested_block_breaks_the_run_and_what_follows_starts_a_new_line(lib):
+    inner = make_group("acc", items=["hair ribbon"])
+    outer = make_group("illya", items=["illya", "blonde hair"])
+    repo.write(repo.AddItemOp(group_id=outer, kind="ref", ref_group_id=inner))
+    repo.write(repo.AddItemOp(group_id=outer, text="blue eyes"))
+    repo.write(repo.AddItemOp(group_id=outer, text="white dress"))
+
+    assert library.expand(outer) == (
+        "[illya]: {\n"
+        "    illya, blonde hair,\n"
+        "    [acc]: {\n"
+        "        hair ribbon,\n"
+        "    }\n"
+        "    blue eyes, white dress,\n"
+        "}"
+    )
+
+
+def test_the_one_line_layout_round_trips(lib):
+    # The layout must not cost the library its text->library path: parse the expansion
+    # back and every item has to be found again, or blur-sync would re-add them all.
+    gid = make_group("g", items=["a", "b", "c"])
+    src = library.expand(gid)
+    block = library.find_blocks(src)[0]
+
+    body = library.build_preset_body(src, block)
+    rows = {i["text"]: int(i["id"]) for i in repo.list_items(gid)}
+    assert body["items"] == [rows["a"], rows["b"], rows["c"]]
+
+
+def test_blur_sync_finds_nothing_new_in_its_own_expansion(lib):
+    gid = make_group("g", items=["a", "b", "c"])
+    report = library.sync_text(library.expand(gid))
+    assert all(b["added"] == 0 for b in report["blocks"])

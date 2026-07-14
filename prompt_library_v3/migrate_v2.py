@@ -8,7 +8,8 @@ What maps to what:
     ------------------------    ----------------------------------------------
     folder node (has_prompts=0) folder
     entry node  (has_prompts=1) library group
-    entry's prompts             the group's items
+    entry's prompts             the group's items — a row holding several tags is
+                                SPLIT, because a comma separates items in v3
     sub-entry                   true subgroup (owned by its parent group)
     [ref] / [this.x]            a ref item, rewritten to the full path
     _template                   an ordinary group; the entries that inherited it
@@ -40,6 +41,7 @@ from pathlib import Path
 
 from . import repo
 from .db import connect_write, migrate as migrate_schema
+from .parser import parse
 
 # `{a|b|c}` — PLv2's choice pattern.
 _CHOICE = re.compile(r"\{([^{}]*\|[^{}]*)\}")
@@ -61,6 +63,7 @@ class Report:
     choices: int = 0
     presets: int = 0
     disabled: int = 0
+    split: int = 0
     unresolved_refs: list[str] = field(default_factory=list)
     duplicates: list[str] = field(default_factory=list)
 
@@ -74,6 +77,7 @@ class Report:
             "choices": self.choices,
             "presets": self.presets,
             "disabled": self.disabled,
+            "split": self.split,
             "unresolved_refs": self.unresolved_refs,
             "duplicates": self.duplicates,
         }
@@ -117,6 +121,27 @@ def rewrite_choices(content: str, report: Report) -> str:
         return "{" + ", ".join(options) + "}.set{random_select: 1}"
 
     return _CHOICE.sub(sub, content)
+
+
+def split_items(content: str) -> list[str]:
+    """One v2 prompt -> one or more v3 items.
+
+    A v2 prompt is free text and may hold several tags: `pussy focus,\\n\\n1girl` is one
+    row there. In v3 a COMMA IS THE ITEM SEPARATOR, so storing that as a single item
+    breaks the round-trip — expanding the group and syncing the text back splits it into
+    two and adds them, and it does so again on every blur.
+
+    Splitting is done by v3's own parser rather than `content.split(",")`, because a
+    comma also lives inside things that must stay whole: `{a, b}.set{random_select: 1}`
+    (what `{a|b}` migrates to), `(tag:1.2)`, `<lora:x:0.6>`.
+    """
+    root, _ = parse(content, recover=True)
+    out = []
+    for child in root.children:
+        text = content[child.pos : child.end].strip().rstrip(",").strip()
+        if text:
+            out.append(text)
+    return out or ([content.strip()] if content.strip() else [])
 
 
 def rewrite_format(fmt: str) -> str:
@@ -338,21 +363,31 @@ def migrate(v2_path: Path, v3_path: Path, dry_run: bool = False) -> Report:
                         report.refs += 1
                     continue
 
-            text = rewrite_choices(content, report)
-            if text in seen:
-                report.duplicates.append(f"{node['full_path']}: {text}")
-                continue
-            seen.add(text)
-
+            rewritten = rewrite_choices(content, report)
             weight = prompt["weight"]
-            item_id = repo.write(repo.AddItemOp(
-                group_id=gid,
-                kind="lora" if text.startswith("<lora:") else "prompt",
-                text=text,
-                weight=float(weight) if weight not in (None, 1.0) else None,
-            ))
-            record(gid, item_id, enabled)
-            report.items += 1
+
+            # One v2 row can hold several tags; in v3 a comma separates items.
+            parts = split_items(rewritten)
+            if len(parts) > 1:
+                report.split += 1
+
+            for text in parts:
+                if text in seen:
+                    report.duplicates.append(f"{node['full_path']}: {text}")
+                    continue
+                seen.add(text)
+
+                item_id = repo.write(repo.AddItemOp(
+                    group_id=gid,
+                    kind="lora" if text.startswith("<lora:") else "prompt",
+                    text=text,
+                    # The v2 row's weight applied to the whole row, so each tag it held
+                    # inherits it.
+                    weight=float(weight) if weight not in (None, 1.0) else None,
+                ))
+                # ...and so does its on/off state: v2 had one switch for the row.
+                record(gid, item_id, enabled)
+                report.items += 1
 
     # `_template` inheritance becomes an explicit ref (spec §9, decision 28).
     for nid, gid in group_ids.items():

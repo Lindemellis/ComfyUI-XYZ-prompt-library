@@ -172,7 +172,9 @@ def test_a_child_can_point_at_the_nested_groups_preset_instead_of_a_snapshot(nes
     the nested group's preset, so editing that preset changes every document that
     referenced it this way."""
     illya_text = library.expand(nest["illya"])
-    minimal = "\n".join(l for l in illya_text.split("\n") if "red eyes" not in l)
+    # Drop the ITEM, not the line: consecutive items now share one, so dropping the
+    # whole line would take `blonde hair` with it.
+    minimal = illya_text.replace("red eyes, ", "").replace("red eyes,", "")
     pid, _ = save_preset(nest["illya"], "minimal", minimal)
 
     ref_item = next(i for i in repo.list_items(nest["scene"])
@@ -248,9 +250,11 @@ def test_settings_on_a_nested_block_survive_the_preset(nest):
 
 def test_blur_sync_appends_to_the_right_group_at_every_depth(nest):
     text = library.expand(nest["scene"])
-    text = text.replace("    outdoors,", "    outdoors,\n    night,")
-    text = text.replace("        blonde hair,", "        blonde hair,\n        twintails,")
-    text = text.replace("            hair ribbon,", "            hair ribbon,\n            bow,")
+    # Type a new item into the run at each depth. Consecutive items share a line now,
+    # so append to the run rather than inserting a line after a lone item.
+    text = text.replace("outdoors,", "outdoors, night,")
+    text = text.replace("blonde hair,", "blonde hair, twintails,")
+    text = text.replace("hair ribbon,", "hair ribbon, bow,")
 
     report = library.sync_text(text)
     by_path = {b["path"]: b for b in report["blocks"]}
@@ -511,7 +515,9 @@ def test_the_same_prompt_in_a_nested_block_is_not_a_duplicate(nest):
 def linked_preset(nest):
     """`illya` gets a preset `minimal` (no red eyes); `scene` links its illya block."""
     illya_text = library.expand(nest["illya"])
-    minimal = "\n".join(l for l in illya_text.split("\n") if "red eyes" not in l)
+    # Drop the ITEM, not the line: consecutive items now share one, so dropping the
+    # whole line would take `blonde hair` with it.
+    minimal = illya_text.replace("red eyes, ", "").replace("red eyes,", "")
     pid, _ = save_preset(nest["illya"], "minimal", minimal)
     return pid
 
