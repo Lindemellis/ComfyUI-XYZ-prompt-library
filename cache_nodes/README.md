@@ -23,6 +23,8 @@ directory.
 
 ## Using it
 
+**Write** — pick a slot from the dropdown, or press **Create slot** to make a new one and name it.
+
 ```
 … → XYZ Cache Slot Write   (slot: "base")
 ```
@@ -31,9 +33,14 @@ Run it. Then, in a *later* run — a different graph, a different day:
 XYZ Cache Slot Read  (slot: "base") → upscale → …
 ```
 
-The Read node's dropdown lists the slots that exist. A slot you write during the *current* ComfyUI
-session will not be in that list until you reload the page — but you can still type it, and it will
-work: the node does not reject a name it has not heard of.
+**Read** shows a **preview** of the slot it is pointing at, and **Browse slots** opens a window with
+every slot that holds an image. Click one and the node switches to it.
+
+Both dropdowns are **live**: they re-read the folder rather than trusting the list ComfyUI built at
+startup, so a slot you create — or write to — during this session shows up straight away, with no
+page reload. When a Write finishes, the Read node next to it refreshes on its own.
+
+Read only offers slots that hold an image; Write also offers the empty ones you have just created.
 
 Reading re-checks the file on every run, so editing a slot's image outside ComfyUI takes effect
 immediately rather than being served from the execution cache.

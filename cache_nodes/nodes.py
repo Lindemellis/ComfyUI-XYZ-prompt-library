@@ -38,14 +38,52 @@ def cache_dir() -> Path:
 
 
 def list_slots() -> list[str]:
+    """Slots that actually hold an image — what Read can read."""
+    return [s["name"] for s in describe_slots() if s["has_image"]]
+
+
+def list_slot_names() -> list[str]:
+    """Every slot, including ones just created and still empty — what Write can write."""
+    return [s["name"] for s in describe_slots()]
+
+
+def describe_slots() -> list[dict]:
     root = cache_dir()
     if not root.is_dir():
         return []
-    return sorted(
-        entry.name
-        for entry in root.iterdir()
-        if entry.is_dir() and (entry / IMAGE_NAME).is_file()
-    )
+
+    out = []
+    for entry in sorted(root.iterdir(), key=lambda p: p.name.lower()):
+        if not entry.is_dir():
+            continue
+        image = entry / IMAGE_NAME
+        record = {"name": entry.name, "has_image": image.is_file()}
+        if record["has_image"]:
+            stat = image.stat()
+            record["mtime"] = int(stat.st_mtime)
+            record["bytes"] = stat.st_size
+            try:
+                from PIL import Image
+
+                with Image.open(image) as im:
+                    record["width"], record["height"] = im.size
+            except Exception:  # noqa: BLE001 - a corrupt slot must not kill the list
+                record["width"] = record["height"] = 0
+        out.append(record)
+    return out
+
+
+def create_slot(name: str) -> str:
+    directory = slot_path(name)
+    directory.mkdir(parents=True, exist_ok=True)
+    return directory.name
+
+
+def delete_slot(name: str) -> str:
+    directory = slot_path(name)
+    if directory.is_dir():
+        shutil.rmtree(directory)
+    return directory.name
 
 
 def slot_path(slot: str) -> Path:
@@ -119,16 +157,30 @@ class XYZCacheSlotWrite:
 
     @classmethod
     def INPUT_TYPES(cls):
+        slots = list_slot_names()
         return {
             "required": {
                 "image": ("IMAGE",),
-                "slot": ("STRING", {"default": "base"}),
+                "slot": (
+                    slots or [NO_SLOTS],
+                    {"tooltip": "Pick a slot, or press 'Create slot' to make a new one."},
+                ),
             },
         }
 
-    def execute(self, image=None, slot="base", **_):
+    @classmethod
+    def VALIDATE_INPUTS(cls, slot=None, **_):
+        # A slot created during THIS session is not in the list INPUT_TYPES built
+        # at startup; don't let ComfyUI reject it.
+        return True
+
+    def execute(self, image=None, slot=NO_SLOTS, **_):
         if image is None:
             raise RuntimeError("nothing connected to `image`")
+        if slot == NO_SLOTS:
+            raise RuntimeError(
+                "No cache slot chosen. Press 'Create slot' on the node to make one."
+            )
         target = write_slot(slot, image)
         print(f"[XYZ Cache] wrote slot '{slot}' -> {target}")
         return {}

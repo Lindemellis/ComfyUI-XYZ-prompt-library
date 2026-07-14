@@ -163,3 +163,58 @@ def test_list_slots_only_reports_slots_that_hold_an_image(monkeypatch, tmp_path)
 def test_list_slots_is_empty_before_anything_is_written(monkeypatch, tmp_path):
     monkeypatch.setattr(cache, "cache_dir", lambda: tmp_path / "nothing-here")
     assert cache.list_slots() == []
+
+
+# --------------------------------------------------- slots: empty vs with image
+
+
+def test_write_sees_empty_slots_but_read_does_not(monkeypatch, tmp_path):
+    # Create makes a slot before anything is in it: Write must be able to target
+    # it, and Read must not offer a slot it cannot read.
+    monkeypatch.setattr(cache, "cache_dir", lambda: tmp_path)
+    (tmp_path / "full").mkdir()
+    (tmp_path / "full" / cache.IMAGE_NAME).write_bytes(b"x")
+    (tmp_path / "fresh").mkdir()
+
+    assert cache.list_slot_names() == ["fresh", "full"]
+    assert cache.list_slots() == ["full"]
+
+
+def test_describe_slots_reports_what_the_browser_needs(monkeypatch, tmp_path):
+    from PIL import Image
+
+    monkeypatch.setattr(cache, "cache_dir", lambda: tmp_path)
+    (tmp_path / "a").mkdir()
+    Image.new("RGB", (7, 11)).save(tmp_path / "a" / cache.IMAGE_NAME)
+    (tmp_path / "b").mkdir()
+
+    described = {s["name"]: s for s in cache.describe_slots()}
+    assert described["a"]["has_image"] and described["a"]["width"] == 7
+    assert described["a"]["height"] == 11 and described["a"]["mtime"] > 0
+    assert described["b"]["has_image"] is False
+
+
+def test_a_corrupt_image_does_not_kill_the_slot_list(monkeypatch, tmp_path):
+    monkeypatch.setattr(cache, "cache_dir", lambda: tmp_path)
+    (tmp_path / "broken").mkdir()
+    (tmp_path / "broken" / cache.IMAGE_NAME).write_bytes(b"not a png")
+
+    described = cache.describe_slots()
+    assert described[0]["name"] == "broken"
+    assert described[0]["width"] == 0  # unreadable, but the list still comes back
+
+
+def test_create_and_delete_a_slot(monkeypatch, tmp_path):
+    monkeypatch.setattr(cache, "cache_dir", lambda: tmp_path)
+    cache.create_slot("upscaled")
+    assert (tmp_path / "upscaled").is_dir()
+    assert cache.list_slot_names() == ["upscaled"]
+
+    cache.delete_slot("upscaled")
+    assert not (tmp_path / "upscaled").exists()
+
+
+def test_create_refuses_a_name_that_escapes(monkeypatch, tmp_path):
+    monkeypatch.setattr(cache, "cache_dir", lambda: tmp_path)
+    with pytest.raises(ValueError):
+        cache.create_slot("../escape")

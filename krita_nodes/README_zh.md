@@ -131,6 +131,24 @@ curl -X POST localhost:8188/xyz/krita/executable -d '{"path": "C:/Program Files/
 `launch_krita`(默认开)会在 Krita 没跑时先把它启动起来。所以「ComfyUI 冷启动 + Krita 没开 +
 跑一次」就能直接得到一张打开的画布。
 
+## fallback 输入
+
+`Fetch Image`、`Fetch Mask`、`Fetch Color Masks` 各有一个可选的 **`fallback`**。Krita 没开、没有打开
+文档、或者图层已经不在了 —— 这些情况下节点会改用 fallback,而不是中断整次运行。Fetch Color Masks 收的是
+`IMAGE`,会用**完全相同**的颜色分割逻辑去拆它,所以各个槽位的含义不变。
+
+**不是真需要就别接。** fallback 是「静默出错」最好的藏身处 —— Krita 关着,你没注意,整批图就对着替身
+渲染出来了。所以它**只有在你真的接了东西时才启用**,而且一旦启用就会在控制台**大声喊**:
+
+```
+[XYZ Krita] !! could not reach the Krita plugin at http://127.0.0.1:8765 ...
+[XYZ Krita] !! FALLING BACK to the connected image — this run is NOT using Krita
+```
+
+不接的话,这些情况仍然是**报错** —— 通常这才是你想要的。
+
+只有 Krita 自己的失败会走 fallback。节点里的 bug 照样会暴露出来。
+
 ## XYZ Krita Open File
 
 **按原样打开**硬盘上的文件,而不是把像素推给 Krita。

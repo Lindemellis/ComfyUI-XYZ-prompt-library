@@ -11,4 +11,13 @@ from __future__ import annotations
 
 from .nodes import XYZCacheSlotRead, XYZCacheSlotWrite
 
-__all__ = ["XYZCacheSlotWrite", "XYZCacheSlotRead"]
+__all__ = ["XYZCacheSlotWrite", "XYZCacheSlotRead", "setup"]
+
+
+def setup() -> None:
+    from server import PromptServer
+
+    from .routes import register
+
+    register(PromptServer.instance)
+    print("[XYZ Cache] routes registered")

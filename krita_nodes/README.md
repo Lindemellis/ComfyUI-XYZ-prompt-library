@@ -146,6 +146,26 @@ Pushes an `IMAGE` into Krita. Two modes:
 `launch_krita` (on by default) starts Krita first if it is not running, so a cold ComfyUI + a
 closed Krita + one run is all it takes to get a canvas open.
 
+## The fallback input
+
+`Fetch Image`, `Fetch Mask` and `Fetch Color Masks` each take an optional **`fallback`**. If Krita
+is closed, has nothing open, or no longer has the layer, the node uses the fallback instead of
+stopping the run. Fetch Color Masks takes an `IMAGE` and splits it by colour exactly as it would a
+Krita layer, so its slots keep meaning the same thing.
+
+**Leave it unconnected unless you mean it.** A fallback is the perfect hiding place for a silent
+wrong answer — Krita is closed, you don't notice, and the whole batch renders against the stand-in.
+So it only ever engages when something *is* connected, and when it does it shouts on the console:
+
+```
+[XYZ Krita] !! could not reach the Krita plugin at http://127.0.0.1:8765 ...
+[XYZ Krita] !! FALLING BACK to the connected image — this run is NOT using Krita
+```
+
+With nothing connected, those situations stay errors, which is usually what you want.
+
+Only Krita's own failures fall back. A bug in the node still surfaces.
+
 ## XYZ Krita Open File
 
 Opens a file **as itself**, rather than pushing pixels at Krita.

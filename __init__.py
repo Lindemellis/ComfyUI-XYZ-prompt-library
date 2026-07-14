@@ -299,6 +299,12 @@ except Exception as _krita_err:
     print(f"[XYZ Krita] setup failed, continuing without the Krita routes: {_krita_err!r}")
 
 try:
+    from .cache_nodes import setup as _cache_setup
+    _cache_setup()
+except Exception as _cache_err:
+    print(f"[XYZ Cache] setup failed, continuing without the cache routes: {_cache_err!r}")
+
+try:
     from .tagdb import setup as _tagdb_setup
     _tagdb_setup(PromptServer.instance)
 except Exception as _tagdb_err:

@@ -185,6 +185,26 @@ def _resize(image, mode: str, size: int, round_to: int, interpolation: str):
 # ------------------------------------------------------------------ the nodes
 
 
+#: The errors a fallback is allowed to cover: Krita is closed, has nothing open,
+#: or no longer has the layer. NOT a bug in our code — that must still surface.
+FALLBACK_ERRORS = (client.KritaUnreachable, client.KritaError)
+
+
+def use_fallback(what: str, fallback, error: Exception):
+    """Decide whether to fall back, and say so loudly if we do.
+
+    A fallback is the perfect hiding place for a silent wrong answer: Krita is
+    closed, you don't notice, and the whole batch renders against the stand-in.
+    So it only ever engages when something IS connected to the fallback input —
+    that connection is the user saying "yes, I mean it" — and it always shouts.
+    """
+    if fallback is None:
+        raise error
+    print(f"[XYZ Krita] !! {error}")
+    print(f"[XYZ Krita] !! FALLING BACK to the connected {what} — this run is NOT using Krita")
+    return fallback
+
+
 class _KritaBase:
     CATEGORY = "XYZNodes/Krita"
     FUNCTION = "execute"
@@ -249,6 +269,16 @@ class XYZKritaFetchImage(_KritaBase):
                     {"default": 60.0, "min": 1.0, "max": 600.0, "step": 1.0},
                 ),
             },
+            "optional": {
+                "fallback": (
+                    "IMAGE",
+                    {
+                        "tooltip": "Used INSTEAD of Krita when Krita is closed, has no "
+                        "document, or no longer has the layer. Leave it unconnected and "
+                        "those become errors, which is usually what you want."
+                    },
+                ),
+            },
         }
 
     def execute(
@@ -259,18 +289,38 @@ class XYZKritaFetchImage(_KritaBase):
         round_to=8,
         interpolation="lanczos",
         max_wait=60.0,
+        fallback=None,
         **_,
     ):
         import torch
 
         key = layer_key(layer)
         if not key or layer == LAYER_PLACEHOLDER:
-            raise RuntimeError(
+            error = RuntimeError(
                 "No Krita layer chosen. Click 'Refresh layers' on the node, then "
                 "pick one."
             )
+            if fallback is None:
+                raise error
+            return self._from_tensor(
+                use_fallback("image", fallback, error),
+                resize_mode,
+                size,
+                round_to,
+                interpolation,
+            )
 
-        png = client.fetch_image(key, timeout=max_wait)
+        try:
+            png = client.fetch_image(key, timeout=max_wait)
+        except FALLBACK_ERRORS as exc:
+            return self._from_tensor(
+                use_fallback("image", fallback, exc),
+                resize_mode,
+                size,
+                round_to,
+                interpolation,
+            )
+
         image = _decode(png)
         image = _resize(image, resize_mode, size, round_to, interpolation)
 
@@ -290,6 +340,22 @@ class XYZKritaFetchImage(_KritaBase):
         width, height = image.size
         print(f"[XYZ Krita] fetched image '{layer}' -> {width}x{height}")
         return (tensor, width, height)
+
+    def _from_tensor(self, tensor, resize_mode, size, round_to, interpolation):
+        """The fallback goes through the SAME resize, so downstream sizes agree
+        whether the picture came from Krita or from the stand-in."""
+        import torch
+        from PIL import Image as PILImage
+
+        array = tensor[0] if tensor.ndim == 4 else tensor
+        array = (array.clamp(0, 1) * 255).round().to("cpu").numpy().astype(np.uint8)
+        image = PILImage.fromarray(array[:, :, :3], "RGB")
+        image = _resize(image, resize_mode, size, round_to, interpolation)
+
+        out = np.asarray(image, dtype=np.float32) / 255.0
+        width, height = image.size
+        print(f"[XYZ Krita] fallback image -> {width}x{height}")
+        return (torch.from_numpy(out).unsqueeze(0), width, height)
 
 
 class XYZKritaFetchMask(_KritaBase):
@@ -325,21 +391,50 @@ class XYZKritaFetchMask(_KritaBase):
                         "connect the Fetch Image output when inpainting."
                     },
                 ),
+                "fallback": (
+                    "MASK",
+                    {
+                        "tooltip": "Used INSTEAD of Krita when Krita is closed, has no "
+                        "document, or no longer has the layer. Leave it unconnected and "
+                        "those become errors, which is usually what you want."
+                    },
+                ),
             },
         }
 
-    def execute(self, layer=LAYER_PLACEHOLDER, max_wait=60.0, reference=None, **_):
+    def execute(
+        self,
+        layer=LAYER_PLACEHOLDER,
+        max_wait=60.0,
+        reference=None,
+        fallback=None,
+        **_,
+    ):
         import torch
+        from PIL import Image as PILImage
 
         key = layer_key(layer)
-        if not key or layer == LAYER_PLACEHOLDER:
-            raise RuntimeError(
+        missing = (
+            RuntimeError(
                 "No Krita layer chosen. Click 'Refresh layers' on the node, then "
                 "pick one."
             )
+            if (not key or layer == LAYER_PLACEHOLDER)
+            else None
+        )
 
-        png = client.fetch_mask(key, timeout=max_wait)
-        image = _decode(png).convert("L")
+        try:
+            if missing is not None:
+                raise missing
+            png = client.fetch_mask(key, timeout=max_wait)
+            image = _decode(png).convert("L")
+            source = f"'{layer}'"
+        except (RuntimeError, *FALLBACK_ERRORS) as exc:
+            mask = use_fallback("mask", fallback, exc)
+            array = mask[0] if mask.ndim == 3 else mask
+            array = (array.clamp(0, 1) * 255).round().to("cpu").numpy().astype(np.uint8)
+            image = PILImage.fromarray(array, "L")
+            source = "the FALLBACK (not Krita)"
 
         if reference is not None:
             # Regional conditioning rescales a MASK for you; inpainting does not —
@@ -350,7 +445,7 @@ class XYZKritaFetchMask(_KritaBase):
 
         array = np.asarray(image, dtype=np.float32) / 255.0
         tensor = torch.from_numpy(array).unsqueeze(0)  # (1, H, W)
-        print(f"[XYZ Krita] fetched mask '{layer}' -> {image.size[0]}x{image.size[1]}")
+        print(f"[XYZ Krita] mask from {source} -> {image.size[0]}x{image.size[1]}")
         return (tensor,)
 
 
@@ -406,6 +501,14 @@ class XYZKritaFetchColorMasks(_KritaBase):
                     "IMAGE",
                     {"tooltip": "Optional. Scales the masks to this image's size."},
                 ),
+                "fallback": (
+                    "IMAGE",
+                    {
+                        "tooltip": "A flat-colour image used INSTEAD of Krita when Krita "
+                        "is closed, has no document, or no longer has the layer. It is "
+                        "split into colours exactly the same way."
+                    },
+                ),
             },
         }
 
@@ -416,26 +519,44 @@ class XYZKritaFetchColorMasks(_KritaBase):
         tolerance=0.15,
         max_wait=60.0,
         reference=None,
+        fallback=None,
         **_,
     ):
         import torch
         from PIL import Image as PILImage
 
         key = layer_key(layer)
-        if not key or layer == LAYER_PLACEHOLDER:
-            raise RuntimeError(
+        missing = (
+            RuntimeError(
                 "No Krita layer chosen. Click 'Refresh layers' on the node, then "
                 "pick one."
             )
+            if (not key or layer == LAYER_PLACEHOLDER)
+            else None
+        )
 
-        image = _decode(client.fetch_image(key, timeout=max_wait)).convert("RGBA")
+        try:
+            if missing is not None:
+                raise missing
+            image = _decode(client.fetch_image(key, timeout=max_wait)).convert("RGBA")
+            source = f"'{layer}'"
+        except (RuntimeError, *FALLBACK_ERRORS) as exc:
+            # The stand-in is split by the SAME colour maths, so the slots keep
+            # meaning the same thing.
+            tensor = use_fallback("image", fallback, exc)
+            pixels = tensor[0] if tensor.ndim == 4 else tensor
+            pixels = (pixels.clamp(0, 1) * 255).round().to("cpu").numpy().astype(np.uint8)
+            mode = "RGBA" if pixels.shape[2] == 4 else "RGB"
+            image = PILImage.fromarray(pixels, mode).convert("RGBA")
+            source = "the FALLBACK (not Krita)"
+
         array = np.asarray(image, dtype=np.uint8)
         rgb, alpha = array[:, :, :3], array[:, :, 3]
 
         colors = pick_colors(rgb, alpha, count)
         masks = split_colors(rgb, alpha, colors, tolerance)
 
-        print(f"[XYZ Krita] colour masks from '{layer}':")
+        print(f"[XYZ Krita] colour masks from {source}:")
         for i, (color, mask) in enumerate(zip(colors, masks)):
             share = float(mask.mean()) * 100.0
             print(f"    mask_{i}  #{color[0]:02x}{color[1]:02x}{color[2]:02x}  {share:.1f}% of the canvas")
