@@ -15,7 +15,7 @@ Two things that are easy to get wrong and cost real time:
 """
 
 from krita import Krita
-from PyQt5.QtCore import QBuffer, QByteArray, QIODevice
+from PyQt5.QtCore import QBuffer, QByteArray, QIODevice, Qt
 from PyQt5.QtGui import QImage
 
 #: Node.type() values that can act as a picture.
@@ -265,3 +265,77 @@ def export_mask(layer_id: str) -> bytes:
             return _png(alpha)
 
         raise OpsError(f"'{node.name()}' is a {kind}, which cannot provide a mask")
+
+
+def add_layer(png: bytes, name: str = "ComfyUI", scale_document: bool = False) -> dict:
+    """Push an image back into Krita as a new paint layer, on top.
+
+    Sizes rarely match, so (design decisions 12 and 26):
+
+    * image smaller than the canvas -> scale the image up to the canvas. Krita is
+      the canvas of record; it does not shrink.
+    * image bigger, `scale_document` -> scale the whole DOCUMENT up to the image,
+      every layer with it, and drop the image in 1:1. The sketch layers go soft,
+      which is fine — by the time you are upscaling, the sketch is done with.
+    * image bigger, not `scale_document` -> scale the image down to the canvas.
+    """
+    with _Batchmode():
+        doc = _document()
+
+        image = QImage.fromData(QByteArray(png), "PNG")
+        if image.isNull():
+            raise OpsError("could not decode the image that ComfyUI sent")
+        image = image.convertToFormat(QImage.Format_ARGB32)
+
+        grew = False
+        if (image.width(), image.height()) != (doc.width(), doc.height()):
+            bigger = image.width() > doc.width() or image.height() > doc.height()
+            if bigger and scale_document:
+                # xRes()/yRes() come back as floats but scaleImage's signature is
+                # (int, int, int, int, str) — passing them straight through is a
+                # TypeError.
+                doc.scaleImage(
+                    image.width(),
+                    image.height(),
+                    int(round(doc.xRes())),
+                    int(round(doc.yRes())),
+                    "Bicubic",
+                )
+                doc.waitForDone()
+                grew = True
+            else:
+                # Exact canvas size, not KeepAspectRatio: setPixelData needs the
+                # bytes to fill the rectangle we hand it, exactly.
+                image = image.scaled(
+                    doc.width(),
+                    doc.height(),
+                    Qt.IgnoreAspectRatio,
+                    Qt.SmoothTransformation,
+                )
+
+        width, height = doc.width(), doc.height()
+
+        node = doc.createNode(name or "ComfyUI", "paintlayer")
+        # None => on top of the stack.
+        doc.rootNode().addChildNode(node, None)
+
+        # ARGB32's buffer is BGRA on a little-endian box, which is the byte order
+        # setPixelData wants for an 8-bit RGBA layer — the same identity we rely
+        # on when reading.
+        expected = width * height * 4
+        data = QByteArray(image.constBits().asstring(image.sizeInBytes()))
+        if data.size() != expected:
+            raise OpsError(
+                f"internal: {data.size()} bytes of pixel data for a {width}x{height} layer"
+            )
+        node.setPixelData(data, 0, 0, width, height)
+
+        doc.refreshProjection()
+        doc.waitForDone()
+
+        return {
+            "ok": True,
+            "layer": node.name(),
+            "document_scaled": grew,
+            "size": [width, height],
+        }

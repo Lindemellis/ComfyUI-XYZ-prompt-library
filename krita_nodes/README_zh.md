@@ -9,8 +9,10 @@
 |---|---|---|
 | **XYZ Krita Fetch Image** | `XYZNodes/Krita` | 图层(或整个文档)→ `IMAGE` + `width`/`height` |
 | **XYZ Krita Fetch Mask** | `XYZNodes/Krita` | 图层 → `MASK` |
+| **XYZ Krita Fetch Color Masks** | `XYZNodes/Krita` | 一个 flat color 图层 → N 张**任意形状**的遮罩 |
+| **XYZ Krita Send To Krita** | `XYZNodes/Krita` | `IMAGE` → Krita 里的一个新图层 |
 
-尚未实现:Send To Krita、Fetch Color Masks、Cache Slot。
+**不经过 Krita** 的跨运行图片交接,见 [Cache Slot](../cache_nodes/README_zh.md)。
 
 ---
 
@@ -80,6 +82,44 @@ Krita 的 API **只能在主线程调**,所以 HTTP 处理器从不直接碰文�
 **`reference`(可选的 `IMAGE`)。** 遮罩出来是 Krita 画布的尺寸,而你的图片可能已经被 Fetch Image
 缩过。区域条件类节点会自动缩放遮罩,**但 inpaint 不会 —— 尺寸对不上直接报错**。把 Fetch Image 的
 输出接到这里,遮罩就自动对齐了,一个参数都不用填。
+
+## XYZ Krita Fetch Color Masks
+
+**在 Krita 里把左边角色涂红、右边涂蓝、背景涂绿 —— 这个节点把它们拆成三张遮罩。** 这是
+`XYZ Mask Editor` 做不到的:**任意形状**、贴合角色轮廓、一次出多张。
+
+| 输入 | 作用 |
+|---|---|
+| `layer` | 绘画图层或图层组。只列出这两类。 |
+| `count` | 出多少张遮罩。**输出槽位数跟着这个值走。** |
+| `tolerance` | 像素离某个区域的颜色多远还算属于它。 |
+| `reference` | 可选,同上。 |
+
+取面积最大的 `count` 种颜色,按 **hex 值升序**排列 —— 决定哪种颜色落在哪个槽位的是 hex 而不是面积,
+所以你重新涂色之后,槽位顺序不会乱跳。
+
+每个像素归给 `tolerance` 范围内**最近**的那个颜色,超出容差的不归任何一张。所以遮罩之间既不重叠,
+抗锯齿边缘上也不留缝。
+
+> **区域丢了它不会告诉你。** 图层上的颜色比 `count` 多:面积最小的那些被忽略。比 `count` 少:多出来
+> 的槽位输出**空遮罩**。两种情况都不报错 —— 所以你在 Krita 里加了第四种颜色却忘了调大 `count`,那个
+> 区域就从提示词里**悄悄消失了**。看控制台:节点会打印每张遮罩的颜色和它占画布的比例。
+
+## XYZ Krita Send To Krita
+
+把 `IMAGE` 推回 Krita,作为活动文档最上面的一个新图层。
+
+尺寸很少刚好一致,所以:
+
+| 图片… | 会发生什么 |
+|---|---|
+| 比画布小 | **放大**到画布尺寸。Krita 是 canvas of record,它不缩小。 |
+| 比画布大,`scale_document` **关** | **缩小**到画布尺寸。 |
+| 比画布大,`scale_document` **开** | 整个**文档**放大到图片尺寸(所有图层一起),图片 1:1 放进去。 |
+
+`scale_document` 就是你的放大流程:2 倍生成,打开开关推回去,然后在新尺寸上继续手改和重绘。
+草稿图层会在这个过程中变糊,但没关系 —— 走到放大这一步时草稿已经功成身退了。**画布只增不减。**
+想回到生成分辨率,用 Fetch Image 的 `by_height`。
 
 ---
 

@@ -12,6 +12,7 @@
 - 📖 [图片画廊](gallery/README_zh.md)
 - 📖 [遮罩节点](mask_nodes/README_zh.md) —— 给 PLv3 的 region 用的矩形遮罩
 - 📖 [Krita 联动](krita_nodes/README_zh.md) —— 从运行中的 Krita 拉图层和遮罩
+- 📖 [Cache Slot](cache_nodes/README_zh.md) —— 跨运行的图片交接
 
 ## 安装
 
@@ -40,7 +41,8 @@
 | **LLM 提示词助手** | 一个浮动窗口，用大模型（DeepSeek / OpenAI / Claude / Grok / 自定义）生成或优化文生图提示词，并把 danbooru tag 拿到本地数据集验真，保证 tag 真实存在。 | [llm](llm/README_zh.md) |
 | **图片画廊** | 浏览与管理 ComfyUI 的 output/input 图片——筛选、标签、批量操作、元数据查看。 | [gallery](gallery/README_zh.md) |
 | **遮罩节点** | 在画布上画矩形遮罩并挂到 CLIP 上，让 PLv3 的 `imask: i` region 有东西可指。 | [masks](mask_nodes/README_zh.md) |
-| **Krita 联动** | 一个 Krita 插件 + 两个节点，直接从运行中的 Krita 拉图层或遮罩。ComfyUI 仍是主工作台，Krita 只当画板。 | [krita](krita_nodes/README_zh.md) |
+| **Krita 联动** | 一个 Krita 插件 + 四个节点：从运行中的 Krita 拉图层/遮罩、把 flat color 图层拆成任意形状的区域遮罩、把结果推回去当新图层。ComfyUI 仍是主工作台，Krita 只当画板。 | [krita](krita_nodes/README_zh.md) |
+| **Cache Slot** | 把图片存进命名的槽，下次运行取出来——不经过 Krita 的跨运行交接。 | [cache](cache_nodes/README_zh.md) |
 
 ## 入口在哪里
 
@@ -80,6 +82,9 @@
 | XYZ Attach Masks | `XYZNodes/Mask` | 把遮罩挂到 `CLIP` 上，供 `IMASK(i)` / PLv3 的 `imask: i` 引用 |
 | XYZ Krita Fetch Image | `XYZNodes/Krita` | Krita 图层（或整个文档）→ `IMAGE`（[手册](krita_nodes/README_zh.md)） |
 | XYZ Krita Fetch Mask | `XYZNodes/Krita` | Krita 图层 → `MASK`；遮罩类直读，绘画图层取 alpha |
+| XYZ Krita Fetch Color Masks | `XYZNodes/Krita` | 一个 flat color 图层 → N 张任意形状的遮罩 |
+| XYZ Krita Send To Krita | `XYZNodes/Krita` | `IMAGE` → Krita 新图层；可以连带放大整个文档 |
+| XYZ Cache Slot Write / Read | `XYZNodes/Cache` | 把图片存起来供下次运行取用（[手册](cache_nodes/README_zh.md)） |
 
 ## 常见问题
 

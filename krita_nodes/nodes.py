@@ -13,13 +13,17 @@ that input (execution.py:1007).
 
 from __future__ import annotations
 
-import hashlib
 import io
 import time
 
 import numpy as np
 
 from . import client
+
+try:
+    from ..node import ByPassTypeTuple
+except ImportError:  # imported as a top-level package (the tests put the repo root on sys.path)
+    from node import ByPassTypeTuple
 
 #: What the frontend shows before it has talked to Krita.
 LAYER_PLACEHOLDER = "(click Refresh layers)"
@@ -75,6 +79,79 @@ def _decode(png: bytes):
     from PIL import Image
 
     return Image.open(io.BytesIO(png))
+
+
+def _encode(tensor) -> bytes:
+    """A ComfyUI IMAGE (1, H, W, 3|4) -> PNG bytes."""
+    from PIL import Image
+
+    array = tensor
+    if array.ndim == 4:
+        array = array[0]
+    array = (array.clamp(0.0, 1.0) * 255.0).round().to("cpu").numpy().astype(np.uint8)
+    mode = "RGBA" if array.shape[2] == 4 else "RGB"
+    buffer = io.BytesIO()
+    Image.fromarray(array, mode).save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+#: Colour distance is euclidean in RGB; this is the largest it can be.
+MAX_RGB_DISTANCE = float(np.sqrt(3.0) * 255.0)
+
+
+def pick_colors(rgb: np.ndarray, alpha: np.ndarray, count: int) -> list[tuple[int, int, int]]:
+    """The `count` largest colour regions in a flat-colour layer, hex-ascending.
+
+    Only solid pixels are counted. An anti-aliased edge is a smear of unique
+    colours, and letting those into the tally would crowd out real regions.
+    Ties go to the lower hex value, so the result does not wobble between runs.
+    """
+    solid = alpha >= 128
+    if not solid.any():
+        return []
+
+    flat = rgb[solid].astype(np.uint32)
+    packed = (flat[:, 0] << 16) | (flat[:, 1] << 8) | flat[:, 2]
+
+    values, counts = np.unique(packed, return_counts=True)
+    # -counts first => biggest area wins; values second => a tie is broken by hex.
+    order = np.lexsort((values, -counts))
+    chosen = np.sort(values[order[:count]])  # slot order is hex ascending (§19)
+
+    return [(int(v >> 16), int((v >> 8) & 0xFF), int(v & 0xFF)) for v in chosen]
+
+
+def split_colors(
+    rgb: np.ndarray, alpha: np.ndarray, colors: list, tolerance: float
+) -> list[np.ndarray]:
+    """One binary mask per colour: every pixel goes to its NEAREST colour.
+
+    Within `tolerance` a pixel joins the closest region, beyond it joins none —
+    so the masks neither overlap nor leave a seam along an anti-aliased edge
+    (design decision 20).
+    """
+    height, width = alpha.shape
+    if not colors:
+        return []
+
+    limit = tolerance * MAX_RGB_DISTANCE
+    pixels = rgb.reshape(-1, 3).astype(np.float32)
+
+    # A distance matrix would be H*W*N floats; keep a running minimum instead.
+    best = np.full(pixels.shape[0], np.inf, dtype=np.float32)
+    owner = np.zeros(pixels.shape[0], dtype=np.int32)
+    for i, color in enumerate(colors):
+        delta = pixels - np.asarray(color, dtype=np.float32)
+        distance = np.sqrt((delta * delta).sum(axis=1))
+        closer = distance < best
+        best[closer] = distance[closer]
+        owner[closer] = i
+
+    visible = (alpha.reshape(-1) > 0) & (best <= limit)
+    return [
+        ((owner == i) & visible).reshape(height, width).astype(np.float32)
+        for i in range(len(colors))
+    ]
 
 
 def _resize(image, mode: str, size: int, round_to: int, interpolation: str):
@@ -268,3 +345,170 @@ class XYZKritaFetchMask(_KritaBase):
         tensor = torch.from_numpy(array).unsqueeze(0)  # (1, H, W)
         print(f"[XYZ Krita] fetched mask '{layer}' -> {image.size[0]}x{image.size[1]}")
         return (tensor,)
+
+
+class XYZKritaFetchColorMasks(_KritaBase):
+    NAME = "XYZ Krita Fetch Color Masks"
+    DESCRIPTION = (
+        "One flat-colour layer -> N masks. Paint the left character red, the right "
+        "one blue, the background green, and this splits them apart.\n"
+        "This is what the Mask Editor cannot do: arbitrary shapes that hug a "
+        "character's outline.\n"
+        "The N largest colour regions are taken, ordered by hex value ascending."
+    )
+    FUNCTION = "execute"
+    RETURN_TYPES = ByPassTypeTuple(("MASK",))
+    RETURN_NAMES = ByPassTypeTuple(("mask_0",))
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "layer": (
+                    [LAYER_PLACEHOLDER],
+                    {"tooltip": "A layer painted in flat colours, one per region."},
+                ),
+                "count": (
+                    "INT",
+                    {
+                        "default": 3,
+                        "min": 1,
+                        "max": 16,
+                        "tooltip": "How many masks to emit. The output slots follow "
+                        "this number.",
+                    },
+                ),
+                "tolerance": (
+                    "FLOAT",
+                    {
+                        "default": 0.15,
+                        "min": 0.0,
+                        "max": 1.0,
+                        "step": 0.01,
+                        "tooltip": "How far a pixel may be from a region's colour and "
+                        "still join it. Covers anti-aliased edges.",
+                    },
+                ),
+                "max_wait": (
+                    "FLOAT",
+                    {"default": 60.0, "min": 1.0, "max": 600.0, "step": 1.0},
+                ),
+            },
+            "optional": {
+                "reference": (
+                    "IMAGE",
+                    {"tooltip": "Optional. Scales the masks to this image's size."},
+                ),
+            },
+        }
+
+    def execute(
+        self,
+        layer=LAYER_PLACEHOLDER,
+        count=3,
+        tolerance=0.15,
+        max_wait=60.0,
+        reference=None,
+        **_,
+    ):
+        import torch
+        from PIL import Image as PILImage
+
+        key = layer_key(layer)
+        if not key or layer == LAYER_PLACEHOLDER:
+            raise RuntimeError(
+                "No Krita layer chosen. Click 'Refresh layers' on the node, then "
+                "pick one."
+            )
+
+        image = _decode(client.fetch_image(key, timeout=max_wait)).convert("RGBA")
+        array = np.asarray(image, dtype=np.uint8)
+        rgb, alpha = array[:, :, :3], array[:, :, 3]
+
+        colors = pick_colors(rgb, alpha, count)
+        masks = split_colors(rgb, alpha, colors, tolerance)
+
+        print(f"[XYZ Krita] colour masks from '{layer}':")
+        for i, (color, mask) in enumerate(zip(colors, masks)):
+            share = float(mask.mean()) * 100.0
+            print(f"    mask_{i}  #{color[0]:02x}{color[1]:02x}{color[2]:02x}  {share:.1f}% of the canvas")
+
+        # Fewer colours on the layer than asked for: the spare slots come back
+        # empty rather than erroring (design decision 18). A silent empty region is
+        # the trade — it is in the README.
+        height, width = alpha.shape
+        if len(masks) < count:
+            print(
+                f"[XYZ Krita] only {len(masks)} colour(s) found but count={count} — "
+                f"{count - len(masks)} mask(s) will be empty"
+            )
+            masks += [np.zeros((height, width), dtype=np.float32)] * (count - len(masks))
+
+        if reference is not None:
+            ref_h, ref_w = int(reference.shape[1]), int(reference.shape[2])
+            if (width, height) != (ref_w, ref_h):
+                masks = [
+                    np.asarray(
+                        PILImage.fromarray((m * 255).astype(np.uint8), "L").resize(
+                            (ref_w, ref_h), _pil_filter("bilinear")
+                        ),
+                        dtype=np.float32,
+                    )
+                    / 255.0
+                    for m in masks
+                ]
+
+        return tuple(torch.from_numpy(m).unsqueeze(0) for m in masks)
+
+
+class XYZKritaSendToKrita(_KritaBase):
+    NAME = "XYZ Krita Send To Krita"
+    DESCRIPTION = (
+        "Pushes an image back into Krita as a new layer on top of the active "
+        "document.\n"
+        "Sizes rarely match: an image smaller than the canvas is scaled up to it. "
+        "A bigger one either grows the whole document (scale_document) or is scaled "
+        "down to the canvas."
+    )
+    RETURN_TYPES = ()
+    OUTPUT_NODE = True
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": ("IMAGE",),
+                "layer_name": ("STRING", {"default": "ComfyUI"}),
+                "scale_document": (
+                    "BOOLEAN",
+                    {
+                        "default": False,
+                        "tooltip": "If the image is bigger than the canvas, scale the "
+                        "whole Krita document (every layer) up to it. The canvas only "
+                        "ever grows.",
+                    },
+                ),
+                "max_wait": (
+                    "FLOAT",
+                    {"default": 180.0, "min": 1.0, "max": 900.0, "step": 1.0},
+                ),
+            },
+        }
+
+    def execute(
+        self, image=None, layer_name="ComfyUI", scale_document=False, max_wait=180.0, **_
+    ):
+        if image is None:
+            raise RuntimeError("nothing connected to `image`")
+
+        result = client.add_layer(
+            _encode(image),
+            name=layer_name,
+            scale_document=bool(scale_document),
+            timeout=max_wait,
+        )
+        size = result.get("size", [])
+        if result.get("document_scaled"):
+            print(f"[XYZ Krita] the Krita document was scaled up to {size[0]}x{size[1]}")
+        print(f"[XYZ Krita] added layer '{result.get('layer')}' ({size[0]}x{size[1]})")
+        return {}

@@ -42,3 +42,5 @@ tagdb_data/
 
 # Author-side dataset build output (uploaded to a GitHub Release, not committed)
 dist/
+# Cache slots (XYZ Cache Slot Write/Read) — ComfyUI's output/xyz_cache/
+output/

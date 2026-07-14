@@ -79,3 +79,35 @@ def fetch_mask(layer: str, timeout: float = 60.0) -> bytes:
     if content_type != "image/png":
         raise KritaError(f"expected a PNG, got {content_type}")
     return body
+
+
+def add_layer(
+    png: bytes,
+    name: str = "ComfyUI",
+    scale_document: bool = False,
+    timeout: float = 180.0,
+) -> dict:
+    params = urllib.parse.urlencode(
+        {"name": name, "scale_document": "true" if scale_document else "false"}
+    )
+    request = urllib.request.Request(
+        f"{base_url()}/layer?{params}",
+        data=png,
+        headers={"Content-Type": "image/png"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return json.loads(response.read())
+    except urllib.error.HTTPError as exc:
+        body = exc.read()
+        try:
+            message = json.loads(body).get("error", body.decode("utf-8", "replace"))
+        except (ValueError, UnicodeDecodeError):
+            message = body.decode("utf-8", "replace")
+        raise KritaError(message) from exc
+    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        raise KritaUnreachable(
+            f"could not reach the Krita plugin at {base_url()} — is Krita running "
+            f"with the 'XYZ ComfyUI Bridge' plugin enabled? ({exc})"
+        ) from exc

@@ -2,7 +2,13 @@ from .prompt_library_node import PromptLibraryNode
 from .prompt_library_v2 import PromptLibraryV2PositiveNode, PromptLibraryV2NegativeNode
 from .prompt_library_v3 import PromptLibraryV3PositiveNode, PromptLibraryV3NegativeNode
 from .mask_nodes import XYZAttachMasks, XYZMaskEditor
-from .krita_nodes import XYZKritaFetchImage, XYZKritaFetchMask
+from .krita_nodes import (
+    XYZKritaFetchColorMasks,
+    XYZKritaFetchImage,
+    XYZKritaFetchMask,
+    XYZKritaSendToKrita,
+)
+from .cache_nodes import XYZCacheSlotRead, XYZCacheSlotWrite
 
 import os
 import json
@@ -20,6 +26,10 @@ NODE_CLASS_MAPPINGS = {
     "XYZ Attach Masks": XYZAttachMasks,
     "XYZ Krita Fetch Image": XYZKritaFetchImage,
     "XYZ Krita Fetch Mask": XYZKritaFetchMask,
+    "XYZ Krita Fetch Color Masks": XYZKritaFetchColorMasks,
+    "XYZ Krita Send To Krita": XYZKritaSendToKrita,
+    "XYZ Cache Slot Write": XYZCacheSlotWrite,
+    "XYZ Cache Slot Read": XYZCacheSlotRead,
 }
 
 WEB_DIRECTORY = "./js"

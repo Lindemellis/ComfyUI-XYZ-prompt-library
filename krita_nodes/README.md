@@ -10,8 +10,11 @@ to draw a rough composition, paint a region by hand, or mask something precisely
 |---|---|---|
 | **XYZ Krita Fetch Image** | `XYZNodes/Krita` | A layer (or the whole document) → `IMAGE` + its `width`/`height` |
 | **XYZ Krita Fetch Mask** | `XYZNodes/Krita` | A layer → `MASK` |
+| **XYZ Krita Fetch Color Masks** | `XYZNodes/Krita` | One flat-colour layer → N masks of **any shape** |
+| **XYZ Krita Send To Krita** | `XYZNodes/Krita` | An `IMAGE` → a new layer in Krita |
 
-Still to come: Send To Krita, Fetch Color Masks, and the cache slots.
+For handing an image from one graph run to the next *without* Krita, see
+[Cache Slots](../cache_nodes/README.md).
 
 ---
 
@@ -89,6 +92,49 @@ No parameter picks between them — the layer's own type does.
 have been resized by Fetch Image. Regional conditioning rescales a mask for you; **inpainting does
 not — it errors out unless they match exactly.** Connect the Fetch Image output here and the mask
 is aligned for you, with nothing to fill in.
+
+## XYZ Krita Fetch Color Masks
+
+**Paint the left character red, the right one blue, the background green — this splits them into
+three masks.** It is what `XYZ Mask Editor` cannot do: masks of *any shape*, hugging a character's
+outline, several at once.
+
+| Input | What it does |
+|---|---|
+| `layer` | A paint layer or group. Only those are listed. |
+| `count` | How many masks. **The output slots follow this number.** |
+| `tolerance` | How far a pixel may sit from a region's colour and still join it. |
+| `reference` | Optional, as above. |
+
+The `count` largest colour regions are taken and ordered by **hex value ascending** — that, not
+area, is what fixes which colour lands in which slot, so the order does not shuffle when you
+repaint.
+
+Every pixel joins its **nearest** colour within `tolerance`, and none beyond it. So the masks
+never overlap and never leave a seam along an anti-aliased edge.
+
+> **It will not tell you when a region goes missing.** More colours on the layer than `count`:
+> the smallest are ignored. Fewer: the spare slots come back **empty**. Neither is an error — so
+> if you add a fourth colour in Krita and forget to raise `count`, that region silently vanishes
+> from your prompt. Watch the console; the node prints each mask's colour and its share of the
+> canvas.
+
+## XYZ Krita Send To Krita
+
+Pushes an `IMAGE` back as a new layer on top of the active document.
+
+The sizes rarely agree, so:
+
+| The image is… | What happens |
+|---|---|
+| smaller than the canvas | Scaled **up** to the canvas. Krita is the canvas of record; it does not shrink. |
+| bigger, `scale_document` **off** | Scaled **down** to the canvas. |
+| bigger, `scale_document` **on** | The whole **document** grows to the image — every layer with it — and the image drops in 1:1. |
+
+`scale_document` is how you upscale: generate at 2×, push it back with the switch on, and carry on
+painting and inpainting at the new size. Your sketch layers go soft in the process, which is fine —
+by the time you are upscaling, the sketch has done its job. **The canvas only ever grows.** To get
+back to a generation resolution, use Fetch Image's `by_height`.
 
 ---
 

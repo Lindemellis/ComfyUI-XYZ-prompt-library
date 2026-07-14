@@ -3,16 +3,27 @@
 ComfyUI is the main tool here and Krita is the sketchpad: you draw, ComfyUI asks
 for the layer when the graph runs. See `README.md`.
 
-Phase one: the plugin, the installer, the layer list, and the two fetch nodes.
-Send To Krita, Fetch Color Masks and the cache slots are still to come — see
-`mask_krita_nodes_design.md`.
+The plugin, the installer, the layer list, and four nodes: Fetch Image, Fetch
+Mask, Fetch Color Masks and Send To Krita. The cache slots live in
+`cache_nodes/` — they have nothing to do with Krita.
 """
 
 from __future__ import annotations
 
-from .nodes import XYZKritaFetchImage, XYZKritaFetchMask
+from .nodes import (
+    XYZKritaFetchColorMasks,
+    XYZKritaFetchImage,
+    XYZKritaFetchMask,
+    XYZKritaSendToKrita,
+)
 
-__all__ = ["XYZKritaFetchImage", "XYZKritaFetchMask", "setup"]
+__all__ = [
+    "XYZKritaFetchImage",
+    "XYZKritaFetchMask",
+    "XYZKritaFetchColorMasks",
+    "XYZKritaSendToKrita",
+    "setup",
+]
 
 
 def setup() -> None:

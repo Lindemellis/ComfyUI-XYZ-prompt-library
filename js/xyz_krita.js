@@ -11,10 +11,29 @@ import { api } from '../../../scripts/api.js';
 
 const IMAGE_NODE = 'XYZ Krita Fetch Image';
 const MASK_NODE = 'XYZ Krita Fetch Mask';
-const KRITA_NODES = new Set([IMAGE_NODE, MASK_NODE]);
+const COLOR_NODE = 'XYZ Krita Fetch Color Masks';
+const KRITA_NODES = new Set([IMAGE_NODE, MASK_NODE, COLOR_NODE]);
 
 const PLACEHOLDER = '(click Refresh layers)';
 const ROW_H = 30;
+
+// Fetch Color Masks emits `count` masks, so its output slots follow that widget.
+// Unlike the Mask Editor there is nothing to key a link to but its index — the
+// masks are ordered by colour, and colour N stays colour N as long as count does
+// not shrink past it. So: grow freely, and on shrink only the dropped tail loses
+// its links.
+function syncColorOutputs(node) {
+  const count = node.widgets?.find((w) => w.name === 'count')?.value ?? 0;
+  const wanted = Math.max(0, Math.round(count));
+
+  while ((node.outputs?.length ?? 0) > wanted) {
+    node.removeOutput(node.outputs.length - 1);
+  }
+  while ((node.outputs?.length ?? 0) < wanted) {
+    node.addOutput(`mask_${node.outputs.length}`, 'MASK');
+  }
+  node.setDirtyCanvas(true, true);
+}
 
 // One fetch serves every Krita node on the canvas — clicking refresh on one
 // should not leave the others stale.
@@ -32,7 +51,11 @@ function applyLayers(node, data) {
   if (!widget) return;
 
   const entries =
-    node.comfyClass === IMAGE_NODE ? data.image_entries : data.mask_entries;
+    node.comfyClass === IMAGE_NODE
+      ? data.image_entries
+      : node.comfyClass === COLOR_NODE
+        ? data.paint_entries // a colour split only makes sense on a painted layer
+        : data.mask_entries;
 
   widget.options.values = entries.length ? entries : [PLACEHOLDER];
   // Keep the current pick if that layer still exists — a refresh should not
@@ -87,5 +110,29 @@ app.registerExtension({
     });
     button.computeSize = () => [node.size[0], ROW_H];
     button.computeLayoutSize = undefined;
+
+    if (node.comfyClass !== COLOR_NODE) return;
+
+    // The backend declares one MASK output (ByPassTypeTuple covers the rest);
+    // `count` decides how many there really are.
+    const countWidget = node.widgets?.find((w) => w.name === 'count');
+    if (countWidget) {
+      const original = countWidget.callback;
+      countWidget.callback = function (...args) {
+        const result = original?.apply(this, args);
+        syncColorOutputs(node);
+        return result;
+      };
+    }
+    syncColorOutputs(node);
+
+    const onConfigure = node.onConfigure;
+    node.onConfigure = function (info) {
+      const result = onConfigure?.apply(this, arguments);
+      // A saved graph already carries the right slots and links; only rebuild if
+      // they disagree with `count`.
+      syncColorOutputs(this);
+      return result;
+    };
   },
 });

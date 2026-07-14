@@ -85,6 +85,39 @@ class _Handler(BaseHTTPRequestHandler):
             logger.exception("unhandled error")
             self._error(f"{type(exc).__name__}: {exc}", status=500)
 
+    def do_POST(self):  # noqa: N802 - BaseHTTPRequestHandler's interface
+        url = urlparse(self.path)
+        query = parse_qs(url.query)
+
+        try:
+            if url.path != "/layer":
+                return self._error(f"no such endpoint: {url.path}", status=404)
+
+            length = int(self.headers.get("Content-Length") or 0)
+            if length <= 0:
+                return self._error("POST /layer needs a PNG body")
+            png = self.rfile.read(length)
+
+            name = (query.get("name") or ["ComfyUI"])[0]
+            scale = (query.get("scale_document") or ["false"])[0].lower() in (
+                "1",
+                "true",
+                "yes",
+            )
+            # Scaling a whole document is slow; give it room.
+            result = self.main.call(
+                lambda: ops.add_layer(png, name, scale), timeout=180
+            )
+            self._json(result)
+
+        except ops.OpsError as exc:
+            self._error(str(exc))
+        except TimeoutError as exc:
+            self._error(str(exc), status=504)
+        except Exception as exc:  # noqa: BLE001
+            logger.exception("unhandled error")
+            self._error(f"{type(exc).__name__}: {exc}", status=500)
+
 
 class Server:
     def __init__(self, port: int = DEFAULT_PORT):

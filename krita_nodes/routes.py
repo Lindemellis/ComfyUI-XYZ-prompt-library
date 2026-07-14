@@ -66,6 +66,13 @@ def register(server) -> None:
                 "mask_entries": [
                     layer["entry"] for layer in flat if layer["is_image"] or layer["is_mask"]
                 ],
+                # A colour split reads flat painted regions, so a filter/clone/file
+                # layer would be nonsense here.
+                "paint_entries": [
+                    layer["entry"]
+                    for layer in flat
+                    if layer["type"] in ("paintlayer", "grouplayer")
+                ],
             }
         )
 
