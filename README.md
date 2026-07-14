@@ -2,12 +2,13 @@
 
 **English** | [中文](README_zh.md)
 
-A ComfyUI custom-node pack with four larger tools — **Danbooru (+ optional Gelbooru) tag autocomplete**, a **hierarchical prompt library (V2)**, an **LLM prompt assistant** (multi-provider, with local tag grounding), and an **image gallery**.
+A ComfyUI custom-node pack with five larger tools — **Danbooru (+ optional Gelbooru) tag autocomplete**, a **prompt language with an editor and a library (V3)**, the older **hierarchical prompt library (V2)**, an **LLM prompt assistant** (multi-provider, with local tag grounding), and an **image gallery**.
 
 Each tool has its own manual:
 
 - 📖 [Tag Autocomplete & Dataset](tagdb/README.md)
-- 📖 [Prompt Library V2](prompt_library_v2/README.md)
+- 📖 **[Prompt Library V3](prompt_library_v3/README.md)** — the current one
+- 📖 [Prompt Library V2](prompt_library_v2/README.md) — still supported; [migration tool](prompt_library_v3/README.md#migrating-from-v2)
 - 📖 [LLM Prompt Assistant](llm/README.md)
 - 📖 [Image Gallery](gallery/README.md)
 
@@ -34,6 +35,7 @@ On the **first run**, the prebuilt Danbooru tag dataset (~66 MB, ~118K tags with
 | Tool | What it does | Manual |
 |---|---|---|
 | **Tag autocomplete** | Danbooru tag suggestions as you type in any prompt box, with a versioned local dataset, updates, snapshots, and date-based "time-machine" reconstruction. | [tagdb](tagdb/README.md) |
+| **Prompt Library V3** | A prompt *language* — nested groups with settings, schedules, regions, library blocks — compiled to [comfyui-prompt-control](https://github.com/asagi4/comfyui-prompt-control) syntax. A Monaco editor, a detail page of live controls over the same text, a preview, and a library with presets. The text is the only store: a workflow carries everything it needs. | [plv3](prompt_library_v3/README.md) |
 | **Prompt Library V2** | A SQLite-backed hierarchical prompt library with `[ref]` references, trigger aliases, weights, random modes, and a floating text editor. Resolved by two nodes at execution time. | [plv2](prompt_library_v2/README.md) |
 | **LLM Prompt Assistant** | A floating window that uses an LLM (DeepSeek / OpenAI / Claude / Grok / custom) to generate or optimize txt2img prompts, grounding danbooru tags against your local dataset so they stay real. | [llm](llm/README.md) |
 | **Image Gallery** | Browse and manage ComfyUI output/input images — filters, tags, bulk operations, and metadata viewing. | [gallery](gallery/README.md) |
@@ -44,6 +46,8 @@ After restarting ComfyUI, two buttons appear in the top bar:
 
 - **Open XYZ Gallery** (image icon) — opens the gallery.
 - **XYZ Tools** (menu) — opens:
+  - *Prompt Library V3 — Editor*
+  - *Prompt Library V3 — Library*
   - *Prompt Library V2 — Library*
   - *Prompt Library V2 — Text Editor*
   - *Prompt Library V2 — LLM Prompt*
@@ -54,6 +58,7 @@ The **settings window** (also reachable from the ComfyUI command palette: *"Open
 
 | Tab | Controls |
 |---|---|
+| Prompt Library V3 | Slider ranges (prompt weight, LoRA weight, schedule step), editor font/wrap, refresh delay, library autosave delay |
 | Autocomplete | Enable on/off, max suggestions, hide rare tags, **Danbooru / Gelbooru sources** |
 | Insertion | Underscore→space, auto comma, escape brackets, full-width→half-width |
 | Library | Use your prompt library as autocomplete sources; entry-ref suggestions |
@@ -69,6 +74,8 @@ Each Prompt Library V2 node also has its own **Library / Editor / Preview / LLM*
 
 | Node | Category | Purpose |
 |---|---|---|
+| XYZ Prompt Library V3 Positive | `XYZNodes/Prompt` | Compile a PLv3 document into [prompt-control](https://github.com/asagi4/comfyui-prompt-control) syntax |
+| XYZ Prompt Library V3 Negative | `XYZNodes/Prompt` | The same, minus regions (they mean nothing on the negative side) |
 | XYZ Prompt Library V2 Positive | `XYZNodes/Prompt` | Resolve a positive prompt template against the library |
 | XYZ Prompt Library V2 Negative | `XYZNodes/Prompt` | Resolve a negative prompt template against the library |
 | XYZ Prompt Library | `XYZNodes/Prompt` | Legacy V1 prompt library node (kept for backward compatibility) |

@@ -24,6 +24,11 @@ prompt_library_v3_data/
 prompt_library_v2_requirements.md
 prompt_library_v2_llm_plan.md
 
+# Prompt Library V3 / mask+Krita design notes (kept local, same as V2's spec)
+prompt_library_v3_design.md
+prompt_library_v3_idea.md
+mask_krita_nodes_design.md
+
 # Secrets / local env (if you add API keys later)
 .env
 .env.*
