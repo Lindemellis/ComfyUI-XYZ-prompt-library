@@ -95,9 +95,6 @@ function createDropdownButton() {
       { label: 'Prompt Library V2 — LLM Prompt',
         action: () => { try { window.plv2?.windows?.llm?.show(); } catch {} } },
       { separator: true },
-      { label: 'Prompt Library V1 Manager',
-        action: () => { try { window.xyzV1Library?.show(); } catch {} } },
-      { separator: true },
       { label: 'XYZ Prompt Tools Settings',
         action: () => { try { window.xyzSettingsPage?.show(); } catch {} } },
     ];

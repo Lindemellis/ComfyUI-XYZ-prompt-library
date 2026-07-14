@@ -1,9 +1,13 @@
 """Shared node helpers.
 
-The standalone utility nodes that used to live here (Multi Text Concatenate /
-Replace, Multi Clip Encoder, Random String Picker) were removed. Only the type
-helpers remain — `ByPassTypeTuple` is still used by the legacy V1 Prompt Library
-node (prompt_library_node.py) for its variadic outputs.
+All that survives here is `ByPassTypeTuple`, the trick that lets a node declare a
+VARIADIC number of outputs: RETURN_TYPES is a tuple whose __getitem__ clamps every
+index to 0, so ComfyUI validates any slot against the single declared type while
+the frontend adds the real slots. Used by `XYZ Mask Editor` and
+`XYZ Krita Fetch Color Masks`.
+
+(The standalone utility nodes that used to live here, and the legacy V1 Prompt
+Library that used to own this helper, are both gone.)
 """
 
 

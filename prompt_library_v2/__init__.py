@@ -1,6 +1,5 @@
 """Prompt Library V2 — package init and ComfyUI setup hook.
 
-Completely isolated from v1 (prompt_library_node.py / prompt_library/ dir).
 Call setup() once during ComfyUI startup from the top-level __init__.py.
 
 Public node classes (re-exported for top-level __init__.py):

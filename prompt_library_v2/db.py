@@ -1,6 +1,5 @@
 """Prompt Library V2 — SQLite schema, PRAGMAs, and forward-only migrations.
 
-Completely isolated from the v1 prompt_library/ JSON system.
 DB file lives at: prompt_library_v2_data/plv2.db
 
 Tables (v1):

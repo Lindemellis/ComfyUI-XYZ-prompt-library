@@ -34,8 +34,6 @@ mask_krita_nodes_design.md
 .env.*
 
 # User prompt library presets (personal — keep locally only)
-prompt_library/*
-!prompt_library/.gitkeep
 
 # Tag DB snapshot data (large SQLite files + settings — do not publish)
 tagdb_data/

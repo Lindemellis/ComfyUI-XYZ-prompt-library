@@ -57,7 +57,6 @@ After restarting ComfyUI, two buttons appear in the top bar:
   - *Prompt Library V2 — Library*
   - *Prompt Library V2 — Text Editor*
   - *Prompt Library V2 — LLM Prompt*
-  - *Prompt Library V1 Manager* (legacy)
   - *XYZ Prompt Tools Settings*
 
 The **settings window** (also reachable from the ComfyUI command palette: *"Open XYZ Prompt Tools settings"*) has these tabs:
@@ -84,7 +83,6 @@ Each Prompt Library V2 node also has its own **Library / Editor / Preview / LLM*
 | XYZ Prompt Library V3 Negative | `XYZNodes/Prompt` | The same, minus regions (they mean nothing on the negative side) |
 | XYZ Prompt Library V2 Positive | `XYZNodes/Prompt` | Resolve a positive prompt template against the library |
 | XYZ Prompt Library V2 Negative | `XYZNodes/Prompt` | Resolve a negative prompt template against the library |
-| XYZ Prompt Library | `XYZNodes/Prompt` | Legacy V1 prompt library node (kept for backward compatibility) |
 | XYZ Mask Editor | `XYZNodes/Mask` | Draw rectangle masks; one `MASK` output per rectangle ([manual](mask_nodes/README.md)) |
 | XYZ Attach Masks | `XYZNodes/Mask` | Attach those masks to a `CLIP` for `IMASK(i)` / PLv3's `imask: i` |
 | XYZ Krita Fetch Image | `XYZNodes/Krita` | A Krita layer (or the whole document) → `IMAGE` ([manual](krita_nodes/README.md)) |
@@ -113,4 +111,4 @@ An optional second tag set. Enable it in *Settings → Autocomplete → Gelbooru
 
 ---
 
-Data directories (`tagdb_data/`, `prompt_library_v2_data/`, `gallery_data/`, `prompt_library/`) are created at runtime and are gitignored.
+Data directories (`tagdb_data/`, `prompt_library_v2_data/`, `prompt_library_v3_data/`, `gallery_data/`, `krita_data/`) are created at runtime and are gitignored.

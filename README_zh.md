@@ -53,7 +53,6 @@
   - *Prompt Library V2 — Library*（库）
   - *Prompt Library V2 — Text Editor*（文本编辑器）
   - *Prompt Library V2 — LLM Prompt*（LLM 提示词助手）
-  - *Prompt Library V1 Manager*（旧版）
   - *XYZ Prompt Tools Settings*（设置）
 
 **设置窗口**（也可从 ComfyUI 命令面板的 *"Open XYZ Prompt Tools settings"* 打开）包含以下标签页：
@@ -77,7 +76,6 @@
 |---|---|---|
 | XYZ Prompt Library V2 Positive | `XYZNodes/Prompt` | 针对库解析正向提示词模板 |
 | XYZ Prompt Library V2 Negative | `XYZNodes/Prompt` | 针对库解析负向提示词模板 |
-| XYZ Prompt Library | `XYZNodes/Prompt` | 旧版 V1 提示词库节点（保留以兼容） |
 | XYZ Mask Editor | `XYZNodes/Mask` | 画矩形遮罩；每个矩形一个 `MASK` 输出（[手册](mask_nodes/README_zh.md)） |
 | XYZ Attach Masks | `XYZNodes/Mask` | 把遮罩挂到 `CLIP` 上，供 `IMASK(i)` / PLv3 的 `imask: i` 引用 |
 | XYZ Krita Fetch Image | `XYZNodes/Krita` | Krita 图层（或整个文档）→ `IMAGE`（[手册](krita_nodes/README_zh.md)） |
@@ -106,4 +104,4 @@ Release 以 `min_post_count = 50` 构建。如果你用更低阈值自己更新�
 
 ---
 
-数据目录（`tagdb_data/`、`prompt_library_v2_data/`、`gallery_data/`、`prompt_library/`）在运行时创建，且已被 gitignore。
+数据目录（`tagdb_data/`、`prompt_library_v2_data/`、`prompt_library_v3_data/`、`gallery_data/`、`krita_data/`）在运行时创建，且已被 gitignore。
