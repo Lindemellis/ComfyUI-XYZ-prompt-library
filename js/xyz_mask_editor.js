@@ -9,7 +9,7 @@ import { app } from '../../../scripts/app.js';
 
 const NODE_TYPE = 'XYZ Mask Editor';
 const CANVAS = 512;      // the backing store; also the unit `feather` is in
-const FIXED_OUTPUTS = 2; // base, fill
+const FIXED_OUTPUTS = 3; // preview (IMAGE), base, fill
 
 const COLORS = [
   '#f38ba8', '#89b4fa', '#a6e3a1', '#f9e2af', '#cba6f7',
@@ -558,9 +558,16 @@ app.registerExtension({
       rectsWidget.computeSize = () => [0, -4];
     }
 
-    // The backend only declares slot 0 (ByPassTypeTuple stands in for the rest).
-    if (!node.outputs || node.outputs.length === 0) node.addOutput('base', 'MASK');
-    if (node.outputs.length < FIXED_OUTPUTS) node.addOutput('fill', 'MASK');
+    // The backend declares slot 0 only (ByPassTypeTuple stands in for the rest);
+    // the real slots and their real types are added here.
+    const FIXED = [
+      ['preview', 'IMAGE'],
+      ['base', 'MASK'],
+      ['fill', 'MASK'],
+    ];
+    for (let i = node.outputs?.length ?? 0; i < FIXED.length; i++) {
+      node.addOutput(FIXED[i][0], FIXED[i][1]);
+    }
 
     const ui = buildUI(node);
     const w = node.addDOMWidget('xyz_mask_canvas', 'custom', ui, {

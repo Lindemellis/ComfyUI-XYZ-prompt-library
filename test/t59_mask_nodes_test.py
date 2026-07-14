@@ -20,11 +20,13 @@ from mask_nodes.nodes import (  # noqa: E402
     CANVAS_SIZE,
     MAX_ATTACH_MASKS,
     PC_MASKS_KEY,
+    PREVIEW_COLORS,
     XYZAttachMasks,
     XYZMaskEditor,
     _parse_rects,
     _rasterise,
     build_masks,
+    build_preview,
 )
 
 LEFT = {"id": "a", "x": 0.0, "y": 0.0, "w": 0.5, "h": 1.0, "feather": 0}
@@ -188,3 +190,76 @@ def test_attach_declares_exactly_max_optional_slots():
     optional = XYZAttachMasks.INPUT_TYPES()["optional"]
     assert len(optional) == MAX_ATTACH_MASKS
     assert set(optional) == {f"mask_{i}" for i in range(1, MAX_ATTACH_MASKS + 1)}
+
+
+# --------------------------------------------------------------- the preview
+
+
+def _preview(rects) -> np.ndarray:
+    _, _, *masks = build_masks(_parse_rects(json.dumps(rects)))
+    return build_preview(masks)
+
+
+def _at(image, x, y):
+    """The pixel at a fraction of the canvas, as 0-255 ints."""
+    px = image[int(y * CANVAS_SIZE), int(x * CANVAS_SIZE)]
+    return tuple(int(round(v * 255)) for v in px)
+
+
+def test_an_empty_canvas_is_white_paper():
+    image = _preview([])
+    assert image.shape == (CANVAS_SIZE, CANVAS_SIZE, 3)
+    assert (image == 1.0).all()
+
+
+def test_bare_paper_stays_white_around_the_rects():
+    assert _at(_preview([LEFT]), 0.75, 0.5) == (255, 255, 255)
+
+
+def test_each_rect_gets_its_own_colour_from_the_canvas_palette():
+    image = _preview([LEFT, RIGHT])
+    assert _at(image, 0.25, 0.5) == PREVIEW_COLORS[0]
+    assert _at(image, 0.75, 0.5) == PREVIEW_COLORS[1]
+
+
+def test_the_lower_index_wins_an_overlap():
+    # The whole point of the ordering: rect 0 is painted ON TOP of rect 1.
+    a = {"id": "a", "x": 0.0, "y": 0.0, "w": 0.6, "h": 1.0, "feather": 0}
+    b = {"id": "b", "x": 0.4, "y": 0.0, "w": 0.6, "h": 1.0, "feather": 0}
+    image = _preview([a, b])
+
+    assert _at(image, 0.5, 0.5) == PREVIEW_COLORS[0]  # the overlap
+    assert _at(image, 0.2, 0.5) == PREVIEW_COLORS[0]  # a alone
+    assert _at(image, 0.8, 0.5) == PREVIEW_COLORS[1]  # b alone
+
+
+def test_a_feathered_edge_fades_towards_the_paper():
+    image = _preview([dict(LEFT, feather=24)])
+    core = _at(image, 0.25, 0.5)
+    edge = _at(image, 0.005, 0.5)
+
+    assert core == PREVIEW_COLORS[0]
+    # Not the flat colour, not yet white: a blend.
+    assert edge != PREVIEW_COLORS[0]
+    assert all(c > 200 for c in edge)
+
+
+def test_the_palette_wraps_past_its_last_colour():
+    rects = [
+        {"id": str(i), "x": i * 0.08, "y": 0.0, "w": 0.07, "h": 1.0, "feather": 0}
+        for i in range(12)
+    ]
+    image = _preview(rects)
+    # Rect 10 reuses colour 0 — the palette has ten entries.
+    assert _at(image, 10 * 0.08 + 0.03, 0.5) == PREVIEW_COLORS[0]
+
+
+def test_the_slot_layout_is_preview_base_fill_then_the_masks():
+    parsed = _parse_rects(json.dumps([LEFT, RIGHT]))
+    base, fill, *masks = build_masks(parsed)
+    preview = build_preview(masks)
+
+    # What execute() hands back, in order: an IMAGE first, then the MASKs.
+    assert preview.shape == (CANVAS_SIZE, CANVAS_SIZE, 3)
+    assert base.shape == fill.shape == (CANVAS_SIZE, CANVAS_SIZE)
+    assert len(masks) == 2

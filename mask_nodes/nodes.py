@@ -108,6 +108,41 @@ def build_masks(rects: list[dict], size: int = CANVAS_SIZE) -> list[np.ndarray]:
     return [base, fill, *masks]
 
 
+#: The rectangle colours, matching js/xyz_mask_editor.js exactly — the preview has
+#: to look like the canvas you drew on, or it is worse than useless.
+PREVIEW_COLORS = [
+    (0xF3, 0x8B, 0xA8),
+    (0x89, 0xB4, 0xFA),
+    (0xA6, 0xE3, 0xA1),
+    (0xF9, 0xE2, 0xAF),
+    (0xCB, 0xA6, 0xF7),
+    (0x94, 0xE2, 0xD5),
+    (0xFA, 0xB3, 0x87),
+    (0x74, 0xC7, 0xEC),
+    (0xEB, 0xA0, 0xAC),
+    (0xB4, 0xBE, 0xFE),
+]
+
+
+def build_preview(masks: list[np.ndarray], size: int = CANVAS_SIZE) -> np.ndarray:
+    """White paper, one colour per rectangle. Returns (H, W, 3) float 0..1.
+
+    **The LOWER index wins an overlap**, so it is painted last: composite from the
+    back (the highest index) forwards. Each rectangle is blended by its own mask
+    value, so a feathered edge fades out exactly as the mask does.
+    """
+    canvas = np.ones((size, size, 3), dtype=np.float32)
+
+    for i in range(len(masks) - 1, -1, -1):
+        color = np.asarray(
+            PREVIEW_COLORS[i % len(PREVIEW_COLORS)], dtype=np.float32
+        ) / 255.0
+        alpha = masks[i][:, :, None]
+        canvas = canvas * (1.0 - alpha) + color * alpha
+
+    return canvas.astype(np.float32)
+
+
 # ------------------------------------------------------------------ the nodes
 
 
@@ -116,14 +151,19 @@ class XYZMaskEditor:
     CATEGORY = "XYZNodes/Mask"
     DESCRIPTION = (
         "Draw rectangle masks on a 512x512 canvas.\n"
-        "Outputs: base (full white), fill (the complement of every rectangle), "
-        "then one MASK per rectangle.\n"
-        "Do NOT wire base/fill into 'XYZ Attach Masks' — it would shift every "
-        "IMASK index by 2."
+        "Outputs: preview (an IMAGE of the layout, in the canvas's own colours), "
+        "base (full white), fill (the complement of every rectangle), then one "
+        "MASK per rectangle.\n"
+        "Do NOT wire preview/base/fill into 'XYZ Attach Masks' — it would shift "
+        "every IMASK index."
     )
     FUNCTION = "execute"
-    RETURN_TYPES = ByPassTypeTuple(("MASK",))
-    RETURN_NAMES = ByPassTypeTuple(("base",))
+    # ByPassTypeTuple clamps every index to 0, so the whole node advertises one
+    # output. That is fine for the MASK slots as well: TautologyStr never compares
+    # unequal, so any slot validates against any input type, and the frontend adds
+    # the real slots with their real types.
+    RETURN_TYPES = ByPassTypeTuple(("IMAGE",))
+    RETURN_NAMES = ByPassTypeTuple(("preview",))
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -143,8 +183,15 @@ class XYZMaskEditor:
         # run outside ComfyUI's interpreter.
         import torch
 
-        masks = build_masks(_parse_rects(rects))
-        return tuple(torch.from_numpy(m).unsqueeze(0) for m in masks)
+        base, fill, *masks = build_masks(_parse_rects(rects))
+        preview = build_preview(masks)
+
+        return (
+            torch.from_numpy(preview).unsqueeze(0),  # (1, H, W, 3) — an IMAGE
+            torch.from_numpy(base).unsqueeze(0),
+            torch.from_numpy(fill).unsqueeze(0),
+            *(torch.from_numpy(m).unsqueeze(0) for m in masks),
+        )
 
 
 class XYZAttachMasks:

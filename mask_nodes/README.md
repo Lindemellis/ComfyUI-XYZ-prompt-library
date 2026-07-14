@@ -17,13 +17,14 @@ colour-partitioned layer — is designed but not built yet.
 
 **`imask: i` counts the masks in the order they are attached — it is not a slot number.**
 
-Wire the Mask Editor's `mask_0`, `mask_1`, … into Attach Masks **in order**, and leave `base`
-and `fill` **unconnected**. Connect `base` and everything shifts by two, silently: no error, no
+Wire the Mask Editor's `mask_0`, `mask_1`, … into Attach Masks **in order**, and leave `preview`,
+`base` and `fill` **unconnected**. Connect one of them and everything shifts, silently: no error, no
 warning, just a wrong picture.
 
 ```
 XYZ Mask Editor            XYZ Attach Masks         PLv3
-  ├─ base    ─┐ (leave unconnected)
+  ├─ preview ─┐ (leave unconnected — it is an IMAGE, not a mask)
+  ├─ base    ─┤
   ├─ fill    ─┘
   ├─ mask_0  ─────────────→ mask 0    ───────────→  imask: 0
   ├─ mask_1  ─────────────→ mask 1    ───────────→  imask: 1
@@ -50,11 +51,18 @@ to resize, press <kbd>Delete</kbd> to remove it. Drag the node's corner to make 
 
 ### Outputs
 
-| Slot | Name | What it is |
-|---|---|---|
-| 0 | `base` | A full-white mask covering the whole canvas |
-| 1 | `fill` | Everything **not** covered by any rectangle |
-| 2… | `mask_0`, `mask_1`, … | One per rectangle, in list order |
+| Slot | Name | Type | What it is |
+|---|---|---|---|
+| 0 | `preview` | `IMAGE` | A picture of the layout: white paper, one colour per rectangle |
+| 1 | `base` | `MASK` | A full-white mask covering the whole canvas |
+| 2 | `fill` | `MASK` | Everything **not** covered by any rectangle |
+| 3… | `mask_0`, `mask_1`, … | `MASK` | One per rectangle, in list order |
+
+**`preview`** is what the canvas looks like, as an image you can wire into a `PreviewImage` or
+stack next to your generation to check the composition. The colours are the canvas's own, so it
+reads the same. **A lower index is painted on top** — where two rectangles overlap, the one earlier
+in the list wins, which is also the one drawn on top in the editor. A feathered edge fades to the
+paper exactly as its mask does.
 
 `base` and `fill` exist for **other** nodes — regional-conditioning packs, inpainting, and so on.
 PLv3 does not need them: its base region is implicitly the whole image, and it computes the fill
