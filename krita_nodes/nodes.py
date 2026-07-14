@@ -468,6 +468,94 @@ class XYZKritaFetchColorMasks(_KritaBase):
         return tuple(torch.from_numpy(m).unsqueeze(0) for m in masks)
 
 
+def resolve_path(path: str) -> str:
+    """An absolute path, or one relative to ComfyUI's input/ or output/ folder.
+
+    Typing an absolute path every time is miserable, and the file you want to open
+    in Krita is almost always something ComfyUI just made or something you dropped
+    in input/.
+    """
+    from pathlib import Path
+
+    path = (path or "").strip().strip('"')
+    if not path:
+        raise RuntimeError("no file path given")
+
+    candidate = Path(path).expanduser()
+    if candidate.is_absolute():
+        return str(candidate)
+
+    try:
+        import folder_paths
+
+        roots = [
+            Path(folder_paths.get_output_directory()),
+            Path(folder_paths.get_input_directory()),
+        ]
+    except Exception:  # noqa: BLE001 - outside ComfyUI
+        roots = []
+
+    for root in roots:
+        resolved = root / candidate
+        if resolved.is_file():
+            return str(resolved)
+
+    tried = " or ".join(str(r) for r in roots) or "the current directory"
+    raise RuntimeError(f"could not find '{path}' — looked in {tried}")
+
+
+class XYZKritaOpenFile(_KritaBase):
+    NAME = "XYZ Krita Open File"
+    DESCRIPTION = (
+        "Opens a file on disk in Krita, as itself.\n"
+        "Not the same as sending an IMAGE: a .kra opened this way keeps every "
+        "layer, and Krita knows the path, so Ctrl+S saves back over the original. "
+        "Sending pixels flattens the layers and gives you an unnamed document.\n"
+        "The path may be absolute, or relative to ComfyUI's output/ or input/ folder."
+    )
+    FUNCTION = "execute"
+    RETURN_TYPES = ()
+    OUTPUT_NODE = True
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "path": (
+                    "STRING",
+                    {
+                        "default": "",
+                        "multiline": False,
+                        "tooltip": "e.g. sketch.kra, or 2026-07-14/foo.png, or a full path.",
+                    },
+                ),
+                "launch_krita": (
+                    "BOOLEAN",
+                    {"default": True, "tooltip": "Start Krita first if it is not running."},
+                ),
+                "max_wait": (
+                    "FLOAT",
+                    {"default": 120.0, "min": 1.0, "max": 900.0, "step": 1.0},
+                ),
+            },
+        }
+
+    def execute(self, path="", launch_krita=True, max_wait=120.0, **_):
+        resolved = resolve_path(path)
+
+        if launch_krita and not launcher.is_running():
+            print("[XYZ Krita] Krita is not running — starting it")
+            launcher.launch(timeout=max(60.0, max_wait))
+
+        result = client.open_file(resolved, timeout=max_wait)
+        size = result.get("size", [0, 0])
+        print(
+            f"[XYZ Krita] opened '{result.get('document')}' "
+            f"({size[0]}x{size[1]}, {result.get('layers')} layer(s)) from {resolved}"
+        )
+        return {}
+
+
 SEND_MODES = ["new_layer", "new_document"]
 
 

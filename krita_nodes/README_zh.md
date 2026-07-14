@@ -10,7 +10,8 @@
 | **XYZ Krita Fetch Image** | `XYZNodes/Krita` | 图层(或整个文档)→ `IMAGE` + `width`/`height` |
 | **XYZ Krita Fetch Mask** | `XYZNodes/Krita` | 图层 → `MASK` |
 | **XYZ Krita Fetch Color Masks** | `XYZNodes/Krita` | 一个 flat color 图层 → N 张**任意形状**的遮罩 |
-| **XYZ Krita Send To Krita** | `XYZNodes/Krita` | `IMAGE` → Krita 里的一个新图层 |
+| **XYZ Krita Send To Krita** | `XYZNodes/Krita` | `IMAGE` → Krita 新图层,或新文档 |
+| **XYZ Krita Open File** | `XYZNodes/Krita` | 硬盘上的文件 → 在 Krita 里按原样打开 |
 
 **不经过 Krita** 的跨运行图片交接,见 [Cache Slot](../cache_nodes/README_zh.md)。
 
@@ -129,6 +130,19 @@ curl -X POST localhost:8188/xyz/krita/executable -d '{"path": "C:/Program Files/
 
 `launch_krita`(默认开)会在 Krita 没跑时先把它启动起来。所以「ComfyUI 冷启动 + Krita 没开 +
 跑一次」就能直接得到一张打开的画布。
+
+## XYZ Krita Open File
+
+**按原样打开**硬盘上的文件,而不是把像素推给 Krita。
+
+这个区别很重要。Send To Krita 交过去的是 `IMAGE` —— 一张扁平的像素网格 —— 所以一个 `.kra` 这样送过去,
+到 Krita 里图层已经**拍平了**,而且没有文件名。Open File 交给 Krita 的是**路径**:`.kra` 会保留
+**所有图层**,而且 Krita 知道文件从哪来,所以 **Ctrl+S 直接存回原文件**。
+
+路径可以是绝对路径,也可以相对于 ComfyUI 的 `output/` 或 `input/` —— 你想打开的文件,十有八九
+要么是 ComfyUI 刚生成的,要么是你自己丢进 `input/` 的。
+
+**图片只存在于工作流里** → 用 Send To Krita。**图片在硬盘上,而且你在乎它的图层或路径** → 用 Open File。
 
 ### new_layer:尺寸很少刚好一致
 

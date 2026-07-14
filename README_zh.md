@@ -83,7 +83,8 @@
 | XYZ Krita Fetch Image | `XYZNodes/Krita` | Krita 图层（或整个文档）→ `IMAGE`（[手册](krita_nodes/README_zh.md)） |
 | XYZ Krita Fetch Mask | `XYZNodes/Krita` | Krita 图层 → `MASK`；遮罩类直读，绘画图层取 alpha |
 | XYZ Krita Fetch Color Masks | `XYZNodes/Krita` | 一个 flat color 图层 → N 张任意形状的遮罩 |
-| XYZ Krita Send To Krita | `XYZNodes/Krita` | `IMAGE` → Krita 新图层；可以连带放大整个文档 |
+| XYZ Krita Send To Krita | `XYZNodes/Krita` | `IMAGE` → Krita 新图层或新文档；可以连带放大整个文档 |
+| XYZ Krita Open File | `XYZNodes/Krita` | 在 Krita 里打开硬盘上的文件——`.kra` 保留所有图层 |
 | XYZ Cache Slot Write / Read | `XYZNodes/Cache` | 把图片存起来供下次运行取用（[手册](cache_nodes/README_zh.md)） |
 
 ## 常见问题

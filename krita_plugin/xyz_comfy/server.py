@@ -82,6 +82,10 @@ class _Handler(BaseHTTPRequestHandler):
                 png = self.main.call(lambda: ops.export_mask(layer), timeout=60)
                 self._send(200, png, "image/png")
 
+            elif url.path == "/open":
+                path = (query.get("path") or [""])[0]
+                self._json(self.main.call(lambda: ops.open_file(path), timeout=120))
+
             else:
                 self._error(f"no such endpoint: {url.path}", status=404)
 

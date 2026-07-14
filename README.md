@@ -90,7 +90,8 @@ Each Prompt Library V2 node also has its own **Library / Editor / Preview / LLM*
 | XYZ Krita Fetch Image | `XYZNodes/Krita` | A Krita layer (or the whole document) → `IMAGE` ([manual](krita_nodes/README.md)) |
 | XYZ Krita Fetch Mask | `XYZNodes/Krita` | A Krita layer → `MASK`; mask layers read directly, paint layers give alpha |
 | XYZ Krita Fetch Color Masks | `XYZNodes/Krita` | One flat-colour layer → N masks of any shape |
-| XYZ Krita Send To Krita | `XYZNodes/Krita` | An `IMAGE` → a new Krita layer; can grow the whole document |
+| XYZ Krita Send To Krita | `XYZNodes/Krita` | An `IMAGE` → a new Krita layer or a new document; can grow the whole document |
+| XYZ Krita Open File | `XYZNodes/Krita` | Open a file on disk in Krita — a `.kra` keeps every layer |
 | XYZ Cache Slot Write / Read | `XYZNodes/Cache` | Park an image for a later run ([manual](cache_nodes/README.md)) |
 
 ## FAQ

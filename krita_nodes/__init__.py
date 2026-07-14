@@ -14,6 +14,7 @@ from .nodes import (
     XYZKritaFetchColorMasks,
     XYZKritaFetchImage,
     XYZKritaFetchMask,
+    XYZKritaOpenFile,
     XYZKritaSendToKrita,
 )
 
@@ -22,6 +23,7 @@ __all__ = [
     "XYZKritaFetchMask",
     "XYZKritaFetchColorMasks",
     "XYZKritaSendToKrita",
+    "XYZKritaOpenFile",
     "setup",
 ]
 

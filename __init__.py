@@ -6,6 +6,7 @@ from .krita_nodes import (
     XYZKritaFetchColorMasks,
     XYZKritaFetchImage,
     XYZKritaFetchMask,
+    XYZKritaOpenFile,
     XYZKritaSendToKrita,
 )
 from .cache_nodes import XYZCacheSlotRead, XYZCacheSlotWrite
@@ -28,6 +29,7 @@ NODE_CLASS_MAPPINGS = {
     "XYZ Krita Fetch Mask": XYZKritaFetchMask,
     "XYZ Krita Fetch Color Masks": XYZKritaFetchColorMasks,
     "XYZ Krita Send To Krita": XYZKritaSendToKrita,
+    "XYZ Krita Open File": XYZKritaOpenFile,
     "XYZ Cache Slot Write": XYZCacheSlotWrite,
     "XYZ Cache Slot Read": XYZCacheSlotRead,
 }

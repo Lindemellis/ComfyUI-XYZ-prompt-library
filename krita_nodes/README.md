@@ -11,7 +11,8 @@ to draw a rough composition, paint a region by hand, or mask something precisely
 | **XYZ Krita Fetch Image** | `XYZNodes/Krita` | A layer (or the whole document) → `IMAGE` + its `width`/`height` |
 | **XYZ Krita Fetch Mask** | `XYZNodes/Krita` | A layer → `MASK` |
 | **XYZ Krita Fetch Color Masks** | `XYZNodes/Krita` | One flat-colour layer → N masks of **any shape** |
-| **XYZ Krita Send To Krita** | `XYZNodes/Krita` | An `IMAGE` → a new layer in Krita |
+| **XYZ Krita Send To Krita** | `XYZNodes/Krita` | An `IMAGE` → a new Krita layer, or a new document |
+| **XYZ Krita Open File** | `XYZNodes/Krita` | A file on disk → open it in Krita, as itself |
 
 For handing an image from one graph run to the next *without* Krita, see
 [Cache Slots](../cache_nodes/README.md).
@@ -144,6 +145,21 @@ Pushes an `IMAGE` into Krita. Two modes:
 
 `launch_krita` (on by default) starts Krita first if it is not running, so a cold ComfyUI + a
 closed Krita + one run is all it takes to get a canvas open.
+
+## XYZ Krita Open File
+
+Opens a file **as itself**, rather than pushing pixels at Krita.
+
+The difference matters. Send To Krita hands over an `IMAGE` — a flat grid of pixels — so a `.kra`
+sent that way arrives with its layers already merged and no name. Open File gives Krita the
+*path*: a `.kra` keeps **every layer**, and Krita knows where the file came from, so **Ctrl+S saves
+back over the original**.
+
+The path may be absolute, or relative to ComfyUI's `output/` or `input/` folder — the file you want
+is nearly always something ComfyUI just made, or something you dropped in `input/`.
+
+Use Send To Krita when the picture only exists in the graph. Use Open File when it exists on disk
+and you care about its layers or its path.
 
 ### new_layer: the sizes rarely agree
 

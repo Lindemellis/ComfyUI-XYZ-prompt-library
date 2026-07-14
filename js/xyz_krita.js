@@ -13,11 +13,12 @@ const IMAGE_NODE = 'XYZ Krita Fetch Image';
 const MASK_NODE = 'XYZ Krita Fetch Mask';
 const COLOR_NODE = 'XYZ Krita Fetch Color Masks';
 const SEND_NODE = 'XYZ Krita Send To Krita';
+const OPEN_NODE = 'XYZ Krita Open File';
 
 //: Nodes that pick a layer, and so need the layer list.
 const LAYER_NODES = new Set([IMAGE_NODE, MASK_NODE, COLOR_NODE]);
 //: Every node that talks to Krita — all of them get the Launch button.
-const KRITA_NODES = new Set([...LAYER_NODES, SEND_NODE]);
+const KRITA_NODES = new Set([...LAYER_NODES, SEND_NODE, OPEN_NODE]);
 
 const PLACEHOLDER = '(click Refresh layers)';
 const ROW_H = 30;

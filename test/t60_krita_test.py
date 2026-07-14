@@ -231,3 +231,37 @@ def test_wait_for_plugin_gives_up_instead_of_hanging(monkeypatch):
     monkeypatch.setattr(client, "ping", never)
     # Bounded, always: a launch that never comes up must fail, not block forever.
     assert launcher.wait_for_plugin(timeout=0.1) is None
+
+
+# ------------------------------------------------------------------ open file
+
+
+def test_an_absolute_path_is_used_as_is(tmp_path):
+    from krita_nodes.nodes import resolve_path
+
+    target = tmp_path / "sketch.kra"
+    target.write_text("")
+    assert resolve_path(str(target)) == str(target)
+
+
+def test_a_quoted_path_is_unquoted():
+    # Windows' "Copy as path" wraps the path in quotes; pasting it must just work.
+    from krita_nodes.nodes import resolve_path
+
+    with pytest.raises(RuntimeError):
+        resolve_path('"   "')
+
+
+def test_an_empty_path_is_refused():
+    from krita_nodes.nodes import resolve_path
+
+    for bad in ("", "   ", None):
+        with pytest.raises(RuntimeError, match="no file path given"):
+            resolve_path(bad)
+
+
+def test_a_relative_path_that_matches_nothing_says_where_it_looked(monkeypatch):
+    from krita_nodes import nodes
+
+    with pytest.raises(RuntimeError, match="could not find"):
+        nodes.resolve_path("nowhere.kra")

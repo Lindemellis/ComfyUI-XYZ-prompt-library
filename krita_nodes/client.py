@@ -99,6 +99,10 @@ def new_document(png: bytes, name: str = "ComfyUI", timeout: float = 120.0) -> d
     return _post("/document", png, {"name": name}, timeout)
 
 
+def open_file(path: str, timeout: float = 120.0) -> dict:
+    return _get_json("/open", {"path": path}, timeout)
+
+
 def _post(path: str, png: bytes, params: dict, timeout: float) -> dict:
     request = urllib.request.Request(
         f"{base_url()}{path}?{urllib.parse.urlencode(params)}",

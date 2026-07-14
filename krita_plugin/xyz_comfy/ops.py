@@ -292,6 +292,40 @@ def _write_pixels(node, image: QImage, width: int, height: int) -> None:
     node.setPixelData(data, 0, 0, width, height)
 
 
+def open_file(path: str) -> dict:
+    """Open a file on disk AS ITSELF.
+
+    Not the same thing as pushing pixels in: a `.kra` opened this way keeps every
+    layer, and Krita knows the file's path, so Ctrl+S saves back over it. Sending
+    an IMAGE would flatten the layers and produce an unnamed document.
+    """
+    import os
+
+    if not path:
+        raise OpsError("no path given")
+    if not os.path.isfile(path):
+        raise OpsError(f"there is no file at {_short(path, 80)}")
+
+    app = Krita.instance()
+    doc = app.openDocument(path)
+    if doc is None:
+        raise OpsError(f"Krita could not open {_short(path, 80)}")
+
+    window = app.activeWindow()
+    if window is None:
+        raise OpsError("Krita has no window open yet — give it a moment and retry")
+    window.addView(doc)
+    app.setActiveDocument(doc)
+
+    return {
+        "ok": True,
+        "document": doc.name(),
+        "path": doc.fileName(),
+        "size": [doc.width(), doc.height()],
+        "layers": len(doc.rootNode().childNodes()),
+    }
+
+
 def new_document(png: bytes, name: str = "ComfyUI") -> dict:
     """Create a NEW Krita document from an image and show it.
 
