@@ -13,11 +13,59 @@ const CACHE_NODES = new Set([READ_NODE, WRITE_NODE]);
 
 const NO_SLOTS = '(no slots yet — write one first)';
 
-// The picture, and the gap under it. ComfyUI lays the DOM element out a few pixels
-// taller than the height it was given, so the next widget needs breathing room or
-// the image sits on top of the button.
-const PREVIEW_H = 180;
-const PREVIEW_GAP = 10;
+// The preview grows with the node. The one rule that must not be broken: **the
+// height the widget REPORTS may never be derived from the node's height.** A
+// node's height is the sum of its widgets' heights, so a widget that reports back
+// what it was given is a feedback loop — that is how the Mask Editor once reached
+// 1,100,044 px. So computeSize returns a constant FLOOR, and the height is derived
+// from the node's WIDTH and the picture's shape — never from the node's height.
+//
+// The preview is also the LAST widget on purpose: a DOM element that grows past
+// the row it was given would otherwise sit on top of whatever came after it (it
+// used to overlap 'Browse slots').
+const MIN_PREVIEW = 90;
+const MAX_PREVIEW = 1400;
+const PREVIEW_PAD = 8;
+//: Horizontal padding ComfyUI leaves around a DOM widget.
+const PREVIEW_INSET = 20;
+//: What to assume before we know the picture's shape.
+const DEFAULT_ASPECT = 4 / 3;
+
+//: Everything above the preview: the title, the output slots, and the two widget
+//: rows (the slot combo and the Browse button).
+function spaceAbovePreview(node) {
+  const rows = 2 * (LiteGraph.NODE_WIDGET_HEIGHT + 4);
+  return (
+    LiteGraph.NODE_TITLE_HEIGHT +
+    (node.outputs?.length ?? 0) * LiteGraph.NODE_SLOT_HEIGHT +
+    rows +
+    PREVIEW_PAD
+  );
+}
+
+//: The shape of the picture in the chosen slot, from the slot list — no need to
+//: wait for the <img> to decode.
+function slotAspect(node) {
+  const slot = node.widgets?.find((w) => w.name === 'slot')?.value;
+  const record = (node.__xyzSlots ?? []).find((s) => s.name === slot);
+  if (!record?.has_image || !record.width || !record.height) return DEFAULT_ASPECT;
+  return record.width / record.height;
+}
+
+// The preview box takes the SHAPE of the picture, so the image fills it edge to
+// edge — `object-fit: contain` in a box of the wrong shape just grows the black
+// bars, which is what made a wide picture look tiny in a tall node.
+//
+// Width drives height, and the node's height follows. That direction matters:
+// width is the user's, height is derived, and nothing derived is ever fed back
+// into what it was derived from. (A widget that reports back the height it was
+// given is the feedback loop that once blew the Mask Editor up to 1,100,044 px.)
+function previewHeight(node) {
+  const width = Math.max(1, node.size[0] - PREVIEW_INSET);
+  return Math.round(
+    Math.min(MAX_PREVIEW, Math.max(MIN_PREVIEW, width / slotAspect(node))),
+  );
+}
 
 // The image at a slot is REPLACED in place, so its URL never changes. Without the
 // mtime the browser would keep showing the picture from three runs ago.
@@ -213,12 +261,21 @@ app.registerExtension({
     const slotWidget = node.widgets?.find((w) => w.name === 'slot');
 
     if (node.comfyClass === READ_NODE) {
+      // BEFORE the preview: the preview is the one that stretches, so nothing may
+      // come after it.
+      node.addWidget('button', 'Browse slots', null, () => openBrowser(node));
+      // No Refresh button: the folder is polled, so there is nothing to refresh.
+
       const wrap = document.createElement('div');
       wrap.style.cssText = `display:flex;align-items:center;justify-content:center;
-        width:100%;height:${PREVIEW_H}px;border-radius:6px;border:1px solid #45475a;
+        width:100%;height:${MIN_PREVIEW}px;border-radius:6px;border:1px solid #45475a;
         background:#11111b;overflow:hidden;`;
+      // width/height 100%, NOT max-width/max-height. The max-* pair only CAPS the
+      // image — it never grows it — so a 400x200 picture in a 700x500 box drew at
+      // its natural 400x200 with black on all four sides, and the bars just got
+      // fatter as the node grew. object-fit keeps the aspect ratio.
       const img = document.createElement('img');
-      img.style.cssText = 'max-width:100%;max-height:100%;object-fit:contain;display:none;';
+      img.style.cssText = 'width:100%;height:100%;object-fit:contain;display:none;';
       const empty = document.createElement('div');
       empty.style.cssText = 'color:#585b70;font:12px ui-sans-serif,system-ui,sans-serif;';
       empty.textContent = 'no image';
@@ -229,9 +286,43 @@ app.registerExtension({
         setValue: () => {},
         serialize: false,
       });
-      // Reserve MORE than the element takes, or the button below is overlapped.
-      preview.computeSize = () => [node.size[0], PREVIEW_H + PREVIEW_GAP];
+      // A CONSTANT floor. Reporting back the height we just handed the element is
+      // the feedback loop; LiteGraph only needs a minimum from us.
+      preview.computeSize = () => [node.size[0], MIN_PREVIEW];
       preview.computeLayoutSize = undefined;
+
+      // Drag the node WIDER and the picture grows. Height is not the user's to
+      // set: it is whatever the picture's shape needs, so there are no black bars.
+      const fit = () => {
+        if (node.__xyzFitting) return;
+        node.__xyzFitting = true;
+
+        const height = previewHeight(node);
+        if (Math.round(parseFloat(wrap.style.height)) !== height) {
+          wrap.style.height = `${height}px`;
+        }
+        const wanted = spaceAbovePreview(node) + height;
+        if (Math.round(node.size[1]) !== wanted) {
+          node.setSize([node.size[0], wanted]);
+        }
+
+        node.__xyzFitting = false;
+      };
+      node.__xyzFitPreview = fit;
+
+      const onResize = node.onResize;
+      node.onResize = function (size) {
+        const result = onResize?.apply(this, arguments);
+        fit();
+        return result;
+      };
+
+      const onConfigure = node.onConfigure;
+      node.onConfigure = function (info) {
+        const result = onConfigure?.apply(this, arguments);
+        fit();
+        return result;
+      };
 
       node.__xyzUpdatePreview = () => {
         const slot = slotWidget?.value;
@@ -254,6 +345,9 @@ app.registerExtension({
         }
         img.style.display = '';
         empty.style.display = 'none';
+        // A different slot is a different shape — reshape the box, or the new
+        // picture gets bars the old one did not have.
+        node.__xyzFitPreview?.();
       };
 
       if (slotWidget) {
@@ -265,10 +359,8 @@ app.registerExtension({
         };
       }
 
-      // No Refresh button: the folder is polled, so there is nothing to refresh.
-      node.addWidget('button', 'Browse slots', null, () => openBrowser(node));
-
-      if (node.size[0] < 300) node.size[0] = 300;
+      node.setSize([Math.max(300, node.size[0]), node.size[1]]);
+      fit();
     }
 
     if (node.comfyClass === WRITE_NODE) {
