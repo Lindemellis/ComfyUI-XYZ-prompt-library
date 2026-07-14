@@ -18,6 +18,7 @@ gallery_data/
 
 # Prompt Library V2 local database (SQLite WAL — personal, do not publish)
 prompt_library_v2_data/
+prompt_library_v3_data/
 
 # Prompt Library V2 design/working notes (kept local)
 prompt_library_v2_requirements.md

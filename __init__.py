@@ -1,5 +1,6 @@
 from .prompt_library_node import PromptLibraryNode
 from .prompt_library_v2 import PromptLibraryV2PositiveNode, PromptLibraryV2NegativeNode
+from .prompt_library_v3 import PromptLibraryV3PositiveNode, PromptLibraryV3NegativeNode
 
 import os
 import json
@@ -11,6 +12,8 @@ NODE_CLASS_MAPPINGS = {
     "XYZ Prompt Library": PromptLibraryNode,
     "XYZ Prompt Library V2 Positive": PromptLibraryV2PositiveNode,
     "XYZ Prompt Library V2 Negative": PromptLibraryV2NegativeNode,
+    "XYZ Prompt Library V3 Positive": PromptLibraryV3PositiveNode,
+    "XYZ Prompt Library V3 Negative": PromptLibraryV3NegativeNode,
 }
 
 WEB_DIRECTORY = "./js"
@@ -257,6 +260,12 @@ try:
     _plv2_setup()
 except Exception as _plv2_err:
     print(f"[PLv2] setup failed, continuing without PLv2: {_plv2_err!r}")
+
+try:
+    from .prompt_library_v3 import setup as _plv3_setup
+    _plv3_setup()
+except Exception as _plv3_err:
+    print(f"[PLv3] setup failed, continuing without PLv3: {_plv3_err!r}")
 
 # LLM Prompt Assistant — must run AFTER PLv2 (reuses its DB + WriteQueue).
 try:
