@@ -12,6 +12,9 @@
 
 import { app } from '../../../scripts/app.js';
 import { manager as tagdbManager } from './tagdb_panel.js';
+import {
+  DEFAULTS as PLV3_DEFAULTS, reset as plv3Reset, set as plv3Set, settings as plv3,
+} from './plv3/settings.js';
 
 const EXT_ID = 'XYZNodes.PromptTools';
 
@@ -146,6 +149,7 @@ const NAV = [
   ['library',      '📚', 'Library'],
   ['related',      '🔗', 'Related'],
   ['preview',      '🖼', 'Preview'],
+  ['plv3',         '⬡',  'Prompt Library V3'],
   ['dataset',      '🗄', 'Tag dataset'],
   ['llm',          '🤖', 'LLM'],
   ['about',        'ⓘ',  'About'],
@@ -259,7 +263,8 @@ class SettingsPage {
       );
     } else if (key === 'related') {
       wrap.append(
-        sectionTitle('Related tags', 'Click a tag in the rich editor or entry text view to see related tags.'),
+        sectionTitle('Related tags',
+          'Click a tag in the rich editor, the entry text view or the PLv3 editor to see related tags.'),
         row('Enable related tags', 'Each lookup is one request to danbooru.',
             toggle(() => S.enableRelated, (v) => { S.enableRelated = v; save(); })),
         row('Cache freshness (days)', 'Reuse cached related results for this many days.',
@@ -286,6 +291,8 @@ class SettingsPage {
       const host = el('div', { style: { marginTop: '6px' } });
       wrap.append(host);
       try { tagdbManager.renderInto(host); } catch (e) { host.append(el('div', { style: { color: '#f88' } }, 'manager failed: ' + e.message)); }
+    } else if (key === 'plv3') {
+      return this._buildPlv3Pane(wrap);
     } else if (key === 'llm') {
       return this._buildLlmPane();
     } else if (key === 'about') {
@@ -297,6 +304,72 @@ class SettingsPage {
            el('br'), el('a', { href: 'https://github.com/zhupeter010903/ComfyUI-XYZ-prompt-library', target: '_blank', style: { color: C.accent } }, 'GitHub repository')),
       );
     }
+    return wrap;
+  }
+
+  /** Prompt Library V3.
+   *
+   *  These were constants living in whichever file happened to need them. They are all
+   *  things a user has an opinion about — most of all the slider ranges, because the
+   *  range IS the resolution: a slider that can reach 4.0 makes 1.1 vs 1.15 a pixel
+   *  apart, and nobody weights a tag at 4.0. */
+  _buildPlv3Pane(wrap) {
+    const rangeRow = (label, helper, keys, bounds) => {
+      const [minK, maxK, stepK] = keys;
+      const box = el('div', { style: { display: 'flex', gap: '6px', alignItems: 'center' } },
+        numberCtrl(() => plv3()[minK], (v) => plv3Set(minK, v), { ...bounds, width: '62px' }),
+        el('span', { style: { color: C.sub, fontSize: '12px' } }, '→'),
+        numberCtrl(() => plv3()[maxK], (v) => plv3Set(maxK, v), { ...bounds, width: '62px' }),
+        el('span', { style: { color: C.sub, fontSize: '12px', marginLeft: '6px' } }, 'step'),
+        numberCtrl(() => plv3()[stepK], (v) => plv3Set(stepK, v), { min: 0.01, max: 1, step: 0.01, width: '62px' }),
+      );
+      return row(label, helper, box);
+    };
+
+    wrap.append(
+      sectionTitle('Sliders',
+        'The range is the resolution: a slider that reaches 4.0 makes 1.1 and 1.15 a pixel apart.'),
+      rangeRow('Prompt weight', '(tag:1.2) — the attention syntax.',
+        ['weightMin', 'weightMax', 'weightStep'], { min: -5, max: 10, step: 0.1 }),
+      rangeRow('LoRA weight', '<lora:name:0.8> — its own range, because a LoRA may go negative.',
+        ['loraMin', 'loraMax', 'loraStep'], { min: -5, max: 10, step: 0.1 }),
+      row('Schedule step', 'The grain of the [@schedule] range slider. 0.05 = 20 stops across a run.',
+        numberCtrl(() => plv3().scheduleStep, (v) => plv3Set('scheduleStep', v),
+          { min: 0.01, max: 0.5, step: 0.01 })),
+
+      el('div', { style: { height: '18px' } }),
+      sectionTitle('Editor'),
+      row('Font size', null,
+        sliderCtrl(() => plv3().fontSize, (v) => plv3Set('fontSize', v), { min: 10, max: 22, step: 1 })),
+      row('Word wrap', 'Off means long lines scroll sideways instead of folding.',
+        toggle(() => plv3().wordWrap, (v) => plv3Set('wordWrap', v))),
+      row('Refresh delay (ms)',
+        'How long after you stop typing before the preview and the detail page catch up.',
+        numberCtrl(() => plv3().lintDelayMs, (v) => plv3Set('lintDelayMs', v),
+          { min: 0, max: 2000, step: 50, width: '80px' })),
+
+      el('div', { style: { height: '18px' } }),
+      sectionTitle('Library window'),
+      row('Autosave delay (ms)',
+        'A preset saves itself after an edit. The delay is why dragging a slider is one save, not forty.',
+        numberCtrl(() => plv3().autosaveDelayMs, (v) => plv3Set('autosaveDelayMs', v),
+          { min: 0, max: 5000, step: 100, width: '80px' })),
+
+      el('div', { style: { height: '18px' } }),
+      row('Reset to defaults', 'Only the settings on this page.',
+        el('button', {
+          style: {
+            background: C.input, color: C.text, border: `1px solid ${C.border}`,
+            borderRadius: '6px', padding: '5px 12px', fontSize: '13px', cursor: 'pointer',
+          },
+          onclick: () => {
+            plv3Reset();
+            wrap.replaceChildren();
+            this._buildPlv3Pane(wrap);   // redraw against the defaults
+          },
+        }, 'Reset'),
+      ),
+    );
     return wrap;
   }
 

@@ -81,6 +81,13 @@ function createDropdownButton() {
     });
 
     const items = [
+      // PLv3 windows open with no node selected: the editor lists whatever PLv3 nodes are
+      // in the graph, and the library does not need one at all.
+      { label: 'Prompt Library V3 — Editor',
+        action: () => { try { window.plv3?.window?.toggle(null)?.catch?.(() => {}); } catch {} } },
+      { label: 'Prompt Library V3 — Library',
+        action: () => { try { window.plv3?.library?.toggle()?.catch?.(() => {}); } catch {} } },
+      { separator: true },
       { label: 'Prompt Library V2 — Text Editor',
         action: () => { try { window.plv2?.windows?.editor?.show(null); } catch {} } },
       { label: 'Prompt Library V2 — Library',

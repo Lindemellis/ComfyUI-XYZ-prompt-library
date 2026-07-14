@@ -666,6 +666,13 @@ function _analyzeToken(el) {
   const text = _acVal(el);
   const pos  = _acCaret(el);
 
+  // A tags-only host (PLv3's Monaco editor) has its OWN `[` and `/` syntax and its own
+  // completion for it. Offering PLv2 library refs there would be answering a question
+  // nobody asked, in another library's vocabulary.
+  if (el._xyzTagsOnly) {
+    return { mode: 'tag', query: getPartialTag(el), rangeStart: _tokenStart(text, pos) };
+  }
+
   const lastOpen  = text.lastIndexOf('[', pos - 1);
   const lastClose = text.lastIndexOf(']', pos - 1);
   if (lastOpen > lastClose) {
@@ -781,9 +788,13 @@ class TagAutocompleteUI {
     if (settings.animaArtist && (info.query || '').startsWith('@')) {
       return this._showAtTags(el, info);
     }
+    // A tags-only host has its own library (PLv3's), reached through its own `[`
+    // completion. Mixing PLv2's library prompts into its dropdown would be answering
+    // in the wrong library's vocabulary.
+    const useLib = settings.useLibrary && !el._xyzTagsOnly;
     const [tagsRaw, libRaw] = await Promise.all([
       searchTags(info.query, settings.maxSuggestions),
-      settings.useLibrary ? fetchLibraryPrompts(info.query, settings.maxLibrary) : [],
+      useLib ? fetchLibraryPrompts(info.query, settings.maxLibrary) : [],
     ]);
     const tags = _applyMinCount(tagsRaw).map((t) => ({ ...t, kind: 'tag' }));
     const results = _mergeTagSources(tags, libRaw);
@@ -1560,7 +1571,12 @@ class TagACHandler {
   }
 
   handleInput(e) {
-    if (!settings.enabled || !e.isTrusted) return;
+    if (!settings.enabled) return;
+    // Trusted events only — EXCEPT for a host that has no real input events of its
+    // own to give. PLv3's Monaco editor types into its own hidden textarea, so the
+    // bridge synthesises them (see js/plv3/tagac_monaco.js); dropping those would
+    // mean the dropdown never opens there at all.
+    if (!e.isTrusted && !e.currentTarget?._xyzSynthetic) return;
     // A just-committed insertion fired this event — swallow it so the dropdown
     // doesn't reopen on the candidate we just chose.
     if (this._suppressInput) {
@@ -1577,12 +1593,19 @@ class TagACHandler {
   handleClick(e) {
     if (!settings.enabled) return;
     const el = e.currentTarget;
-    // 1) Check for [ref] at click position
-    const refInner = _refAtCaret(_acVal(el), _acCaret(el));
-    if (refInner) {
-      this.ui.showEntryForRef(el, refInner);
-      return;
+    const tagsOnly = !!el._xyzTagsOnly;
+
+    // 1) A PLv2 [ref] at the click position. A tags-only host has its own bracket
+    //    syntax — `[demo.quality.scores]` there is a PLv3 library block, and looking
+    //    it up in PLv2's library answers a question nobody asked.
+    if (!tagsOnly) {
+      const refInner = _refAtCaret(_acVal(el), _acCaret(el));
+      if (refInner) {
+        this.ui.showEntryForRef(el, refInner);
+        return;
+      }
     }
+
     // 2) Check for token
     const name = getTokenAtCaret(el);
     if (!name || name.length < 2) {
@@ -1590,8 +1613,11 @@ class TagACHandler {
       if (this.ui.isVisible() && this.ui._isInfo) this.ui.hide();
       return;
     }
-    // 3) Entries by prompt (library) → related tags (danbooru)
-    if (settings.useLibrary) {
+
+    // 3) Entries by prompt (PLv2 library) → related tags (danbooru). On a tags-only
+    //    host there is no PLv2 library to consult, so a click means RELATED — which
+    //    is the whole point of clicking a tag.
+    if (settings.useLibrary && !tagsOnly) {
       this.ui.showEntriesByPrompt(el, name);
     } else if (settings.enableRelated) {
       this.ui.showRelatedFor(el, name);
@@ -1693,6 +1719,10 @@ function attachTo(el, opts = {}) {
   // Rich contentEditable host: an adapter that abstracts value/caret/splice/caret-coords
   // so the same AC code drives a contentEditable editor (see js/plv2_richedit adapter).
   if (opts.adapter) el._xyzAcc = opts.adapter;
+  // Tags only — no PLv2 `[ref]` / `/ref` modes (see _analyzeToken).
+  if (opts.tagsOnly) el._xyzTagsOnly = true;
+  // This host cannot produce trusted DOM events; it synthesises them (see handleInput).
+  if (opts.synthetic) el._xyzSynthetic = true;
   if (el._xyzTagACHooked) return;
   el._xyzTagACHooked = true;
 
