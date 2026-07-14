@@ -44,3 +44,6 @@ tagdb_data/
 dist/
 # Cache slots (XYZ Cache Slot Write/Read) — ComfyUI's output/xyz_cache/
 output/
+
+# Krita launcher settings (krita.exe path)
+krita_data/

@@ -18,7 +18,7 @@ import time
 
 import numpy as np
 
-from . import client
+from . import client, launcher
 
 try:
     from ..node import ByPassTypeTuple
@@ -468,14 +468,19 @@ class XYZKritaFetchColorMasks(_KritaBase):
         return tuple(torch.from_numpy(m).unsqueeze(0) for m in masks)
 
 
+SEND_MODES = ["new_layer", "new_document"]
+
+
 class XYZKritaSendToKrita(_KritaBase):
     NAME = "XYZ Krita Send To Krita"
     DESCRIPTION = (
-        "Pushes an image back into Krita as a new layer on top of the active "
-        "document.\n"
-        "Sizes rarely match: an image smaller than the canvas is scaled up to it. "
-        "A bigger one either grows the whole document (scale_document) or is scaled "
-        "down to the canvas."
+        "Pushes an image into Krita.\n"
+        "new_layer: on top of the document already open. Sizes rarely match — an "
+        "image smaller than the canvas is scaled up to it; a bigger one either grows "
+        "the whole document (scale_document) or is scaled down.\n"
+        "new_document: opens a brand-new Krita document at the image's size. This is "
+        "the front of the workflow, when Krita has nothing open yet.\n"
+        "With launch_krita on, Krita is started if it is not already running."
     )
     RETURN_TYPES = ()
     OUTPUT_NODE = True
@@ -485,14 +490,30 @@ class XYZKritaSendToKrita(_KritaBase):
         return {
             "required": {
                 "image": ("IMAGE",),
+                "mode": (
+                    SEND_MODES,
+                    {
+                        "default": "new_layer",
+                        "tooltip": "new_layer needs a document open in Krita; "
+                        "new_document creates one.",
+                    },
+                ),
                 "layer_name": ("STRING", {"default": "ComfyUI"}),
                 "scale_document": (
                     "BOOLEAN",
                     {
                         "default": False,
-                        "tooltip": "If the image is bigger than the canvas, scale the "
-                        "whole Krita document (every layer) up to it. The canvas only "
-                        "ever grows.",
+                        "tooltip": "new_layer only. If the image is bigger than the "
+                        "canvas, scale the whole Krita document (every layer) up to "
+                        "it. The canvas only ever grows.",
+                    },
+                ),
+                "launch_krita": (
+                    "BOOLEAN",
+                    {
+                        "default": True,
+                        "tooltip": "Start Krita if it is not running, and wait for it. "
+                        "Krita takes ~20s to come up.",
                     },
                 ),
                 "max_wait": (
@@ -503,18 +524,40 @@ class XYZKritaSendToKrita(_KritaBase):
         }
 
     def execute(
-        self, image=None, layer_name="ComfyUI", scale_document=False, max_wait=180.0, **_
+        self,
+        image=None,
+        mode="new_layer",
+        layer_name="ComfyUI",
+        scale_document=False,
+        launch_krita=True,
+        max_wait=180.0,
+        **_,
     ):
         if image is None:
             raise RuntimeError("nothing connected to `image`")
 
+        if launch_krita and not launcher.is_running():
+            print("[XYZ Krita] Krita is not running — starting it")
+            launcher.launch(timeout=max(60.0, max_wait))
+
+        png = _encode(image)
+
+        if mode == "new_document":
+            result = client.new_document(png, name=layer_name, timeout=max_wait)
+            size = result.get("size", [0, 0])
+            print(
+                f"[XYZ Krita] opened a new document '{result.get('document')}' "
+                f"({size[0]}x{size[1]})"
+            )
+            return {}
+
         result = client.add_layer(
-            _encode(image),
+            png,
             name=layer_name,
             scale_document=bool(scale_document),
             timeout=max_wait,
         )
-        size = result.get("size", [])
+        size = result.get("size", [0, 0])
         if result.get("document_scaled"):
             print(f"[XYZ Krita] the Krita document was scaled up to {size[0]}x{size[1]}")
         print(f"[XYZ Krita] added layer '{result.get('layer')}' ({size[0]}x{size[1]})")

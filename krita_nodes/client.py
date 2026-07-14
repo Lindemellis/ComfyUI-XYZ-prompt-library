@@ -87,11 +87,21 @@ def add_layer(
     scale_document: bool = False,
     timeout: float = 180.0,
 ) -> dict:
-    params = urllib.parse.urlencode(
-        {"name": name, "scale_document": "true" if scale_document else "false"}
+    return _post(
+        "/layer",
+        png,
+        {"name": name, "scale_document": "true" if scale_document else "false"},
+        timeout,
     )
+
+
+def new_document(png: bytes, name: str = "ComfyUI", timeout: float = 120.0) -> dict:
+    return _post("/document", png, {"name": name}, timeout)
+
+
+def _post(path: str, png: bytes, params: dict, timeout: float) -> dict:
     request = urllib.request.Request(
-        f"{base_url()}/layer?{params}",
+        f"{base_url()}{path}?{urllib.parse.urlencode(params)}",
         data=png,
         headers={"Content-Type": "image/png"},
         method="POST",

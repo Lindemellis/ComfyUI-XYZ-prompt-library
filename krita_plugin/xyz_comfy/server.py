@@ -98,15 +98,20 @@ class _Handler(BaseHTTPRequestHandler):
         query = parse_qs(url.query)
 
         try:
-            if url.path != "/layer":
+            if url.path not in ("/layer", "/document"):
                 return self._error(f"no such endpoint: {url.path}", status=404)
 
             length = int(self.headers.get("Content-Length") or 0)
             if length <= 0:
-                return self._error("POST /layer needs a PNG body")
+                return self._error(f"POST {url.path} needs a PNG body")
             png = self.rfile.read(length)
 
             name = (query.get("name") or ["ComfyUI"])[0]
+
+            if url.path == "/document":
+                result = self.main.call(lambda: ops.new_document(png, name), timeout=120)
+                return self._json(result)
+
             scale = (query.get("scale_document") or ["false"])[0].lower() in (
                 "1",
                 "true",

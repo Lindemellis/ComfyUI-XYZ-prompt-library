@@ -273,6 +273,61 @@ def export_mask(layer_id: str) -> bytes:
         raise OpsError(f"'{node.name()}' is a {kind}, which cannot provide a mask")
 
 
+def _decode_png(png: bytes) -> QImage:
+    image = QImage.fromData(QByteArray(png), "PNG")
+    if image.isNull():
+        raise OpsError("could not decode the image that ComfyUI sent")
+    return image.convertToFormat(QImage.Format_ARGB32)
+
+
+def _write_pixels(node, image: QImage, width: int, height: int) -> None:
+    """ARGB32's buffer is BGRA, which is the byte order setPixelData wants for an
+    8-bit RGBA layer — the same identity we rely on when reading, in reverse."""
+    expected = width * height * 4
+    data = QByteArray(image.constBits().asstring(image.sizeInBytes()))
+    if data.size() != expected:
+        raise OpsError(
+            f"internal: {data.size()} bytes of pixel data for a {width}x{height} layer"
+        )
+    node.setPixelData(data, 0, 0, width, height)
+
+
+def new_document(png: bytes, name: str = "ComfyUI") -> dict:
+    """Create a NEW Krita document from an image and show it.
+
+    This is the front of the workflow: ComfyUI has a picture (or a blank canvas at
+    the size you want) and Krita has nothing open yet. `add_layer` cannot do it —
+    it needs a document to add to.
+    """
+    with _Batchmode():
+        app = Krita.instance()
+        image = _decode_png(png)
+        width, height = image.width(), image.height()
+
+        doc = app.createDocument(
+            width, height, name or "ComfyUI", "RGBA", "U8", "", 120.0
+        )
+        if doc is None:
+            raise OpsError("Krita refused to create the document")
+
+        # Without a view the document exists but is invisible, and
+        # activeDocument() keeps returning whatever was there before.
+        window = app.activeWindow()
+        if window is None:
+            raise OpsError("Krita has no window open yet — give it a moment and retry")
+        window.addView(doc)
+        app.setActiveDocument(doc)
+
+        layer = doc.createNode(name or "ComfyUI", "paintlayer")
+        doc.rootNode().addChildNode(layer, None)
+        _write_pixels(layer, image, width, height)
+
+        doc.refreshProjection()
+        doc.waitForDone()
+
+        return {"ok": True, "document": doc.name(), "size": [width, height]}
+
+
 def add_layer(png: bytes, name: str = "ComfyUI", scale_document: bool = False) -> dict:
     """Push an image back into Krita as a new paint layer, on top.
 
@@ -287,11 +342,7 @@ def add_layer(png: bytes, name: str = "ComfyUI", scale_document: bool = False) -
     """
     with _Batchmode():
         doc = _document()
-
-        image = QImage.fromData(QByteArray(png), "PNG")
-        if image.isNull():
-            raise OpsError("could not decode the image that ComfyUI sent")
-        image = image.convertToFormat(QImage.Format_ARGB32)
+        image = _decode_png(png)
 
         grew = False
         if (image.width(), image.height()) != (doc.width(), doc.height()):
@@ -324,17 +375,7 @@ def add_layer(png: bytes, name: str = "ComfyUI", scale_document: bool = False) -
         node = doc.createNode(name or "ComfyUI", "paintlayer")
         # None => on top of the stack.
         doc.rootNode().addChildNode(node, None)
-
-        # ARGB32's buffer is BGRA on a little-endian box, which is the byte order
-        # setPixelData wants for an 8-bit RGBA layer — the same identity we rely
-        # on when reading.
-        expected = width * height * 4
-        data = QByteArray(image.constBits().asstring(image.sizeInBytes()))
-        if data.size() != expected:
-            raise OpsError(
-                f"internal: {data.size()} bytes of pixel data for a {width}x{height} layer"
-            )
-        node.setPixelData(data, 0, 0, width, height)
+        _write_pixels(node, image, width, height)
 
         doc.refreshProjection()
         doc.waitForDone()

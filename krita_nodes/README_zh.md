@@ -105,11 +105,34 @@ Krita 的 API **只能在主线程调**,所以 HTTP 处理器从不直接碰文�
 > 的槽位输出**空遮罩**。两种情况都不报错 —— 所以你在 Krita 里加了第四种颜色却忘了调大 `count`,那个
 > 区域就从提示词里**悄悄消失了**。看控制台:节点会打印每张遮罩的颜色和它占画布的比例。
 
+## 从 ComfyUI 启动 Krita
+
+每个 Krita 节点上都有一个 **Launch Krita** 按钮。它会自己找到 `krita.exe`、启动它,并**等到桥接
+就绪为止** —— Krita 要 ~20 秒才起得来,进程一出现就发请求只会超时。Krita 已经在跑的话它会直接
+告诉你,不会再开一个。
+
+找不到 Krita 的话,设一次路径就行:
+
+```bash
+curl -X POST localhost:8188/xyz/krita/executable -d '{"path": "C:/Program Files/Krita (x64)/bin/krita.exe"}'
+```
+或者把 `XYZ_KRITA_EXE` 环境变量指向它。保存的路径在 `krita_data/settings.json`。
+
 ## XYZ Krita Send To Krita
 
-把 `IMAGE` 推回 Krita,作为活动文档最上面的一个新图层。
+把 `IMAGE` 推进 Krita。两种模式:
 
-尺寸很少刚好一致,所以:
+| `mode` | 作用 |
+|---|---|
+| `new_layer` | 插到已打开文档的最上面。**需要已有文档。** |
+| `new_document` | 按图片尺寸新建一个 Krita 文档。这是工作流的**开头** —— Krita 还什么都没开的时候。 |
+
+`launch_krita`(默认开)会在 Krita 没跑时先把它启动起来。所以「ComfyUI 冷启动 + Krita 没开 +
+跑一次」就能直接得到一张打开的画布。
+
+### new_layer:尺寸很少刚好一致
+
+所以:
 
 | 图片… | 会发生什么 |
 |---|---|

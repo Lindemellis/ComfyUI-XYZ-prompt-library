@@ -185,3 +185,49 @@ def test_control_characters_never_reach_an_error_message():
 
 def test_a_normal_id_is_untouched():
     assert _short("9c742cc6") == "9c742cc6"
+
+
+# --------------------------------------------------------------- the launcher
+
+
+def test_a_saved_executable_path_wins(monkeypatch, tmp_path):
+    from krita_nodes import launcher
+
+    exe = tmp_path / "krita.exe"
+    exe.write_text("")
+    monkeypatch.setattr(launcher, "SETTINGS", tmp_path / "settings.json")
+    monkeypatch.setattr(launcher, "DATA_DIR", tmp_path)
+
+    launcher.set_executable(str(exe))
+    assert launcher.find_executable() == str(exe)
+
+
+def test_setting_a_path_that_is_not_a_file_is_refused(monkeypatch, tmp_path):
+    from krita_nodes import launcher
+
+    monkeypatch.setattr(launcher, "SETTINGS", tmp_path / "settings.json")
+    monkeypatch.setattr(launcher, "DATA_DIR", tmp_path)
+    with pytest.raises(launcher.KritaNotFound):
+        launcher.set_executable(str(tmp_path / "nope.exe"))
+
+
+def test_the_environment_overrides_when_nothing_is_saved(monkeypatch, tmp_path):
+    from krita_nodes import launcher
+
+    exe = tmp_path / "krita-from-env.exe"
+    exe.write_text("")
+    monkeypatch.setattr(launcher, "SETTINGS", tmp_path / "missing.json")
+    monkeypatch.setenv("XYZ_KRITA_EXE", str(exe))
+    monkeypatch.setattr(launcher.shutil, "which", lambda _: None)
+    assert launcher.find_executable() == str(exe)
+
+
+def test_wait_for_plugin_gives_up_instead_of_hanging(monkeypatch):
+    from krita_nodes import client, launcher
+
+    def never(*_, **__):
+        raise client.KritaUnreachable("nope")
+
+    monkeypatch.setattr(client, "ping", never)
+    # Bounded, always: a launch that never comes up must fail, not block forever.
+    assert launcher.wait_for_plugin(timeout=0.1) is None

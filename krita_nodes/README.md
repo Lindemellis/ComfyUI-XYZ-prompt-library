@@ -119,11 +119,35 @@ never overlap and never leave a seam along an anti-aliased edge.
 > from your prompt. Watch the console; the node prints each mask's colour and its share of the
 > canvas.
 
+## Starting Krita from ComfyUI
+
+Every Krita node has a **Launch Krita** button. It finds `krita.exe` for you, starts it, and
+waits until the bridge answers — Krita takes ~20s to come up, and a node that fired the instant
+the process existed would just time out. If Krita is already running it says so and does not open
+a second one.
+
+If it cannot find Krita, set the path once:
+
+```bash
+curl -X POST localhost:8188/xyz/krita/executable -d '{"path": "C:/Program Files/Krita (x64)/bin/krita.exe"}'
+```
+or point `XYZ_KRITA_EXE` at it. The saved path lives in `krita_data/settings.json`.
+
 ## XYZ Krita Send To Krita
 
-Pushes an `IMAGE` back as a new layer on top of the active document.
+Pushes an `IMAGE` into Krita. Two modes:
 
-The sizes rarely agree, so:
+| `mode` | What it does |
+|---|---|
+| `new_layer` | On top of the document already open. **Needs a document.** |
+| `new_document` | Opens a brand-new Krita document at the image's size. This is the front of the workflow, when Krita has nothing open yet. |
+
+`launch_krita` (on by default) starts Krita first if it is not running, so a cold ComfyUI + a
+closed Krita + one run is all it takes to get a canvas open.
+
+### new_layer: the sizes rarely agree
+
+So:
 
 | The image is… | What happens |
 |---|---|

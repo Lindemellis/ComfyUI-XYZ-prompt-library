@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from aiohttp import web
 
-from . import client, installer
+from . import client, installer, launcher
 from .nodes import DOCUMENT_ENTRY, combo_entry
 
 
@@ -75,6 +75,38 @@ def register(server) -> None:
                 ],
             }
         )
+
+    @routes.get("/xyz/krita/launch")
+    async def krita_launch_status(request):
+        return web.json_response(launcher.status())
+
+    @routes.post("/xyz/krita/launch")
+    async def krita_launch(request):
+        # Krita takes ~20s to come up, so this blocks until its bridge answers.
+        # aiohttp would otherwise report success while Krita was still splashing.
+        import asyncio
+
+        try:
+            result = await asyncio.get_running_loop().run_in_executor(
+                None, launcher.launch
+            )
+            return web.json_response(result)
+        except launcher.KritaNotFound as exc:
+            return web.json_response(
+                {"ok": False, "error": str(exc), "need_path": True}, status=404
+            )
+        except Exception as exc:  # noqa: BLE001
+            return web.json_response({"ok": False, "error": str(exc)}, status=500)
+
+    @routes.post("/xyz/krita/executable")
+    async def krita_set_executable(request):
+        payload = await request.json()
+        try:
+            return web.json_response(
+                {"ok": True, "executable": launcher.set_executable(payload.get("path", ""))}
+            )
+        except launcher.KritaNotFound as exc:
+            return web.json_response({"ok": False, "error": str(exc)}, status=400)
 
     @routes.get("/xyz/krita/plugin")
     async def krita_plugin_status(request):

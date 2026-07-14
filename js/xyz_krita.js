@@ -12,7 +12,12 @@ import { api } from '../../../scripts/api.js';
 const IMAGE_NODE = 'XYZ Krita Fetch Image';
 const MASK_NODE = 'XYZ Krita Fetch Mask';
 const COLOR_NODE = 'XYZ Krita Fetch Color Masks';
-const KRITA_NODES = new Set([IMAGE_NODE, MASK_NODE, COLOR_NODE]);
+const SEND_NODE = 'XYZ Krita Send To Krita';
+
+//: Nodes that pick a layer, and so need the layer list.
+const LAYER_NODES = new Set([IMAGE_NODE, MASK_NODE, COLOR_NODE]);
+//: Every node that talks to Krita — all of them get the Launch button.
+const KRITA_NODES = new Set([...LAYER_NODES, SEND_NODE]);
 
 const PLACEHOLDER = '(click Refresh layers)';
 const ROW_H = 30;
@@ -96,8 +101,30 @@ function applyLayers(node, data) {
 
 function refreshAll(data) {
   for (const node of app.graph?._nodes ?? []) {
-    if (KRITA_NODES.has(node.comfyClass)) applyLayers(node, data);
+    if (LAYER_NODES.has(node.comfyClass)) applyLayers(node, data);
   }
+}
+
+// A widget button whose label reports what happened, then goes back to normal.
+// Never alert() — it blocks ComfyUI's whole main thread.
+function transientLabel(node, button, text, ms = 4000) {
+  const original = button.__xyzLabel;
+  button.name = text;
+  node.setDirtyCanvas(true, true);
+  clearTimeout(button.__xyzTimer);
+  button.__xyzTimer = setTimeout(() => {
+    button.name = original;
+    node.setDirtyCanvas(true, true);
+  }, ms);
+}
+
+async function launchKrita() {
+  const response = await api.fetchApi('/xyz/krita/launch', { method: 'POST' });
+  const data = await response.json();
+  if (!response.ok || !data.ok) {
+    throw new Error(data.error || `could not start Krita (${response.status})`);
+  }
+  return data;
 }
 
 app.registerExtension({
@@ -105,6 +132,34 @@ app.registerExtension({
 
   async nodeCreated(node) {
     if (!KRITA_NODES.has(node.comfyClass)) return;
+
+    // Krita takes ~20s to start, so this button waits for the bridge rather than
+    // returning the moment the process exists.
+    const launch = node.addWidget('button', 'Launch Krita', null, async () => {
+      launch.name = 'Starting Krita…';
+      node.setDirtyCanvas(true, true);
+      try {
+        const data = await launchKrita();
+        const doc = data.document;
+        transientLabel(
+          node,
+          launch,
+          data.launched
+            ? doc
+              ? `Krita up — ${doc.width}x${doc.height}`
+              : 'Krita up — no document'
+            : 'Krita was already running',
+        );
+      } catch (err) {
+        console.error('[XYZ Krita]', err);
+        transientLabel(node, launch, failureLabel(err));
+      }
+    });
+    launch.__xyzLabel = 'Launch Krita';
+    launch.computeSize = () => [node.size[0], ROW_H];
+    launch.computeLayoutSize = undefined;
+
+    if (!LAYER_NODES.has(node.comfyClass)) return;
 
     const button = node.addWidget('button', 'Refresh layers', null, async () => {
       const original = button.name;
