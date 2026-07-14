@@ -11,6 +11,7 @@ Each tool has its own manual:
 - 📖 [Prompt Library V2](prompt_library_v2/README.md) — still supported; [migration tool](prompt_library_v3/README.md#migrating-from-v2)
 - 📖 [LLM Prompt Assistant](llm/README.md)
 - 📖 [Image Gallery](gallery/README.md)
+- 📖 [Mask Nodes](mask_nodes/README.md) — rectangle masks for PLv3's regions
 
 ## Installation
 
@@ -39,6 +40,7 @@ On the **first run**, the prebuilt Danbooru tag dataset (~66 MB, ~118K tags with
 | **Prompt Library V2** | A SQLite-backed hierarchical prompt library with `[ref]` references, trigger aliases, weights, random modes, and a floating text editor. Resolved by two nodes at execution time. | [plv2](prompt_library_v2/README.md) |
 | **LLM Prompt Assistant** | A floating window that uses an LLM (DeepSeek / OpenAI / Claude / Grok / custom) to generate or optimize txt2img prompts, grounding danbooru tags against your local dataset so they stay real. | [llm](llm/README.md) |
 | **Image Gallery** | Browse and manage ComfyUI output/input images — filters, tags, bulk operations, and metadata viewing. | [gallery](gallery/README.md) |
+| **Mask Nodes** | Draw rectangle masks on a canvas and attach them to a CLIP, so PLv3's `imask: i` regions have something to point at. | [masks](mask_nodes/README.md) |
 
 ## Where things live
 
@@ -79,6 +81,8 @@ Each Prompt Library V2 node also has its own **Library / Editor / Preview / LLM*
 | XYZ Prompt Library V2 Positive | `XYZNodes/Prompt` | Resolve a positive prompt template against the library |
 | XYZ Prompt Library V2 Negative | `XYZNodes/Prompt` | Resolve a negative prompt template against the library |
 | XYZ Prompt Library | `XYZNodes/Prompt` | Legacy V1 prompt library node (kept for backward compatibility) |
+| XYZ Mask Editor | `XYZNodes/Mask` | Draw rectangle masks; one `MASK` output per rectangle ([manual](mask_nodes/README.md)) |
+| XYZ Attach Masks | `XYZNodes/Mask` | Attach those masks to a `CLIP` for `IMASK(i)` / PLv3's `imask: i` |
 
 ## FAQ
 

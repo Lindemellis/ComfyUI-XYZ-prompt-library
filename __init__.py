@@ -1,6 +1,7 @@
 from .prompt_library_node import PromptLibraryNode
 from .prompt_library_v2 import PromptLibraryV2PositiveNode, PromptLibraryV2NegativeNode
 from .prompt_library_v3 import PromptLibraryV3PositiveNode, PromptLibraryV3NegativeNode
+from .mask_nodes import XYZAttachMasks, XYZMaskEditor
 
 import os
 import json
@@ -14,6 +15,8 @@ NODE_CLASS_MAPPINGS = {
     "XYZ Prompt Library V2 Negative": PromptLibraryV2NegativeNode,
     "XYZ Prompt Library V3 Positive": PromptLibraryV3PositiveNode,
     "XYZ Prompt Library V3 Negative": PromptLibraryV3NegativeNode,
+    "XYZ Mask Editor": XYZMaskEditor,
+    "XYZ Attach Masks": XYZAttachMasks,
 }
 
 WEB_DIRECTORY = "./js"

@@ -10,6 +10,7 @@
 - 📖 [提示词库 V2](prompt_library_v2/README_zh.md)
 - 📖 [LLM 提示词助手](llm/README_zh.md)
 - 📖 [图片画廊](gallery/README_zh.md)
+- 📖 [遮罩节点](mask_nodes/README_zh.md) —— 给 PLv3 的 region 用的矩形遮罩
 
 ## 安装
 
@@ -37,6 +38,7 @@
 | **提示词库 V2** | 基于 SQLite 的分层提示词库，支持 `[ref]` 引用、触发别名、权重、随机模式，以及浮动文本编辑器。由两个节点在执行时解析。 | [plv2](prompt_library_v2/README_zh.md) |
 | **LLM 提示词助手** | 一个浮动窗口，用大模型（DeepSeek / OpenAI / Claude / Grok / 自定义）生成或优化文生图提示词，并把 danbooru tag 拿到本地数据集验真，保证 tag 真实存在。 | [llm](llm/README_zh.md) |
 | **图片画廊** | 浏览与管理 ComfyUI 的 output/input 图片——筛选、标签、批量操作、元数据查看。 | [gallery](gallery/README_zh.md) |
+| **遮罩节点** | 在画布上画矩形遮罩并挂到 CLIP 上，让 PLv3 的 `imask: i` region 有东西可指。 | [masks](mask_nodes/README_zh.md) |
 
 ## 入口在哪里
 
@@ -72,6 +74,8 @@
 | XYZ Prompt Library V2 Positive | `XYZNodes/Prompt` | 针对库解析正向提示词模板 |
 | XYZ Prompt Library V2 Negative | `XYZNodes/Prompt` | 针对库解析负向提示词模板 |
 | XYZ Prompt Library | `XYZNodes/Prompt` | 旧版 V1 提示词库节点（保留以兼容） |
+| XYZ Mask Editor | `XYZNodes/Mask` | 画矩形遮罩；每个矩形一个 `MASK` 输出（[手册](mask_nodes/README_zh.md)） |
+| XYZ Attach Masks | `XYZNodes/Mask` | 把遮罩挂到 `CLIP` 上，供 `IMASK(i)` / PLv3 的 `imask: i` 引用 |
 
 ## 常见问题
 
