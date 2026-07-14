@@ -24,12 +24,8 @@ const NO_SLOTS = '(no slots yet — write one first)';
 // the row it was given would otherwise sit on top of whatever came after it (it
 // used to overlap 'Browse slots').
 const MIN_PREVIEW = 90;
-const MAX_PREVIEW = 1400;
+const DEFAULT_PREVIEW = 180;
 const PREVIEW_PAD = 8;
-//: Horizontal padding ComfyUI leaves around a DOM widget.
-const PREVIEW_INSET = 20;
-//: What to assume before we know the picture's shape.
-const DEFAULT_ASPECT = 4 / 3;
 
 //: Everything above the preview: the title, the output slots, and the two widget
 //: rows (the slot combo and the Browse button).
@@ -43,28 +39,20 @@ function spaceAbovePreview(node) {
   );
 }
 
-//: The shape of the picture in the chosen slot, from the slot list — no need to
-//: wait for the <img> to decode.
-function slotAspect(node) {
-  const slot = node.widgets?.find((w) => w.name === 'slot')?.value;
-  const record = (node.__xyzSlots ?? []).find((s) => s.name === slot);
-  if (!record?.has_image || !record.width || !record.height) return DEFAULT_ASPECT;
-  return record.width / record.height;
-}
-
-// The preview box takes the SHAPE of the picture, so the image fills it edge to
-// edge — `object-fit: contain` in a box of the wrong shape just grows the black
-// bars, which is what made a wide picture look tiny in a tall node.
+// The preview box fills whatever room the node gives it. The node's shape is the
+// USER's — the box is not locked to the picture's aspect ratio.
 //
-// Width drives height, and the node's height follows. That direction matters:
-// width is the user's, height is derived, and nothing derived is ever fed back
-// into what it was derived from. (A widget that reports back the height it was
-// given is the feedback loop that once blew the Mask Editor up to 1,100,044 px.)
+// `object-fit: contain` then scales the picture to touch the box on its tighter
+// axis, so it fills either the full width or the full height, and the leftover
+// shows on ONE axis only. It never leaves a border on all four sides — that was a
+// different bug (`max-width/max-height` caps a picture instead of growing it, so a
+// small image just sat in the middle of a big box).
+//
+// Reads node.size, writes ONLY to the element. Never the other way round: a widget
+// that reports back the height it was given is the feedback loop that once blew the
+// Mask Editor up to 1,100,044 px.
 function previewHeight(node) {
-  const width = Math.max(1, node.size[0] - PREVIEW_INSET);
-  return Math.round(
-    Math.min(MAX_PREVIEW, Math.max(MIN_PREVIEW, width / slotAspect(node))),
-  );
+  return Math.max(MIN_PREVIEW, Math.floor(node.size[1] - spaceAbovePreview(node)));
 }
 
 // The image at a slot is REPLACED in place, so its URL never changes. Without the
@@ -291,22 +279,13 @@ app.registerExtension({
       preview.computeSize = () => [node.size[0], MIN_PREVIEW];
       preview.computeLayoutSize = undefined;
 
-      // Drag the node WIDER and the picture grows. Height is not the user's to
-      // set: it is whatever the picture's shape needs, so there are no black bars.
+      // Drag the node any shape you like — the box follows it. Only the element is
+      // touched here; the node's size stays the user's.
       const fit = () => {
-        if (node.__xyzFitting) return;
-        node.__xyzFitting = true;
-
         const height = previewHeight(node);
         if (Math.round(parseFloat(wrap.style.height)) !== height) {
           wrap.style.height = `${height}px`;
         }
-        const wanted = spaceAbovePreview(node) + height;
-        if (Math.round(node.size[1]) !== wanted) {
-          node.setSize([node.size[0], wanted]);
-        }
-
-        node.__xyzFitting = false;
       };
       node.__xyzFitPreview = fit;
 
@@ -359,7 +338,11 @@ app.registerExtension({
         };
       }
 
-      node.setSize([Math.max(300, node.size[0]), node.size[1]]);
+      // Open with a reasonable picture area; after that the size is the user's.
+      node.setSize([
+        Math.max(300, node.size[0]),
+        spaceAbovePreview(node) + DEFAULT_PREVIEW,
+      ]);
       fit();
     }
 

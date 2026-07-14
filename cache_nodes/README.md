@@ -36,8 +36,9 @@ XYZ Cache Slot Read  (slot: "base") → upscale → …
 **Read** shows a **live preview** of the slot it is pointing at, and **Browse slots** opens a window
 with every slot that holds an image. Click one and the node switches to it.
 
-**Drag the node wider to make the preview bigger.** The preview takes the shape of the picture, so
-the image fills it edge to edge and the node's height follows — there are no black bars to grow.
+**Drag the node to any shape to resize the preview** — the box is not locked to the picture's aspect
+ratio. The image scales to touch the box on its tighter axis, so it always fills either the full
+width or the full height; any leftover shows on one axis only, never on all four sides.
 
 Both dropdowns are **live**, and so is the preview. They re-read the folder rather than trusting the
 list ComfyUI built at startup, so a slot you create — or write to — during this session shows up
