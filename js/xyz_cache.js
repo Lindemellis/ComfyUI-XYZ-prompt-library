@@ -68,6 +68,39 @@ async function refreshAll() {
   return slots;
 }
 
+// ---------------------------------------------------------------- live polling
+//
+// A slot's image can change with ComfyUI none the wiser — you edit it in Krita and
+// save over it, or another tool writes it. Watch the folder so the preview keeps
+// up with what is actually on disk.
+
+const POLL_MS = 2000;
+let lastSeen = '';
+
+const cacheNodesOnCanvas = () =>
+  (app.graph?._nodes ?? []).filter((n) => CACHE_NODES.has(n.comfyClass));
+
+async function poll() {
+  // Nothing to update, or nobody looking: don't hit the disk.
+  if (document.hidden || cacheNodesOnCanvas().length === 0) return;
+
+  let slots;
+  try {
+    slots = await fetchSlots();
+  } catch {
+    return; // a blip is not worth a console full of noise
+  }
+
+  // Compare on name + mtime: only redraw when the folder really moved.
+  const fingerprint = slots
+    .map((s) => `${s.name}:${s.has_image ? s.mtime : '-'}`)
+    .join('|');
+  if (fingerprint === lastSeen) return;
+  lastSeen = fingerprint;
+
+  for (const node of cacheNodesOnCanvas()) applySlots(node, slots);
+}
+
 // ---------------------------------------------------------------- the browser
 
 function openBrowser(target) {
@@ -200,11 +233,20 @@ app.registerExtension({
         const record = (node.__xyzSlots ?? []).find((s) => s.name === slot);
         if (!slot || slot === NO_SLOTS || !record?.has_image) {
           img.style.display = 'none';
+          img.removeAttribute('src');
           empty.style.display = '';
           empty.textContent = slot && slot !== NO_SLOTS ? `'${slot}' is empty` : 'no image';
+          node.__xyzShowing = null;
           return;
         }
-        img.src = slotImageUrl(slot, record.mtime);
+        // Only touch src when the picture ACTUALLY changed. The poller runs every
+        // couple of seconds, and reassigning src every time makes the preview
+        // flicker as the browser re-decodes the same image.
+        const showing = `${slot}@${record.mtime}`;
+        if (node.__xyzShowing !== showing) {
+          img.src = slotImageUrl(slot, record.mtime);
+          node.__xyzShowing = showing;
+        }
         img.style.display = '';
         empty.style.display = 'none';
       };
@@ -272,5 +314,11 @@ app.registerExtension({
     // A Write that just ran created or replaced an image; the Read node next to it
     // should show the new picture without anyone pressing anything.
     api.addEventListener('execution_success', () => refreshAll());
+
+    setInterval(poll, POLL_MS);
+    // Coming back to the tab: catch up at once rather than waiting for the tick.
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) poll();
+    });
   },
 });

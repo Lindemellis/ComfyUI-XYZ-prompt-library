@@ -36,9 +36,15 @@ XYZ Cache Slot Read  (slot: "base") → upscale → …
 **Read** shows a **preview** of the slot it is pointing at, and **Browse slots** opens a window with
 every slot that holds an image. Click one and the node switches to it.
 
-Both dropdowns are **live**: they re-read the folder rather than trusting the list ComfyUI built at
-startup, so a slot you create — or write to — during this session shows up straight away, with no
-page reload. When a Write finishes, the Read node next to it refreshes on its own.
+Both dropdowns are **live**, and so is the preview. They re-read the folder rather than trusting the
+list ComfyUI built at startup, so a slot you create — or write to — during this session shows up
+straight away, with no page reload. When a Write finishes, the Read node next to it refreshes on its
+own.
+
+The folder is polled every couple of seconds, so **a slot's image changing outside ComfyUI is picked
+up too** — edit it in Krita, save over it, and the preview follows. The image only reloads when its
+mtime actually moved, so it does not flicker. Polling stops while the tab is in the background and
+catches up the moment you come back.
 
 Read only offers slots that hold an image; Write also offers the empty ones you have just created.
 
