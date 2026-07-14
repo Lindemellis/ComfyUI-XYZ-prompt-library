@@ -1,0 +1,12 @@
+worst quality, low quality, jpeg artifacts,
+
+[demo.bad]: {
+    worst quality,
+    low quality,
+    watermark,
+    signature,
+}
+
+{
+    blurry, out of focus,
+}.set{weight: 1.1}

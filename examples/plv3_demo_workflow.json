@@ -1,0 +1,1172 @@
+{
+ "id": "00000000-0000-0000-0000-000000000000",
+ "revision": 0,
+ "last_node_id": 15,
+ "last_link_id": 19,
+ "nodes": [
+  {
+   "id": 1,
+   "type": "SolidMask",
+   "pos": [
+    40,
+    700
+   ],
+   "size": [
+    270,
+    106
+   ],
+   "flags": {},
+   "order": 0,
+   "mode": 0,
+   "inputs": [
+    {
+     "localized_name": "明度",
+     "name": "value",
+     "type": "FLOAT",
+     "widget": {
+      "name": "value"
+     },
+     "link": null
+    },
+    {
+     "localized_name": "宽度",
+     "name": "width",
+     "type": "INT",
+     "widget": {
+      "name": "width"
+     },
+     "link": null
+    },
+    {
+     "localized_name": "高度",
+     "name": "height",
+     "type": "INT",
+     "widget": {
+      "name": "height"
+     },
+     "link": null
+    }
+   ],
+   "outputs": [
+    {
+     "localized_name": "遮罩",
+     "name": "MASK",
+     "type": "MASK",
+     "links": [
+      1,
+      3
+     ]
+    }
+   ],
+   "properties": {
+    "cnr_id": "comfy-core",
+    "ver": "0.25.1",
+    "Node name for S&R": "SolidMask"
+   },
+   "widgets_values": [
+    0,
+    1024,
+    1024
+   ]
+  },
+  {
+   "id": 2,
+   "type": "SolidMask",
+   "pos": [
+    40,
+    840
+   ],
+   "size": [
+    270,
+    106
+   ],
+   "flags": {},
+   "order": 1,
+   "mode": 0,
+   "inputs": [
+    {
+     "localized_name": "明度",
+     "name": "value",
+     "type": "FLOAT",
+     "widget": {
+      "name": "value"
+     },
+     "link": null
+    },
+    {
+     "localized_name": "宽度",
+     "name": "width",
+     "type": "INT",
+     "widget": {
+      "name": "width"
+     },
+     "link": null
+    },
+    {
+     "localized_name": "高度",
+     "name": "height",
+     "type": "INT",
+     "widget": {
+      "name": "height"
+     },
+     "link": null
+    }
+   ],
+   "outputs": [
+    {
+     "localized_name": "遮罩",
+     "name": "MASK",
+     "type": "MASK",
+     "links": [
+      2,
+      4
+     ]
+    }
+   ],
+   "properties": {
+    "cnr_id": "comfy-core",
+    "ver": "0.25.1",
+    "Node name for S&R": "SolidMask"
+   },
+   "widgets_values": [
+    1,
+    512,
+    1024
+   ]
+  },
+  {
+   "id": 3,
+   "type": "MaskComposite",
+   "pos": [
+    280,
+    700
+   ],
+   "size": [
+    270,
+    126
+   ],
+   "flags": {},
+   "order": 7,
+   "mode": 0,
+   "inputs": [
+    {
+     "localized_name": "目标",
+     "name": "destination",
+     "type": "MASK",
+     "link": 1
+    },
+    {
+     "localized_name": "源",
+     "name": "source",
+     "type": "MASK",
+     "link": 2
+    },
+    {
+     "localized_name": "x",
+     "name": "x",
+     "type": "INT",
+     "widget": {
+      "name": "x"
+     },
+     "link": null
+    },
+    {
+     "localized_name": "y",
+     "name": "y",
+     "type": "INT",
+     "widget": {
+      "name": "y"
+     },
+     "link": null
+    },
+    {
+     "localized_name": "操作",
+     "name": "operation",
+     "type": "COMBO",
+     "widget": {
+      "name": "operation"
+     },
+     "link": null
+    }
+   ],
+   "outputs": [
+    {
+     "localized_name": "遮罩",
+     "name": "MASK",
+     "type": "MASK",
+     "links": [
+      6
+     ]
+    }
+   ],
+   "properties": {
+    "cnr_id": "comfy-core",
+    "ver": "0.25.1",
+    "Node name for S&R": "MaskComposite"
+   },
+   "widgets_values": [
+    0,
+    0,
+    "add"
+   ]
+  },
+  {
+   "id": 4,
+   "type": "MaskComposite",
+   "pos": [
+    280,
+    880
+   ],
+   "size": [
+    270,
+    126
+   ],
+   "flags": {},
+   "order": 8,
+   "mode": 0,
+   "inputs": [
+    {
+     "localized_name": "目标",
+     "name": "destination",
+     "type": "MASK",
+     "link": 3
+    },
+    {
+     "localized_name": "源",
+     "name": "source",
+     "type": "MASK",
+     "link": 4
+    },
+    {
+     "localized_name": "x",
+     "name": "x",
+     "type": "INT",
+     "widget": {
+      "name": "x"
+     },
+     "link": null
+    },
+    {
+     "localized_name": "y",
+     "name": "y",
+     "type": "INT",
+     "widget": {
+      "name": "y"
+     },
+     "link": null
+    },
+    {
+     "localized_name": "操作",
+     "name": "operation",
+     "type": "COMBO",
+     "widget": {
+      "name": "operation"
+     },
+     "link": null
+    }
+   ],
+   "outputs": [
+    {
+     "localized_name": "遮罩",
+     "name": "MASK",
+     "type": "MASK",
+     "links": [
+      7
+     ]
+    }
+   ],
+   "properties": {
+    "cnr_id": "comfy-core",
+    "ver": "0.25.1",
+    "Node name for S&R": "MaskComposite"
+   },
+   "widgets_values": [
+    512,
+    0,
+    "add"
+   ]
+  },
+  {
+   "id": 5,
+   "type": "CheckpointLoaderSimple",
+   "pos": [
+    40,
+    40
+   ],
+   "size": [
+    273.4576171875,
+    98
+   ],
+   "flags": {},
+   "order": 2,
+   "mode": 0,
+   "inputs": [
+    {
+     "localized_name": "Checkpoint名称",
+     "name": "ckpt_name",
+     "type": "COMBO",
+     "widget": {
+      "name": "ckpt_name"
+     },
+     "link": null
+    }
+   ],
+   "outputs": [
+    {
+     "localized_name": "模型",
+     "name": "MODEL",
+     "type": "MODEL",
+     "links": [
+      13
+     ]
+    },
+    {
+     "localized_name": "CLIP",
+     "name": "CLIP",
+     "type": "CLIP",
+     "links": [
+      5,
+      10
+     ]
+    },
+    {
+     "localized_name": "VAE",
+     "name": "VAE",
+     "type": "VAE",
+     "links": [
+      18
+     ]
+    }
+   ],
+   "properties": {
+    "cnr_id": "comfy-core",
+    "ver": "0.25.1",
+    "Node name for S&R": "CheckpointLoaderSimple"
+   },
+   "widgets_values": [
+    "waiIllustriousSDXL_v140.safetensors"
+   ]
+  },
+  {
+   "id": 6,
+   "type": "PCAddMaskToCLIPMany",
+   "pos": [
+    560,
+    700
+   ],
+   "size": [
+    195.56796875,
+    106
+   ],
+   "flags": {},
+   "order": 11,
+   "mode": 0,
+   "inputs": [
+    {
+     "localized_name": "clip",
+     "name": "clip",
+     "type": "CLIP",
+     "link": 5
+    },
+    {
+     "localized_name": "mask1",
+     "name": "mask1",
+     "shape": 7,
+     "type": "MASK",
+     "link": 6
+    },
+    {
+     "localized_name": "mask2",
+     "name": "mask2",
+     "shape": 7,
+     "type": "MASK",
+     "link": 7
+    },
+    {
+     "localized_name": "mask3",
+     "name": "mask3",
+     "shape": 7,
+     "type": "MASK",
+     "link": null
+    },
+    {
+     "localized_name": "mask4",
+     "name": "mask4",
+     "shape": 7,
+     "type": "MASK",
+     "link": null
+    }
+   ],
+   "outputs": [
+    {
+     "localized_name": "CLIP",
+     "name": "CLIP",
+     "type": "CLIP",
+     "links": [
+      8
+     ]
+    }
+   ],
+   "properties": {
+    "cnr_id": "comfyui-prompt-control",
+    "ver": "139808033bf314948a589a820e8129aed99677c7",
+    "Node name for S&R": "PCAddMaskToCLIPMany"
+   }
+  },
+  {
+   "id": 7,
+   "type": "XYZ Prompt Library V3 Positive",
+   "pos": [
+    40,
+    200
+   ],
+   "size": [
+    430,
+    240
+   ],
+   "flags": {},
+   "order": 3,
+   "mode": 0,
+   "inputs": [
+    {
+     "localized_name": "text",
+     "name": "text",
+     "type": "STRING",
+     "widget": {
+      "name": "text"
+     },
+     "link": null
+    },
+    {
+     "localized_name": "seed",
+     "name": "seed",
+     "type": "INT",
+     "widget": {
+      "name": "seed"
+     },
+     "link": null
+    },
+    {
+     "localized_name": "region_mode",
+     "name": "region_mode",
+     "type": "COMBO",
+     "widget": {
+      "name": "region_mode"
+     },
+     "link": null
+    }
+   ],
+   "outputs": [
+    {
+     "localized_name": "prompt",
+     "name": "prompt",
+     "type": "STRING",
+     "links": [
+      9,
+      12
+     ]
+    }
+   ],
+   "properties": {
+    "aux_id": "Lindemellis/ComfyUI-XYZ-prompt-library",
+    "ver": "51a111fe946d141a8872eb4d1f65767d46bb3303",
+    "Node name for S&R": "XYZ Prompt Library V3 Positive"
+   },
+   "widgets_values": [
+    "masterpiece, best quality, (artist:wlop:1.1), <lora:add_detail:0.6>, smile \\(cat\\),\n\n[demo.quality.anima]: {\n    masterpiece,\n    best quality,\n    absurdres,\n    [demo.quality.scores]: {\n        score_9,\n        score_8_up,\n    }\n}.set{weight: 1.05}\n\n{\n    depth of field, cinematic lighting, rim light, backlighting, god rays,\n}.set{random_select: 2-3, shuffle: true, seed: 7}\n\n{\n    city street, neon signs, rain,\n}.set{format: \"($p:1.05)\", dropout: 0.2}\n\n[@schedule]: {\n    0 - 0.3: closed eyes,\n    0.3 - 1: { open eyes, looking at viewer, }\n}\n\n[@region]: {\n    base: { 2girls, yuri, side-by-side, }\n\n    [imask: 0, feather: 12, include_in_base: true]: {\n        [demo.characters.illya]: {\n            (illyasviel von einzbern:1.15),\n            blonde hair,\n            red eyes,\n            [demo.characters.illya.accessories]: {\n                hair ribbon,\n            }\n        }\n    }\n\n    [imask: 1, feather: 12, include_in_base: true]: {\n        [demo.characters.miyu]: {\n            (miyu edelfelt:1.15),\n            black hair,\n            yellow eyes,\n        }\n    }.set{schedule: {0.15, 1}}\n\n    fill: { detailed background, bokeh, }\n}\n",
+    42,
+    "randomize",
+    "couple",
+    ""
+   ]
+  },
+  {
+   "id": 8,
+   "type": "XYZ Prompt Library V3 Negative",
+   "pos": [
+    40,
+    470
+   ],
+   "size": [
+    430,
+    200
+   ],
+   "flags": {},
+   "order": 4,
+   "mode": 0,
+   "inputs": [
+    {
+     "localized_name": "text",
+     "name": "text",
+     "type": "STRING",
+     "widget": {
+      "name": "text"
+     },
+     "link": null
+    },
+    {
+     "localized_name": "seed",
+     "name": "seed",
+     "type": "INT",
+     "widget": {
+      "name": "seed"
+     },
+     "link": null
+    }
+   ],
+   "outputs": [
+    {
+     "localized_name": "prompt",
+     "name": "prompt",
+     "type": "STRING",
+     "links": [
+      11
+     ]
+    }
+   ],
+   "properties": {
+    "aux_id": "Lindemellis/ComfyUI-XYZ-prompt-library",
+    "ver": "51a111fe946d141a8872eb4d1f65767d46bb3303",
+    "Node name for S&R": "XYZ Prompt Library V3 Negative"
+   },
+   "widgets_values": [
+    "worst quality, low quality, jpeg artifacts,\n\n[demo.bad]: {\n    worst quality,\n    low quality,\n    watermark,\n    signature,\n}\n\n{\n    blurry, out of focus,\n}.set{weight: 1.1}\n",
+    42,
+    "randomize",
+    ""
+   ]
+  },
+  {
+   "id": 9,
+   "type": "PCLazyTextEncode",
+   "pos": [
+    560,
+    200
+   ],
+   "size": [
+    400,
+    200
+   ],
+   "flags": {},
+   "order": 12,
+   "mode": 0,
+   "inputs": [
+    {
+     "localized_name": "clip",
+     "name": "clip",
+     "type": "CLIP",
+     "link": 8
+    },
+    {
+     "localized_name": "text",
+     "name": "text",
+     "type": "STRING",
+     "widget": {
+      "name": "text"
+     },
+     "link": 9
+    }
+   ],
+   "outputs": [
+    {
+     "localized_name": "conditioning",
+     "name": "conditioning",
+     "type": "CONDITIONING",
+     "links": [
+      14
+     ]
+    }
+   ],
+   "properties": {
+    "cnr_id": "comfyui-prompt-control",
+    "ver": "139808033bf314948a589a820e8129aed99677c7",
+    "Node name for S&R": "PCLazyTextEncode"
+   },
+   "widgets_values": [
+    ""
+   ]
+  },
+  {
+   "id": 10,
+   "type": "PCLazyTextEncode",
+   "pos": [
+    560,
+    330
+   ],
+   "size": [
+    400,
+    200
+   ],
+   "flags": {},
+   "order": 10,
+   "mode": 0,
+   "inputs": [
+    {
+     "localized_name": "clip",
+     "name": "clip",
+     "type": "CLIP",
+     "link": 10
+    },
+    {
+     "localized_name": "text",
+     "name": "text",
+     "type": "STRING",
+     "widget": {
+      "name": "text"
+     },
+     "link": 11
+    }
+   ],
+   "outputs": [
+    {
+     "localized_name": "conditioning",
+     "name": "conditioning",
+     "type": "CONDITIONING",
+     "links": [
+      15
+     ]
+    }
+   ],
+   "properties": {
+    "cnr_id": "comfyui-prompt-control",
+    "ver": "139808033bf314948a589a820e8129aed99677c7",
+    "Node name for S&R": "PCLazyTextEncode"
+   },
+   "widgets_values": [
+    ""
+   ]
+  },
+  {
+   "id": 11,
+   "type": "PCExtractScheduledPrompt",
+   "pos": [
+    560,
+    470
+   ],
+   "size": [
+    400,
+    208
+   ],
+   "flags": {},
+   "order": 9,
+   "mode": 0,
+   "inputs": [
+    {
+     "localized_name": "text",
+     "name": "text",
+     "type": "STRING",
+     "widget": {
+      "name": "text"
+     },
+     "link": 12
+    },
+    {
+     "localized_name": "at",
+     "name": "at",
+     "type": "FLOAT",
+     "widget": {
+      "name": "at"
+     },
+     "link": null
+    },
+    {
+     "localized_name": "tags",
+     "name": "tags",
+     "shape": 7,
+     "type": "STRING",
+     "widget": {
+      "name": "tags"
+     },
+     "link": null
+    },
+    {
+     "localized_name": "expand_segs",
+     "name": "expand_segs",
+     "shape": 7,
+     "type": "BOOLEAN",
+     "widget": {
+      "name": "expand_segs"
+     },
+     "link": null
+    },
+    {
+     "localized_name": "expand_subs",
+     "name": "expand_subs",
+     "shape": 7,
+     "type": "BOOLEAN",
+     "widget": {
+      "name": "expand_subs"
+     },
+     "link": null
+    },
+    {
+     "localized_name": "expand_macros",
+     "name": "expand_macros",
+     "shape": 7,
+     "type": "BOOLEAN",
+     "widget": {
+      "name": "expand_macros"
+     },
+     "link": null
+    }
+   ],
+   "outputs": [
+    {
+     "localized_name": "字符串",
+     "name": "STRING",
+     "type": "STRING",
+     "links": null
+    }
+   ],
+   "properties": {
+    "cnr_id": "comfyui-prompt-control",
+    "ver": "139808033bf314948a589a820e8129aed99677c7",
+    "Node name for S&R": "PCExtractScheduledPrompt"
+   },
+   "widgets_values": [
+    "",
+    0.5,
+    "",
+    false,
+    false,
+    false
+   ]
+  },
+  {
+   "id": 12,
+   "type": "EmptyLatentImage",
+   "pos": [
+    560,
+    570
+   ],
+   "size": [
+    270,
+    106
+   ],
+   "flags": {},
+   "order": 5,
+   "mode": 0,
+   "inputs": [
+    {
+     "localized_name": "宽度",
+     "name": "width",
+     "type": "INT",
+     "widget": {
+      "name": "width"
+     },
+     "link": null
+    },
+    {
+     "localized_name": "高度",
+     "name": "height",
+     "type": "INT",
+     "widget": {
+      "name": "height"
+     },
+     "link": null
+    },
+    {
+     "localized_name": "批量大小",
+     "name": "batch_size",
+     "type": "INT",
+     "widget": {
+      "name": "batch_size"
+     },
+     "link": null
+    }
+   ],
+   "outputs": [
+    {
+     "localized_name": "Latent",
+     "name": "LATENT",
+     "type": "LATENT",
+     "links": [
+      16
+     ]
+    }
+   ],
+   "properties": {
+    "cnr_id": "comfy-core",
+    "ver": "0.25.1",
+    "Node name for S&R": "EmptyLatentImage"
+   },
+   "widgets_values": [
+    1024,
+    1024,
+    1
+   ]
+  },
+  {
+   "id": 13,
+   "type": "KSampler",
+   "pos": [
+    860,
+    200
+   ],
+   "size": [
+    270,
+    262
+   ],
+   "flags": {},
+   "order": 13,
+   "mode": 0,
+   "inputs": [
+    {
+     "localized_name": "模型",
+     "name": "model",
+     "type": "MODEL",
+     "link": 13
+    },
+    {
+     "localized_name": "正面条件",
+     "name": "positive",
+     "type": "CONDITIONING",
+     "link": 14
+    },
+    {
+     "localized_name": "负面条件",
+     "name": "negative",
+     "type": "CONDITIONING",
+     "link": 15
+    },
+    {
+     "localized_name": "Latent图像",
+     "name": "latent_image",
+     "type": "LATENT",
+     "link": 16
+    },
+    {
+     "localized_name": "种子",
+     "name": "seed",
+     "type": "INT",
+     "widget": {
+      "name": "seed"
+     },
+     "link": null
+    },
+    {
+     "localized_name": "步数",
+     "name": "steps",
+     "type": "INT",
+     "widget": {
+      "name": "steps"
+     },
+     "link": null
+    },
+    {
+     "localized_name": "cfg",
+     "name": "cfg",
+     "type": "FLOAT",
+     "widget": {
+      "name": "cfg"
+     },
+     "link": null
+    },
+    {
+     "localized_name": "采样器名称",
+     "name": "sampler_name",
+     "type": "COMBO",
+     "widget": {
+      "name": "sampler_name"
+     },
+     "link": null
+    },
+    {
+     "localized_name": "调度器",
+     "name": "scheduler",
+     "type": "COMBO",
+     "widget": {
+      "name": "scheduler"
+     },
+     "link": null
+    },
+    {
+     "localized_name": "降噪",
+     "name": "denoise",
+     "type": "FLOAT",
+     "widget": {
+      "name": "denoise"
+     },
+     "link": null
+    }
+   ],
+   "outputs": [
+    {
+     "localized_name": "Latent",
+     "name": "LATENT",
+     "type": "LATENT",
+     "links": [
+      17
+     ]
+    }
+   ],
+   "properties": {
+    "cnr_id": "comfy-core",
+    "ver": "0.25.1",
+    "Node name for S&R": "KSampler"
+   },
+   "widgets_values": [
+    42,
+    "randomize",
+    24,
+    5,
+    "euler_ancestral",
+    "normal",
+    1
+   ]
+  },
+  {
+   "id": 14,
+   "type": "VAEDecode",
+   "pos": [
+    1180,
+    200
+   ],
+   "size": [
+    140,
+    46
+   ],
+   "flags": {},
+   "order": 14,
+   "mode": 0,
+   "inputs": [
+    {
+     "localized_name": "Latent",
+     "name": "samples",
+     "type": "LATENT",
+     "link": 17
+    },
+    {
+     "localized_name": "vae",
+     "name": "vae",
+     "type": "VAE",
+     "link": 18
+    }
+   ],
+   "outputs": [
+    {
+     "localized_name": "图像",
+     "name": "IMAGE",
+     "type": "IMAGE",
+     "links": [
+      19
+     ]
+    }
+   ],
+   "properties": {
+    "cnr_id": "comfy-core",
+    "ver": "0.25.1",
+    "Node name for S&R": "VAEDecode"
+   }
+  },
+  {
+   "id": 15,
+   "type": "SaveImage",
+   "pos": [
+    1360,
+    200
+   ],
+   "size": [
+    270,
+    58
+   ],
+   "flags": {},
+   "order": 6,
+   "mode": 0,
+   "inputs": [
+    {
+     "localized_name": "图片",
+     "name": "images",
+     "type": "IMAGE",
+     "link": 19
+    },
+    {
+     "localized_name": "文件名前缀",
+     "name": "filename_prefix",
+     "type": "STRING",
+     "widget": {
+      "name": "filename_prefix"
+     },
+     "link": null
+    }
+   ],
+   "outputs": [],
+   "properties": {
+    "cnr_id": "comfy-core",
+    "ver": "0.25.1",
+    "Node name for S&R": "SaveImage"
+   },
+   "widgets_values": [
+    "plv3_demo"
+   ]
+  }
+ ],
+ "links": [
+  [
+   1,
+   1,
+   0,
+   3,
+   0,
+   "MASK"
+  ],
+  [
+   2,
+   2,
+   0,
+   3,
+   1,
+   "MASK"
+  ],
+  [
+   3,
+   1,
+   0,
+   4,
+   0,
+   "MASK"
+  ],
+  [
+   4,
+   2,
+   0,
+   4,
+   1,
+   "MASK"
+  ],
+  [
+   5,
+   5,
+   1,
+   6,
+   0,
+   "CLIP"
+  ],
+  [
+   6,
+   3,
+   0,
+   6,
+   1,
+   "MASK"
+  ],
+  [
+   7,
+   4,
+   0,
+   6,
+   2,
+   "MASK"
+  ],
+  [
+   8,
+   6,
+   0,
+   9,
+   0,
+   "CLIP"
+  ],
+  [
+   9,
+   7,
+   0,
+   9,
+   1,
+   "STRING"
+  ],
+  [
+   10,
+   5,
+   1,
+   10,
+   0,
+   "CLIP"
+  ],
+  [
+   11,
+   8,
+   0,
+   10,
+   1,
+   "STRING"
+  ],
+  [
+   12,
+   7,
+   0,
+   11,
+   0,
+   "STRING"
+  ],
+  [
+   13,
+   5,
+   0,
+   13,
+   0,
+   "MODEL"
+  ],
+  [
+   14,
+   9,
+   0,
+   13,
+   1,
+   "CONDITIONING"
+  ],
+  [
+   15,
+   10,
+   0,
+   13,
+   2,
+   "CONDITIONING"
+  ],
+  [
+   16,
+   12,
+   0,
+   13,
+   3,
+   "LATENT"
+  ],
+  [
+   17,
+   13,
+   0,
+   14,
+   0,
+   "LATENT"
+  ],
+  [
+   18,
+   5,
+   2,
+   14,
+   1,
+   "VAE"
+  ],
+  [
+   19,
+   14,
+   0,
+   15,
+   0,
+   "IMAGE"
+  ]
+ ],
+ "groups": [],
+ "config": {},
+ "extra": {
+  "ds": {
+   "scale": 1,
+   "offset": [
+    0,
+    0
+   ]
+  },
+  "qgn_navigation_groups": [],
+  "qgn_locked": false
+ },
+ "version": 0.4
+}

@@ -1,0 +1,49 @@
+masterpiece, best quality, (artist:wlop:1.1), <lora:add_detail:0.6>, smile \(cat\),
+
+[demo.quality.anima]: {
+    masterpiece,
+    best quality,
+    absurdres,
+    [demo.quality.scores]: {
+        score_9,
+        score_8_up,
+    }
+}.set{weight: 1.05}
+
+{
+    depth of field, cinematic lighting, rim light, backlighting, god rays,
+}.set{random_select: 2-3, shuffle: true, seed: 7}
+
+{
+    city street, neon signs, rain,
+}.set{format: "($p:1.05)", dropout: 0.2}
+
+[@schedule]: {
+    0 - 0.3: closed eyes,
+    0.3 - 1: { open eyes, looking at viewer, }
+}
+
+[@region]: {
+    base: { 2girls, yuri, side-by-side, }
+
+    [imask: 0, feather: 12, include_in_base: true]: {
+        [demo.characters.illya]: {
+            (illyasviel von einzbern:1.15),
+            blonde hair,
+            red eyes,
+            [demo.characters.illya.accessories]: {
+                hair ribbon,
+            }
+        }
+    }
+
+    [imask: 1, feather: 12, include_in_base: true]: {
+        [demo.characters.miyu]: {
+            (miyu edelfelt:1.15),
+            black hair,
+            yellow eyes,
+        }
+    }.set{schedule: {0.15, 1}}
+
+    fill: { detailed background, bokeh, }
+}
