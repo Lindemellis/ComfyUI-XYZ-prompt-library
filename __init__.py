@@ -2,6 +2,7 @@ from .prompt_library_node import PromptLibraryNode
 from .prompt_library_v2 import PromptLibraryV2PositiveNode, PromptLibraryV2NegativeNode
 from .prompt_library_v3 import PromptLibraryV3PositiveNode, PromptLibraryV3NegativeNode
 from .mask_nodes import XYZAttachMasks, XYZMaskEditor
+from .krita_nodes import XYZKritaFetchImage, XYZKritaFetchMask
 
 import os
 import json
@@ -17,6 +18,8 @@ NODE_CLASS_MAPPINGS = {
     "XYZ Prompt Library V3 Negative": PromptLibraryV3NegativeNode,
     "XYZ Mask Editor": XYZMaskEditor,
     "XYZ Attach Masks": XYZAttachMasks,
+    "XYZ Krita Fetch Image": XYZKritaFetchImage,
+    "XYZ Krita Fetch Mask": XYZKritaFetchMask,
 }
 
 WEB_DIRECTORY = "./js"
@@ -276,6 +279,12 @@ try:
     _llm_setup(PromptServer.instance)
 except Exception as _llm_err:
     print(f"[LLM] setup failed, continuing without LLM assistant: {_llm_err!r}")
+
+try:
+    from .krita_nodes import setup as _krita_setup
+    _krita_setup()
+except Exception as _krita_err:
+    print(f"[XYZ Krita] setup failed, continuing without the Krita routes: {_krita_err!r}")
 
 try:
     from .tagdb import setup as _tagdb_setup

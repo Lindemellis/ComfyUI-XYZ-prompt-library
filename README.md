@@ -12,6 +12,7 @@ Each tool has its own manual:
 - 📖 [LLM Prompt Assistant](llm/README.md)
 - 📖 [Image Gallery](gallery/README.md)
 - 📖 [Mask Nodes](mask_nodes/README.md) — rectangle masks for PLv3's regions
+- 📖 [Krita Bridge](krita_nodes/README.md) — pull layers and masks out of a running Krita
 
 ## Installation
 
@@ -41,6 +42,7 @@ On the **first run**, the prebuilt Danbooru tag dataset (~66 MB, ~118K tags with
 | **LLM Prompt Assistant** | A floating window that uses an LLM (DeepSeek / OpenAI / Claude / Grok / custom) to generate or optimize txt2img prompts, grounding danbooru tags against your local dataset so they stay real. | [llm](llm/README.md) |
 | **Image Gallery** | Browse and manage ComfyUI output/input images — filters, tags, bulk operations, and metadata viewing. | [gallery](gallery/README.md) |
 | **Mask Nodes** | Draw rectangle masks on a canvas and attach them to a CLIP, so PLv3's `imask: i` regions have something to point at. | [masks](mask_nodes/README.md) |
+| **Krita Bridge** | A Krita plugin + nodes that pull a layer or a mask straight out of the running Krita. ComfyUI stays the workspace; Krita is the sketchpad. | [krita](krita_nodes/README.md) |
 
 ## Where things live
 
@@ -83,6 +85,8 @@ Each Prompt Library V2 node also has its own **Library / Editor / Preview / LLM*
 | XYZ Prompt Library | `XYZNodes/Prompt` | Legacy V1 prompt library node (kept for backward compatibility) |
 | XYZ Mask Editor | `XYZNodes/Mask` | Draw rectangle masks; one `MASK` output per rectangle ([manual](mask_nodes/README.md)) |
 | XYZ Attach Masks | `XYZNodes/Mask` | Attach those masks to a `CLIP` for `IMASK(i)` / PLv3's `imask: i` |
+| XYZ Krita Fetch Image | `XYZNodes/Krita` | A Krita layer (or the whole document) → `IMAGE` ([manual](krita_nodes/README.md)) |
+| XYZ Krita Fetch Mask | `XYZNodes/Krita` | A Krita layer → `MASK`; mask layers read directly, paint layers give alpha |
 
 ## FAQ
 

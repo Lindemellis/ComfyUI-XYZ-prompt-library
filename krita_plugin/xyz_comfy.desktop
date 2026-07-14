@@ -1,0 +1,15 @@
+[Desktop Entry]
+Type=Service
+ServiceTypes=Krita/PythonPlugin
+X-KDE-Library=xyz_comfy
+X-Python-2-Compatible=false
+X-KDE-PluginInfo-Author=ComfyUI-XYZNodes
+X-KDE-PluginInfo-Email=noreply@github.com
+X-KDE-PluginInfo-Name=xyz_comfy
+X-KDE-PluginInfo-Version=1.0.0
+X-KDE-PluginInfo-Website=https://github.com/Lindemellis/ComfyUI-XYZ-prompt-library
+X-KDE-PluginInfo-Category=Python
+X-KDE-PluginInfo-License=MIT
+X-KDE-PluginInfo-EnabledByDefault=true
+Name=XYZ ComfyUI Bridge
+Comment=Serve Krita layers and masks to ComfyUI-XYZNodes
