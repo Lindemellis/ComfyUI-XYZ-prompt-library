@@ -17,6 +17,10 @@ What maps to what:
     {a|b}                       {a, b}.set{random_select: 1}
     {p} / {prompt} in format    $p
     node random/shuffle/dropout the group's settings_json
+    prompt.enabled              a per-group preset named `imported` — v3's library has
+                                no `enabled` column (an item is on iff it appears in the
+                                text, §5.2), so the only place the state can live is a
+                                preset, which IS a whitelist plus an order (§5.4)
 
 Triggers are dropped, but they are still *read* during the migration: a PLv2
 `[ref]` may be written with a trigger name, and it has to resolve to something.
@@ -55,6 +59,8 @@ class Report:
     refs: int = 0
     template_refs: int = 0
     choices: int = 0
+    presets: int = 0
+    disabled: int = 0
     unresolved_refs: list[str] = field(default_factory=list)
     duplicates: list[str] = field(default_factory=list)
 
@@ -66,6 +72,8 @@ class Report:
             "refs": self.refs,
             "template_refs": self.template_refs,
             "choices": self.choices,
+            "presets": self.presets,
+            "disabled": self.disabled,
             "unresolved_refs": self.unresolved_refs,
             "duplicates": self.duplicates,
         }
@@ -274,16 +282,35 @@ def migrate(v2_path: Path, v3_path: Path, dry_run: bool = False) -> Report:
     # and v3's schema says so.  v2 allowed it, so collapse them.
     seen_refs: set[tuple[int, int]] = set()
 
-    def add_ref(gid: int, target_gid: int, where: str) -> bool:
+    # v3's library has no `enabled` column — an item is on iff it appears in the text
+    # (§5.2).  v2's on/off flags therefore have nowhere to live except a PRESET, which
+    # is exactly a whitelist plus an order (§5.4).  Record, per group and in v2's own
+    # order, every item we create and whether v2 had it switched on.
+    #
+    # `ref_targets` is what lets a parent's preset LINK a ref to the child's own
+    # preset.  It has to: a ref with no entry under `children` expands the target with
+    # all of its items (library.py:125), which would switch back on everything the
+    # child had switched off.
+    order: dict[int, list[tuple[int, bool]]] = {}   # v3 group id -> [(item id, on)]
+    ref_targets: dict[int, int] = {}                # v3 ref item id -> target group id
+
+    def record(gid: int, item_id: int, enabled: bool) -> None:
+        order.setdefault(gid, []).append((int(item_id), bool(enabled)))
+
+    def add_ref(gid: int, target_gid: int, where: str, enabled: bool = True) -> bool:
         if (gid, target_gid) in seen_refs:
             report.duplicates.append(f"{where}: duplicate reference, collapsed")
             return False
         try:
-            repo.write(repo.AddItemOp(group_id=gid, kind="ref", ref_group_id=target_gid))
+            item_id = repo.write(
+                repo.AddItemOp(group_id=gid, kind="ref", ref_group_id=target_gid)
+            )
         except repo.CycleError:
             report.unresolved_refs.append(f"{where} (would create a cycle)")
             return False
         seen_refs.add((gid, target_gid))
+        record(gid, item_id, enabled)
+        ref_targets[int(item_id)] = int(target_gid)
         return True
 
     # Items, once every group exists (a ref can point forward).
@@ -295,6 +322,8 @@ def migrate(v2_path: Path, v3_path: Path, dry_run: bool = False) -> Report:
             if not content:
                 continue
 
+            enabled = bool(prompt["enabled"])
+
             only_ref = _ONLY_REF.match(content)
             if only_ref:
                 target = resolver.resolve(only_ref.group(1), str(node["full_path"]))
@@ -303,7 +332,9 @@ def migrate(v2_path: Path, v3_path: Path, dry_run: bool = False) -> Report:
                     report.unresolved_refs.append(f"{node['full_path']} -> {content}")
                     # Keep it as literal text rather than silently dropping it.
                 else:
-                    if add_ref(gid, target_gid, f"{node['full_path']} -> {content}"):
+                    if add_ref(
+                        gid, target_gid, f"{node['full_path']} -> {content}", enabled
+                    ):
                         report.refs += 1
                     continue
 
@@ -314,12 +345,13 @@ def migrate(v2_path: Path, v3_path: Path, dry_run: bool = False) -> Report:
             seen.add(text)
 
             weight = prompt["weight"]
-            repo.write(repo.AddItemOp(
+            item_id = repo.write(repo.AddItemOp(
                 group_id=gid,
                 kind="lora" if text.startswith("<lora:") else "prompt",
                 text=text,
                 weight=float(weight) if weight not in (None, 1.0) else None,
             ))
+            record(gid, item_id, enabled)
             report.items += 1
 
     # `_template` inheritance becomes an explicit ref (spec §9, decision 28).
@@ -335,10 +367,64 @@ def migrate(v2_path: Path, v3_path: Path, dry_run: bool = False) -> Report:
         tpl = _nearest_template(node, by_id, nodes)
         if tpl is None or int(tpl["id"]) not in group_ids:
             continue
+        # A v2 template always applied — the entry could switch its individual prompts
+        # off, but never the inheritance itself. So the ref is always on.
         if add_ref(gid, group_ids[int(tpl["id"])], f"{node['full_path']} -> _template"):
             report.template_refs += 1
 
+    _write_presets(group_ids, order, ref_targets, report)
     return report
+
+
+PRESET_NAME = "imported"
+
+
+def _write_presets(
+    group_ids: dict[int, int],
+    order: dict[int, list[tuple[int, bool]]],
+    ref_targets: dict[int, int],
+    report: Report,
+) -> None:
+    """v2's on/off state, as one preset per group (spec §5.4).
+
+    Two passes, because a parent's preset has to name the id of its child's preset and
+    that row does not exist yet on the first pass. `SavePresetOp` upserts on
+    `(group_id, name)`, so the second pass rewrites the same rows rather than piling up
+    duplicates.
+    """
+    preset_of: dict[int, int] = {}
+    for gid in group_ids.values():
+        preset_of[gid] = repo.write(
+            repo.SavePresetOp(group_id=gid, name=PRESET_NAME, body={})
+        )
+
+    for gid in group_ids.values():
+        seq = order.get(gid, [])
+        whitelist = [item_id for item_id, on in seq if on]
+
+        # LINK every ref that survived to the target's own preset. Without this the
+        # child expands with all of its items and everything v2 had switched off in it
+        # comes back on.
+        children = {}
+        for item_id in whitelist:
+            target = ref_targets.get(item_id)
+            if target is not None and target in preset_of:
+                children[str(item_id)] = {
+                    "mode": "preset",
+                    "preset_id": preset_of[target],
+                }
+
+        repo.write(repo.SavePresetOp(
+            group_id=gid,
+            name=PRESET_NAME,
+            # Weights and settings already live on the item and group rows — a preset
+            # that repeated them would be a second, divergeable copy.
+            body={"items": whitelist, "weights": {}, "settings": {}, "children": children},
+        ))
+        report.presets += 1
+        off = len(seq) - len(whitelist)
+        if off:
+            report.disabled += off
 
 
 def _nearest_template(node: dict, by_id: dict, nodes: list[dict]) -> dict | None:

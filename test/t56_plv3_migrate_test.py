@@ -45,8 +45,9 @@ def build_v2(path: Path) -> None:
          kw.get("dropout", 0.0), kw.get("format", "")),
     )
     prompt = lambda i, n, c, **kw: conn.execute(  # noqa: E731
-        "INSERT INTO prompts(id, node_id, content, weight, order_index) VALUES (?,?,?,?,?)",
-        (i, n, c, kw.get("weight", 1.0), kw.get("order", 0)),
+        "INSERT INTO prompts(id, node_id, content, weight, enabled, order_index) "
+        "VALUES (?,?,?,?,?,?)",
+        (i, n, c, kw.get("weight", 1.0), kw.get("enabled", 1), kw.get("order", 0)),
     )
 
     node(1, None, "quality", "quality")                                   # folder
@@ -61,11 +62,13 @@ def build_v2(path: Path) -> None:
 
     prompt(1, 2, "masterpiece", order=0)
     prompt(2, 2, "[quality.anima.scores]", order=1)   # ref by full path
+    prompt(12, 2, "switched off", enabled=0, order=2)  # a DISABLED prompt
     prompt(3, 3, "score_9", order=0)
+    prompt(13, 3, "score_8_up", enabled=0, order=1)    # disabled inside the sub-entry
     prompt(4, 5, "illya", order=0)
     prompt(5, 5, "blonde hair", weight=1.3, order=1)
     prompt(6, 5, "{smile|grin|laugh}", order=2)       # choice pattern
-    prompt(7, 5, "[anima_trigger]", order=3)          # ref by trigger name
+    prompt(7, 5, "[anima_trigger]", enabled=0, order=3)  # a DISABLED ref
     prompt(8, 6, "worst quality", order=0)
     prompt(9, 7, "best quality", order=0)             # the template's prompt
     prompt(10, 8, "miyu", order=0)
@@ -215,3 +218,101 @@ def test_dry_run_writes_nothing(tmp_path):
     report = migrate_v2.migrate(v2, v3, dry_run=True)
     assert report.groups == 6 and report.folders == 2
     assert not v3.exists()
+
+
+# --- v2's on/off state -> presets (§5.2 / §5.4) -------------------------------
+#
+# v3's library has no `enabled` column: an item is on iff it appears in the text. So
+# the only place v2's flags can live is a preset, which IS a whitelist plus an order.
+
+
+def preset_of(group_name: str) -> dict:
+    g = path_of(group_name)
+    ps = [p for p in repo.list_presets(int(g["id"])) if p["name"] == migrate_v2.PRESET_NAME]
+    assert ps, f"{group_name} has no '{migrate_v2.PRESET_NAME}' preset"
+    return ps[0]
+
+
+def item_texts(group_name: str, ids: list[int]) -> list[str]:
+    g = path_of(group_name)
+    by_id = {int(i["id"]): i for i in repo.list_items(int(g["id"]))}
+    return [by_id[i]["text"] if by_id[i]["kind"] != "ref" else "<ref>" for i in ids]
+
+
+def test_every_group_gets_an_imported_preset(migrated):
+    groups = repo.list_groups()
+    assert migrated.presets == len(groups)
+    for g in groups:
+        names = [p["name"] for p in repo.list_presets(int(g["id"]))]
+        assert migrate_v2.PRESET_NAME in names
+
+
+def test_the_preset_leaves_out_what_v2_had_switched_off(migrated):
+    body = preset_of("anima")["body"]
+    assert "switched off" not in item_texts("anima", body["items"])
+    assert "masterpiece" in item_texts("anima", body["items"])
+
+
+def test_the_item_itself_still_exists_in_the_library(migrated):
+    # A disabled prompt is not deleted — it is simply not in the whitelist, so you can
+    # switch it back on from the detail page.
+    assert "switched off" in texts("anima")
+
+
+def test_a_disabled_ref_is_left_out_too(migrated):
+    body = preset_of("illya")["body"]
+    items = repo.list_items(int(path_of("illya")["id"]))
+    anima_gid = int(path_of("anima")["id"])
+
+    # `illya` has TWO refs: the disabled `[anima_trigger]`, and the `_template` ref the
+    # migration adds — a v2 template ALWAYS applied, so that one stays on.
+    to_anima = next(i for i in items if i["kind"] == "ref" and i["ref_group_id"] == anima_gid)
+    to_template = next(
+        i for i in items
+        if i["kind"] == "ref" and int(i["ref_group_id"]) == int(path_of("_template")["id"])
+    )
+
+    assert int(to_anima["id"]) not in body["items"]      # v2 had it switched off
+    assert int(to_template["id"]) in body["items"]       # inheritance was never optional
+
+
+def test_the_preset_keeps_v2s_order(migrated):
+    body = preset_of("illya")["body"]
+    kept = [t for t in item_texts("illya", body["items"]) if t != "<ref>"]
+    assert kept[:2] == ["illya", "blonde hair"]
+
+
+def test_disabled_is_counted(migrated):
+    # 'switched off', 'score_8_up' and the disabled ref.
+    assert migrated.disabled == 3
+
+
+def test_a_ref_LINKS_to_the_targets_own_preset(migrated):
+    # The trap: a ref with no `children` entry expands the target with ALL its items,
+    # which would switch back on everything the child had switched off.
+    body = preset_of("anima")["body"]
+    ref = next(
+        i for i in repo.list_items(int(path_of("anima")["id"])) if i["kind"] == "ref"
+    )
+    child = body["children"][str(int(ref["id"]))]
+    assert child["mode"] == "preset"
+    assert child["preset_id"] == int(preset_of("scores")["id"])
+
+
+def test_expanding_the_preset_honours_the_child_groups_own_off_state(migrated):
+    # The whole point, end to end: `score_8_up` is off inside `scores`, and expanding
+    # the PARENT's preset must not bring it back.
+    text = library.expand(
+        int(path_of("anima")["id"]), preset_id=int(preset_of("anima")["id"])
+    )
+    assert "masterpiece" in text
+    assert "score_9" in text
+    assert "switched off" not in text
+    assert "score_8_up" not in text
+
+
+def test_expanding_WITHOUT_the_preset_shows_everything(migrated):
+    # No preset = the whole group. The disabled items are still there to switch on.
+    text = library.expand(int(path_of("anima")["id"]))
+    assert "switched off" in text
+    assert "score_8_up" in text
