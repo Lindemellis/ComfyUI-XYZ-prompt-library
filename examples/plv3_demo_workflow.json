@@ -415,7 +415,7 @@
   },
   {
    "id": 7,
-   "type": "XYZ Prompt Library V3 Positive",
+   "type": "XYZ Prompt Library V3",
    "pos": [
     40,
     200
@@ -470,7 +470,7 @@
    "properties": {
     "aux_id": "Lindemellis/ComfyUI-XYZ-prompt-library",
     "ver": "51a111fe946d141a8872eb4d1f65767d46bb3303",
-    "Node name for S&R": "XYZ Prompt Library V3 Positive"
+    "Node name for S&R": "XYZ Prompt Library V3"
    },
    "widgets_values": [
     "masterpiece, best quality, (artist:wlop:1.1), <lora:add_detail:0.6>, smile \\(cat\\),\n\n[demo.quality.anima]: {\n    masterpiece,\n    best quality,\n    absurdres,\n    [demo.quality.scores]: {\n        score_9,\n        score_8_up,\n    }\n}.set{weight: 1.05}\n\n{\n    depth of field, cinematic lighting, rim light, backlighting, god rays,\n}.set{random_select: 2-3, shuffle: true, seed: 7}\n\n{\n    city street, neon signs, rain,\n}.set{format: \"($p:1.05)\", dropout: 0.2}\n\n[@schedule]: {\n    0 - 0.3: closed eyes,\n    0.3 - 1: { open eyes, looking at viewer, }\n}\n\n[@region]: {\n    base: { 2girls, yuri, side-by-side, }\n\n    [imask: 0, feather: 12, include_in_base: true]: {\n        [demo.characters.illya]: {\n            (illyasviel von einzbern:1.15),\n            blonde hair,\n            red eyes,\n            [demo.characters.illya.accessories]: {\n                hair ribbon,\n            }\n        }\n    }\n\n    [imask: 1, feather: 12, include_in_base: true]: {\n        [demo.characters.miyu]: {\n            (miyu edelfelt:1.15),\n            black hair,\n            yellow eyes,\n        }\n    }.set{schedule: {0.15, 1}}\n\n    fill: { detailed background, bokeh, }\n}\n",
@@ -482,7 +482,7 @@
   },
   {
    "id": 8,
-   "type": "XYZ Prompt Library V3 Negative",
+   "type": "XYZ Prompt Library V3",
    "pos": [
     40,
     470
@@ -512,6 +512,15 @@
       "name": "seed"
      },
      "link": null
+    },
+    {
+     "localized_name": "region_mode",
+     "name": "region_mode",
+     "type": "COMBO",
+     "widget": {
+      "name": "region_mode"
+     },
+     "link": null
     }
    ],
    "outputs": [
@@ -527,12 +536,13 @@
    "properties": {
     "aux_id": "Lindemellis/ComfyUI-XYZ-prompt-library",
     "ver": "51a111fe946d141a8872eb4d1f65767d46bb3303",
-    "Node name for S&R": "XYZ Prompt Library V3 Negative"
+    "Node name for S&R": "XYZ Prompt Library V3"
    },
    "widgets_values": [
     "worst quality, low quality, jpeg artifacts,\n\n[demo.bad]: {\n    worst quality,\n    low quality,\n    watermark,\n    signature,\n}\n\n{\n    blurry, out of focus,\n}.set{weight: 1.1}\n",
     42,
     "randomize",
+    "couple",
     ""
    ]
   },

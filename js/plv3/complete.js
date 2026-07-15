@@ -13,13 +13,30 @@
 let _tree = null;
 let _treeAt = 0;
 
+/** The `[` candidates: every group, and every preset of every group.
+ *
+ *  A preset IS a whitelist and an order (spec §5.4), so `[quality.anima ▸ portrait]`
+ *  expands to the same block as `[quality.anima]` minus the items the preset leaves
+ *  out. Both insert a fully expanded block — the document never holds a pointer. */
 async function libraryPaths() {
   // Cheap cache: the tree only changes when the library window writes to it.
   if (_tree && Date.now() - _treeAt < 5000) return _tree;
   try {
     const res = await fetch('/xyz/plv3/library/tree');
     const data = await res.json();
-    _tree = data.groups || [];
+    const groups = data.groups || [];
+    const byGroup = new Map();
+    for (const p of data.presets || []) {
+      if (!byGroup.has(p.group_id)) byGroup.set(p.group_id, []);
+      byGroup.get(p.group_id).push(p);
+    }
+    _tree = [];
+    for (const g of groups) {
+      _tree.push({ id: g.id, path: g.path, preset: null });
+      for (const p of byGroup.get(g.id) || []) {
+        _tree.push({ id: g.id, path: g.path, preset: p });
+      }
+    }
     _treeAt = Date.now();
   } catch {
     _tree = [];
@@ -29,6 +46,11 @@ async function libraryPaths() {
 
 export function invalidateLibraryCache() {
   _tree = null;
+}
+
+/** What the typed word is matched against: the path, plus the preset name if any. */
+function searchKey(g) {
+  return (g.preset ? `${g.path} ${g.preset.name}` : g.path).toLowerCase();
 }
 
 /** What is the caret in?  The Monarch state is not exposed, so read the line. */
@@ -53,41 +75,48 @@ function contextAt(model, position) {
   return { kind: 'tag', from: start + 1, word: before.slice(start + 1).trimStart() };
 }
 
-/** True when the caret sits inside a `.set{ … }` — those are language.js's job. */
-function inSetBlock(model, position) {
-  const upto = model.getValueInRange({
-    startLineNumber: 1,
-    startColumn: 1,
-    endLineNumber: position.lineNumber,
-    endColumn: position.column,
-  });
-  const set = upto.lastIndexOf('.set{');
-  if (set === -1) return false;
-  const after = upto.slice(set);
-  let depth = 0;
-  for (const c of after) {
-    if (c === '{') depth++;
-    else if (c === '}') depth--;
-  }
-  return depth > 0;
-}
-
-/** Is the caret inside the body of a `[@region] { … }`?  A `[` means something else in
- *  there: it opens a region segment (`[imask: 0]: { … }`), not a library path. */
-function inRegionBlock(model, position) {
-  const upto = model.getValueInRange({
+/** Which kind of `{ … }` the caret sits inside — the ONE decision the whole file turns
+ *  on.  Returns 'set', 'region', or 'text' (also the top-level default).
+ *
+ *    set     inside `.set{ … }`         -> field names (language.js), no tags, no `[`
+ *    region  inside `[@region]: { … }`  -> `[` opens a SEGMENT (`[imask …]`), not a path
+ *    text    everywhere else            -> danbooru tags + library `[` paths
+ *
+ *  A group body (`{ … }`) and a region SEGMENT body (`base: { … }`, `[imask: 0]: { … }`)
+ *  are both 'text': their nearest opener is a plain `{` / a `…: {`, neither `.set` nor
+ *  `[@region]:`.
+ *
+ *  Why a brace STACK and not `lastIndexOf('.set{')`: once a `.set{ … }` closes, the next
+ *  plain `{` would still count as "inside a set block" under any lastIndexOf/depth scan
+ *  anchored to it — which is exactly why a plain group used to pop the field list. Only
+ *  balancing the braces says which `{` we are really in. Quoted `"…{…}…"` (a `format`
+ *  string) is skipped so its braces never enter the stack. */
+export function braceContext(model, position) {
+  return braceContextText(model.getValueInRange({
     startLineNumber: 1, startColumn: 1,
     endLineNumber: position.lineNumber, endColumn: position.column,
-  });
-  const at = upto.lastIndexOf('[@region]');
-  if (at === -1) return false;
-  let depth = 0;
-  let opened = false;
-  for (const c of upto.slice(at)) {
-    if (c === '{') { depth++; opened = true; }
-    else if (c === '}') depth--;
+  }));
+}
+
+/** The core of braceContext over a bare string (everything up to the caret). tagac
+ *  drives itself off text+offset, not a Monaco model, so it needs this form. */
+export function braceContextText(text) {
+  const stack = [];
+  let inStr = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === '"' && text[i - 1] !== '\\') { inStr = !inStr; continue; }
+    if (inStr) continue;
+    if (c === '{') {
+      const pre = text.slice(0, i);
+      if (/\.set\s*$/.test(pre)) stack.push('set');
+      else if (/\[@region\]\s*:?\s*$/.test(pre)) stack.push('region');
+      else stack.push('text');
+    } else if (c === '}') {
+      stack.pop();
+    }
   }
-  return opened && depth > 0;
+  return stack.length ? stack[stack.length - 1] : 'text';
 }
 
 /** The `[@schedule]` / `[@region]` blocks, and — inside a region — its segments.
@@ -96,14 +125,14 @@ function inRegionBlock(model, position) {
  *  it from memory is where the syntax errors come from. The `]` the editor auto-closed
  *  is swallowed by the range, so the completion writes the whole `…]: { … }` itself
  *  instead of leaving a stray bracket behind. */
-function specialBlocks(monaco, model, position, range, needle) {
+function specialBlocks(monaco, model, position, range, needle, ctx) {
   const line = model.getLineContent(position.lineNumber);
   const closer = line[position.column - 1] === ']';   // the auto-closed `]` sits there
   const r = closer ? { ...range, endColumn: position.column + 1 } : range;
   const indent = (line.match(/^\s*/) || [''])[0];
   const I = `${indent}    `;
 
-  const items = inRegionBlock(model, position)
+  const items = ctx === 'region'
     ? [
       ['@imask', 'region segment · an attached mask',
         'imask: i is the CLIP ATTACH ORDER, not the Mask Editor’s output slot number',
@@ -136,7 +165,9 @@ function specialBlocks(monaco, model, position, range, needle) {
 }
 
 export async function provideCompletions(monaco, model, position, { onInsertBlock } = {}) {
-  if (inSetBlock(model, position)) return { suggestions: [] };
+  // Inside `.set{ … }` the vocabulary is field names, and language.js owns those.
+  const brace = braceContext(model, position);
+  if (brace === 'set') return { suggestions: [] };
 
   const ctx = contextAt(model, position);
   const range = {
@@ -147,21 +178,33 @@ export async function provideCompletions(monaco, model, position, { onInsertBloc
   };
 
   if (ctx.kind === 'path') {
-    const groups = await libraryPaths();
+    // Inside a `[@region]: { … }` a `[` opens a SEGMENT, not a library path — offer
+    // `[imask …]` / `[mask …]` and nothing else. Library groups belong in a segment's
+    // BODY, which is 'text'.
     const needle = ctx.word.toLowerCase();
+    if (brace === 'region') {
+      return { suggestions: specialBlocks(monaco, model, position, range, needle, brace) };
+    }
+    const groups = await libraryPaths();
     return {
       suggestions: [
         // `[` opens three different things, and until now it only offered one of them.
         // The two special blocks are the hardest syntax in PLv3 to type from memory —
         // exactly what a completion is for.
-        ...specialBlocks(monaco, model, position, range, needle),
+        ...specialBlocks(monaco, model, position, range, needle, brace),
         ...groups
-        .filter((g) => g.path.toLowerCase().includes(needle))
+        .filter((g) => searchKey(g).includes(needle))
         .slice(0, 40)
         .map((g) => ({
-          label: g.path,
+          label: g.preset ? `${g.path} ▸ ${g.preset.name}` : g.path,
           kind: monaco.languages.CompletionItemKind.Module,
-          detail: 'library group',
+          detail: g.preset ? 'library preset' : 'library group',
+          // The whole group sorts above its own presets — it is the common case, and
+          // otherwise a group with ten presets buries every other group in the list.
+          sortText: `1${g.path}${g.preset ? `~${g.preset.name}` : ''}`,
+          // Monaco matches the typed word against filterText, not label, and the word
+          // never contains the ` ▸ ` — so a preset must be findable by its own name.
+          filterText: searchKey(g),
           // A bare `[path]` is a pointer, and a PLv3 document never holds one: what
           // lands in the text is the fully expanded block (spec §3.6, §4.7). Monaco
           // cannot insert text asynchronously, so the completion writes the path and
@@ -169,12 +212,14 @@ export async function provideCompletions(monaco, model, position, { onInsertBloc
           // NOT `path]`: the editor auto-closes `[`, so the `]` is already sitting
           // after the caret. Writing another one leaves `[path]]` behind, and the
           // stray bracket is a syntax error the moment the block is expanded.
+          // And never the ` ▸ preset` label: if the command fails, what is left behind
+          // has to still be a valid path.
           insertText: g.path,
           range,
           command: onInsertBlock && {
             id: 'plv3.expandLibraryBlock',
             title: 'expand',
-            arguments: [g.id],
+            arguments: [g.id, g.preset ? g.preset.id : null],
           },
         })),
       ],

@@ -5,15 +5,20 @@
 
 import { app } from '../../../scripts/app.js';
 import { DetailPane } from './detail.js';
-import { EditorPane, nodePolarity } from './editor.js';
+import { EditorPane } from './editor.js';
 import { libraryWindow } from './library.js';
 import { PreviewPanel } from './preview.js';
 import { T, button, div, iconButton, makeWindow, splitter, tabs, treeRow } from './theme.js';
 
 export const PLV3_TYPES = new Set([
-  'XYZ Prompt Library V3 Positive',
-  'XYZ Prompt Library V3 Negative',
+  'XYZ Prompt Library V3',
+  'XYZ Prompt Library V3 Monaco',
 ]);
+
+/** The Monaco node carries its own embedded editor; the plain one uses a textarea. */
+export function isMonacoNode(node) {
+  return node?.comfyClass?.endsWith('Monaco') ?? false;
+}
 
 const GEOM = { x: 120, y: 90, w: 1280, h: 700 };
 
@@ -37,6 +42,7 @@ class PLv3Window {
 
   hide() {
     this.pane?.syncActiveToNode();
+    this.pane?.saveViewState();   // persist the active node's folding on close
     this.win?.hide();
   }
 
@@ -135,10 +141,10 @@ class PLv3Window {
     }
 
     for (const node of nodes) {
-      const neg = nodePolarity(node) === 'negative';
+      const monaco = isMonacoNode(node);
       const row = treeRow({
-        icon: neg ? '−' : '+',
-        iconColor: neg ? T.bad : T.accent,
+        icon: monaco ? '📝' : '📄',
+        iconColor: T.accent,
         label: node.title || `Node ${node.id}`,
         selected: String(node.id) === this.pane?.activeId,
         tail: div(`font-size:${T.fs.micro};color:${T.muted};font-family:${T.mono};`, `#${node.id}`),

@@ -115,7 +115,7 @@ Three characters, left to right:
 1. **XYZ Mask Editor** — draw three rectangles across the canvas.
 2. **XYZ Attach Masks** — `clip` from your checkpoint; `mask_0` → `mask 0`, `mask_1` → `mask 1`,
    `mask_2` → `mask 2`.
-3. **XYZ Prompt Library V3 Positive** — write the regions against those indices:
+3. **XYZ Prompt Library V3** — write the regions against those indices:
    ```
    masterpiece, best quality
 

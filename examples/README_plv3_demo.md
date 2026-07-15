@@ -112,8 +112,8 @@ SolidMask ×2 ─→ MaskComposite ×2 ─→ PC: Attach Mask (multi) ─→ CLI
                   (left half)          (mask1 → imask 0)
                   (right half)         (mask2 → imask 1)
 
-XYZ Prompt Library V3 Positive ─→ PC: Schedule prompt ─→ KSampler ─→ … ─→ SaveImage
-XYZ Prompt Library V3 Negative ─→ PC: Schedule prompt ─┘
+XYZ Prompt Library V3 (positive text) ─→ PC: Schedule prompt ─→ KSampler ─→ … ─→ SaveImage
+XYZ Prompt Library V3 (negative text) ─→ PC: Schedule prompt ─┘
                                └─→ PC: Show Prompt   (see the compiled string)
 ```
 

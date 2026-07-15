@@ -555,6 +555,22 @@ def list_presets(group_id: int) -> list[dict]:
         ]
 
 
+def list_preset_names() -> list[dict]:
+    """Every preset in the library, id + group + name only.
+
+    The autocomplete offers `[group ▸ preset]` for every preset there is, so it needs
+    the lot in one query — one `list_presets` per group would be a round trip per row
+    of the tree.  The bodies are not read: expansion happens server-side from the id.
+    """
+    with _read() as conn:
+        return [
+            dict(r)
+            for r in conn.execute(
+                "SELECT id, group_id, name FROM presets ORDER BY group_id, sort_index, name"
+            )
+        ]
+
+
 def get_preset(preset_id: int) -> dict | None:
     with _read() as conn:
         r = conn.execute("SELECT * FROM presets WHERE id = ?", (preset_id,)).fetchone()

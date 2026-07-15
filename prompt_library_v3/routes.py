@@ -139,7 +139,13 @@ async def _get_tree(request):
     for g in groups:
         g["path"] = repo.group_path(int(g["id"]))
         g.pop("settings_json", None)
-    return _json({"folders": repo.list_folders(), "groups": groups})
+    return _json({
+        "folders": repo.list_folders(),
+        "groups": groups,
+        # The `[` autocomplete offers a group's presets alongside the group itself, so
+        # the tree carries them. Names only — the body is expanded server-side.
+        "presets": repo.list_preset_names(),
+    })
 
 
 async def _post_folder(request):

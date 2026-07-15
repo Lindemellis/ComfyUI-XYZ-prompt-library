@@ -31,8 +31,14 @@ That is the whole design. Most of what follows is a consequence of it.
 
 | Node | Output |
 |---|---|
-| **XYZ Prompt Library V3 Positive** | `STRING` — prompt-control syntax |
-| **XYZ Prompt Library V3 Negative** | `STRING` — same, minus regions (they are meaningless on the negative side; a region there is reported as **W13** and merged into the main prompt) |
+| **XYZ Prompt Library V3** | `STRING` — prompt-control syntax (plain textarea) |
+| **XYZ Prompt Library V3 Monaco** | `STRING` — same output; the text box is the full editor (library autocomplete, folding, tag lookup) |
+
+Both nodes compile identically — pick the one whose editor you prefer. There is no
+positive/negative split: a document renders the same either way. **Regions are for the
+positive prompt only** — a region has no meaning on the negative side, and nothing stops
+you writing one there, so just don't. Wire each node's output to the matching
+(positive / negative) `PC: Schedule Prompt`.
 
 Widgets: `text` (the document), `seed` (the random source for `shuffle` / `random_select` /
 `dropout`), `region_mode` (`couple` or `mask` — see [Regions](#regions)).

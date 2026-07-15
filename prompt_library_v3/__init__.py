@@ -7,14 +7,14 @@ deliberately never reads the library (spec §4.7).
 
 Public:
     compile_text(text, seed, region_mode, polarity) -> CompileResult
-    PromptLibraryV3PositiveNode / PromptLibraryV3NegativeNode
+    PromptLibraryV3Node / PromptLibraryV3MonacoNode
 """
 
 from __future__ import annotations
 
 from .compile import CompileResult, compile_text
 from .diagnostics import Diag, Diagnostics, PLv3Error
-from .node import PromptLibraryV3NegativeNode, PromptLibraryV3PositiveNode
+from .node import PromptLibraryV3MonacoNode, PromptLibraryV3Node
 
 __all__ = [
     "compile_text",
@@ -22,8 +22,8 @@ __all__ = [
     "Diag",
     "Diagnostics",
     "PLv3Error",
-    "PromptLibraryV3PositiveNode",
-    "PromptLibraryV3NegativeNode",
+    "PromptLibraryV3Node",
+    "PromptLibraryV3MonacoNode",
     "setup",
 ]
 

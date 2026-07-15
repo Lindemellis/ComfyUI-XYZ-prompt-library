@@ -3,6 +3,8 @@
 // The grammar mirrors prompt_library_v3/lexer.py + parser.py. Keep the two in
 // step: if a reserved character changes there, it changes here.
 
+import { braceContext } from './complete.js';
+
 export const LANG_ID = 'plv3';
 
 const SET_FIELDS = [
@@ -138,6 +140,12 @@ export function foldingRanges(model) {
 // --- completions -----------------------------------------------------------
 
 function completions(monaco, model, position) {
+  // Field names only make sense inside an open `.set{ … }`. A brace STACK (not a
+  // lastIndexOf) is what tells a plain group `{ }` apart from a set block: after a
+  // `.set{ … }` closes, the next `{` used to still read as "in a set block" and the
+  // field list buried the tag completions over ordinary prompt text.
+  if (braceContext(model, position) !== 'set') return { suggestions: [] };
+
   const upto = model.getValueInRange({
     startLineNumber: 1,
     startColumn: 1,
@@ -145,18 +153,8 @@ function completions(monaco, model, position) {
     endColumn: position.column,
   });
 
-  // Field names only make sense inside an open `.set{ … }`. Without this the field
-  // list pops up over ordinary prompt text and buries the tag completions.
+  // Which field set applies depends on whether this `.set{}` hangs off a region.
   const lastSet = upto.lastIndexOf('.set{');
-  if (lastSet === -1) return { suggestions: [] };
-  let depth = 0;
-  for (const c of upto.slice(lastSet)) {
-    if (c === '{') depth++;
-    else if (c === '}') depth--;
-  }
-  if (depth <= 0) return { suggestions: [] };
-
-  // Which field set applies depends on whether we are inside a `region: { ... }`.
   const lastRegion = upto.lastIndexOf('region');
   const inRegion = lastRegion > lastSet && !upto.slice(lastRegion).includes('}');
   const fields = inRegion ? REGION_FIELDS : SET_FIELDS;

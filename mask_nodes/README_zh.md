@@ -105,7 +105,7 @@ XYZ Mask Editor            XYZ Attach Masks         PLv3
 1. **XYZ Mask Editor** —— 在画布上横向画三个矩形。
 2. **XYZ Attach Masks** —— `clip` 来自 checkpoint；`mask_0` → `mask 0`，`mask_1` → `mask 1`，
    `mask_2` → `mask 2`。
-3. **XYZ Prompt Library V3 Positive** —— 按这些索引写 region：
+3. **XYZ Prompt Library V3** —— 按这些索引写 region：
    ```
    masterpiece, best quality
 

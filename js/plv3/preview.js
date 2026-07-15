@@ -104,23 +104,9 @@ export class PreviewPanel {
     this.tabsHost.replaceChildren();
     this.out.replaceChildren();
 
-    if (this.broken) {
-      this.tabsHost.append(div(
-        `background:rgba(243,139,168,.12);border-bottom:1px solid ${T.bad};color:${T.bad};
-         font-size:${T.fs.micro};padding:5px 10px;`,
-        `${this.broken.code} — ${this.broken.message} · showing the last output that compiled`,
-      ));
-    } else if (this.partial) {
-      // The output below is real, just missing the broken construct. Say so in one
-      // line and get out of the way — replacing the output with the error message
-      // tells the user what the squiggle in the editor already told them, and hides
-      // the one thing the panel exists to show.
-      this.tabsHost.append(div(
-        `background:rgba(249,226,175,.10);border-bottom:1px solid ${T.warn};color:${T.warn};
-         font-size:${T.fs.micro};padding:5px 10px;`,
-        `${this.partial.code} — ${this.partial.message} · that part is skipped, the rest compiled`,
-      ));
-    }
+    // No error banner here: the editor's own squiggle already marks the broken line,
+    // and a banner that appears and disappears on every keystroke shoved the whole
+    // panel up and down. The preview just shows whatever compiled (partial or last-good).
 
     if (!this.result) {
       this.out.textContent = '';

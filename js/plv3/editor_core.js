@@ -24,17 +24,60 @@ import { showForm, toast } from './ui.js';
 let _completionsReady = false;
 let _focused = null;
 
+// One Monaco model per node, SHARED by the embedded editor (the Monaco node) and the
+// floating window. Two editors on one model means an edit in either is instantly in the
+// other, and — crucially — neither ever setValue()s the other's content. A setValue
+// rebuilds the whole model and blows away that editor's folding, which is exactly the
+// "click away and the other side loses its collapsed groups" bug. Ref-counted: the model
+// outlives any single editor and is disposed only when the last one lets go.
+const _nodeModels = new Map(); // nodeId -> { model, refs }
+
+export function acquireNodeModel(monaco, nodeId, initialText) {
+  const key = String(nodeId);
+  let entry = _nodeModels.get(key);
+  if (!entry || entry.model.isDisposed()) {
+    entry = { model: monaco.editor.createModel(initialText ?? '', LANG_ID), refs: 0 };
+    _nodeModels.set(key, entry);
+  }
+  entry.refs += 1;
+  return entry.model;
+}
+
+export function releaseNodeModel(nodeId) {
+  const key = String(nodeId);
+  const entry = _nodeModels.get(key);
+  if (!entry) return;
+  entry.refs -= 1;
+  if (entry.refs <= 0) {
+    entry.model.dispose();
+    _nodeModels.delete(key);
+  }
+}
+
+/** Put `next` into `model` WITHOUT setValue, so folding on every editor showing it
+ *  survives. A single whole-document replace still resets folding, so diff down to the
+ *  changed middle (common prefix + common suffix) and replace only that. This is the
+ *  path a plain-textarea node uses to reach the window's model. */
+export function replaceTextPreservingFolding(model, next) {
+  const cur = model.getValue();
+  if (cur === next) return;
+  const max = Math.min(cur.length, next.length);
+  let s = 0;
+  while (s < max && cur[s] === next[s]) s += 1;
+  let e1 = cur.length;
+  let e2 = next.length;
+  while (e1 > s && e2 > s && cur[e1 - 1] === next[e2 - 1]) { e1 -= 1; e2 -= 1; }
+  const range = window.monaco.Range.fromPositions(
+    model.getPositionAt(s), model.getPositionAt(e1));
+  model.applyEdits([{ range, text: next.slice(s, e2) }]);
+}
+
 let _cssInjected = false;
 function injectCss() {
   if (_cssInjected) return;
   _cssInjected = true;
   const style = document.createElement('style');
   style.textContent = `
-    .plv3-glyph-error, .plv3-glyph-warn {
-      width: 6px !important; margin-left: 5px; border-radius: 3px;
-    }
-    .plv3-glyph-error { background: #f38ba8; box-shadow: 0 0 6px rgba(243,139,168,.8); }
-    .plv3-glyph-warn  { background: #f9e2af; }
     .plv3-line-error  { background: rgba(243,139,168,.10); }
   `;
   document.head.appendChild(style);
@@ -97,11 +140,16 @@ export class PromptEditor {
       // A document never holds a bare `[path]` pointer — it holds the expanded block
       // (spec §3.6, §4.7). Monaco cannot insert text asynchronously, so the completion
       // writes the path and then fires this, which swaps it for the real thing.
-      monaco.editor.registerCommand('plv3.expandLibraryBlock', async (_acc, groupId) => {
+      // `presetId` is null for the whole group, and an id when the user picked one of
+      // its presets — the block that lands is then the preset's whitelist and order.
+      monaco.editor.registerCommand('plv3.expandLibraryBlock', async (_acc, groupId, presetId) => {
         const target = _focused;
         if (!target) return;
         try {
-          const { text } = await post('library/expand', { group_id: groupId });
+          const { text } = await post('library/expand', {
+            group_id: groupId,
+            preset_id: presetId || null,
+          });
           if (text) target.replaceRefAtCursor(text);
         } catch (err) {
           console.warn('[PLv3] could not expand the library block', err);
@@ -116,7 +164,11 @@ export class PromptEditor {
       automaticLayout: true,
       fontSize: settings().fontSize,
       lineNumbers: 'on',
-      glyphMargin: true,   // where the error/warning dot for the line goes
+      // No glyph margin: it reserves a whole line-height-wide blank column left of the
+      // line numbers for an error dot that only duplicates the squiggle, the overview-
+      // ruler tick and the whole-line error background. The space is not worth it.
+      glyphMargin: false,
+      lineNumbersMinChars: 3,   // a 5-digit-wide number column on a short prompt is wasteful
       folding: true,
       foldingStrategy: 'auto',
       showFoldingControls: 'always',
@@ -147,8 +199,12 @@ export class PromptEditor {
     this.editor.onDidBlurEditorText(() => {
       this.onBlur();
       if (this.syncOnBlur) this.syncLibrary();
+      this._saveViewState();   // capture folding/scroll when the user leaves
     });
     this.editor.onDidChangeModelContent(() => this.scheduleLint());
+    // Folding is view state (per editor), so it dies with the editor on a page refresh.
+    // Persist it (see bindViewState) whenever it changes.
+    this.editor.onDidChangeHiddenAreas?.(() => this._scheduleViewSave());
 
     // Spec §8.1: the built-in replace would happily rewrite `.set` or a library path.
     // This one only touches prompt text.
@@ -181,7 +237,8 @@ export class PromptEditor {
   setText(text) {
     const model = this.model();
     if (!model || model.getValue() === text) return;
-    model.setValue(text ?? '');
+    // A diff-edit, not setValue: this editor's folding must survive an external update.
+    replaceTextPreservingFolding(model, text ?? '');
   }
 
   /** The model's version at this instant. The detail page stamps its AST snapshot with
@@ -196,6 +253,51 @@ export class PromptEditor {
   /** Monaco is created while its window is still display:none, and automaticLayout does
    *  not reliably recover from that 0x0 first measure. Re-measure when we become visible. */
   relayout() { this.editor?.layout(); }
+
+  // --- folding persistence ---------------------------------------------------
+  //
+  // Monaco's collapsed regions are VIEW state, not model state: they live on the editor
+  // and vanish when it is recreated (a page refresh, or the window switching to another
+  // node). We save the whole view state (folding + cursor + scroll) to localStorage under
+  // a caller-chosen key and restore it. The node keys on `node:<id>`, the window on
+  // `window:<id>`, so each remembers its own folding.
+
+  /** Persist this editor's view state under `key` and restore whatever was last saved.
+   *  Call AFTER setModel. Re-callable with a new key (the window reuses one editor across
+   *  nodes) — flush the outgoing key first with saveViewState(). */
+  bindViewState(key) {
+    this._viewKey = key;
+    this._restoreViewState();
+  }
+
+  saveViewState() { this._saveViewState(); }
+
+  _scheduleViewSave() {
+    clearTimeout(this._viewTimer);
+    this._viewTimer = setTimeout(() => this._saveViewState(), 250);
+  }
+
+  _saveViewState() {
+    if (!this._viewKey || !this.editor) return;
+    try {
+      const state = this.editor.saveViewState();
+      if (state) localStorage.setItem(`xyz.plv3.view.${this._viewKey}`, JSON.stringify(state));
+    } catch { /* private mode / quota */ }
+  }
+
+  _restoreViewState() {
+    let state;
+    try {
+      const raw = localStorage.getItem(`xyz.plv3.view.${this._viewKey}`);
+      if (!raw) return;
+      state = JSON.parse(raw);
+    } catch { return; }
+    // Folding is computed asynchronously by the folding provider after the model is set,
+    // so a same-tick restore would find no regions to collapse. Restore next frame.
+    requestAnimationFrame(() => {
+      try { this.editor?.restoreViewState(state); } catch { /* editor gone */ }
+    });
+  }
 
   // --- edits ---
   /** Rewrite the exact source ranges a detail-page control owns.
@@ -350,18 +452,14 @@ export class PromptEditor {
     this.monaco.editor.setModelMarkers(model, 'plv3', markers);
 
     // Monaco puts markers in the overview ruler and the squiggle, and nowhere else. A
-    // document is long and the ruler is thin, so mark the line itself as well.
+    // document is long and the ruler is thin, so tint the error LINE as well. (No glyph-
+    // margin dot — the glyph margin is off, and the dot only repeated the squiggle.)
     this._decorations = this.editor.deltaDecorations(this._decorations || [],
-      markers.map((m) => ({
-        range: new this.monaco.Range(m.startLineNumber, 1, m.startLineNumber, 1),
-        options: {
-          isWholeLine: true,
-          glyphMarginClassName: m.severity === this.monaco.MarkerSeverity.Error
-            ? 'plv3-glyph-error' : 'plv3-glyph-warn',
-          glyphMarginHoverMessage: { value: m.message },
-          className: m.severity === this.monaco.MarkerSeverity.Error
-            ? 'plv3-line-error' : undefined,
-        },
-      })));
+      markers
+        .filter((m) => m.severity === this.monaco.MarkerSeverity.Error)
+        .map((m) => ({
+          range: new this.monaco.Range(m.startLineNumber, 1, m.startLineNumber, 1),
+          options: { isWholeLine: true, className: 'plv3-line-error' },
+        })));
   }
 }

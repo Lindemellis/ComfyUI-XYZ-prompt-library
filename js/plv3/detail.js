@@ -17,6 +17,29 @@ import {
 import { loraRange, settings, weightRange } from './settings.js';
 import { showConfirm, showContextMenu, showPrompt, toast } from './ui.js';
 
+// Which group cards the user has folded shut, remembered across reloads.
+//
+// Only the LIBRARY blocks are persisted: a `lib:<header>` key names the same group
+// wherever it turns up, so restoring it is always right. A `doc:<path>` key is just a
+// position in one document's tree, and a group typed in above it would inherit the
+// state — so those live for the session and no longer.
+const COLLAPSE_KEY = 'xyz.plv3.collapsed';
+
+function loadCollapsed() {
+  try {
+    return new Set(JSON.parse(localStorage.getItem(COLLAPSE_KEY) || '[]'));
+  } catch {
+    return new Set();
+  }
+}
+
+function saveCollapsed(set) {
+  try {
+    const stable = [...set].filter((k) => k.startsWith('lib:'));
+    localStorage.setItem(COLLAPSE_KEY, JSON.stringify(stable));
+  } catch { /* private mode */ }
+}
+
 const SETTING_KEYS = [
   'weight', 'format', 'shuffle', 'random_select', 'dropout', 'seed', 'schedule', 'region',
 ];
@@ -178,13 +201,39 @@ export class DetailPane {
     // Keyed on the group's stable tree path, never on its span: an edit shifts every
     // span after it, and the panel would slam shut on every change.
     this.expanded = new Set();
+    // Which group cards are folded shut. Survives a reload — see collapseKey for what
+    // a group is keyed on and why only some of them are worth remembering.
+    this.collapsed = loadCollapsed();
     this.built = false;
+  }
+
+  /** What identifies a group across renders — and across sessions.
+   *
+   *  A LIBRARY BLOCK has a real identity: its header (`quality.anima`) is the same group
+   *  in every document that references it, so folding it shut is worth remembering.
+   *
+   *  A plain `{...}` group has nothing but its position in the tree, and that shifts the
+   *  moment you type a group above it. Its state is keyed on the path anyway — good
+   *  enough within one editing session — but it is NOT persisted: restoring it after a
+   *  reload would fold whatever group had drifted into that slot. */
+  collapseKey(group) {
+    return group.header ? `lib:${group.header}` : `doc:${group.path.join('.')}`;
+  }
+
+  toggleCollapsed(group) {
+    const key = this.collapseKey(group);
+    if (this.collapsed.has(key)) this.collapsed.delete(key);
+    else this.collapsed.add(key);
+    saveCollapsed(this.collapsed);
+    this.render();
   }
 
   setCompiled(result) { this.compiled = result; }
 
   setAst(payload, node, { version }) {
-    this.polarity = node?.comfyClass?.endsWith('Negative') ? 'negative' : 'positive';
+    // No negative node any more: regions are always offered (a region simply must not be
+    // wired to a negative conditioning — documented, not enforced).
+    this.polarity = 'positive';
     this.diagnostics = payload?.diagnostics || [];
     const error = this.diagnostics.find((d) => d.severity === 'error') || null;
 
@@ -449,22 +498,10 @@ export class DetailPane {
     this.body.replaceChildren();
     this.nav?.replaceChildren();
 
-    if (this.broken) {
-      this.body.append(div(
-        `background:rgba(243,139,168,.12);border:1px solid ${T.bad};border-radius:${T.radius};
-         color:${T.bad};font-size:${T.fs.label};padding:8px 10px;margin-bottom:10px;line-height:1.5;`,
-        `${this.broken.code} — ${this.broken.message}\n`
-        + 'Showing the last version that parsed; the controls are inert until the syntax is fixed.',
-      ));
-    } else if (this.partial) {
-      // The tree below is real and editable — it is just missing the broken bit.
-      this.body.append(div(
-        `background:rgba(249,226,175,.10);border:1px solid ${T.warn};border-radius:${T.radius};
-         color:${T.warn};font-size:${T.fs.label};padding:8px 10px;margin-bottom:10px;line-height:1.5;`,
-        `${this.partial.code} — ${this.partial.message}\n`
-        + 'That part is skipped; everything else below is live.',
-      ));
-    }
+    // No error banner: the editor already squiggles the broken line, and a banner that
+    // blinks in and out on every keystroke shoved the whole page down. When the parse is
+    // fully broken the tree below is greyed and inert (see `this.broken` further down),
+    // which says "this is stale" without moving anything.
 
     if (!this.ast) {
       this.body.append(div(
@@ -493,7 +530,7 @@ export class DetailPane {
 
   renderNav(src) {
     this.nav.append(sectionLabel('outline'));
-    const walk = (node, depth) => {
+    const walk = (node, depth, ancestors = []) => {
       for (const child of node.children || []) {
         if (child.kind !== 'group' || weightedItem(child)) continue;
         const { icon, color } = groupIcon(child);
@@ -509,12 +546,20 @@ export class DetailPane {
           text.style.textAlign = 'left';
         }
         row.onclick = () => {
+          // A card nested inside a folded ancestor is not in the DOM at all, so the jump
+          // would land nowhere. Unfold the way in first.
+          const shut = ancestors.filter((a) => this.collapsed.has(this.collapseKey(a)));
+          if (shut.length) {
+            for (const a of shut) this.collapsed.delete(this.collapseKey(a));
+            saveCollapsed(this.collapsed);
+            this.render();
+          }
           this.body
             .querySelector(`[data-path="${child.path.join('.')}"]`)
             ?.scrollIntoView({ behavior: 'smooth', block: 'start' });
         };
         this.nav.append(row);
-        walk(child, depth + 1);
+        walk(child, depth + 1, [...ancestors, child]);
       }
     };
     walk(this.ast, 0);
@@ -611,12 +656,27 @@ export class DetailPane {
       border-radius:${T.radius};background:${T.bg2};overflow:hidden;`);
     card.dataset.path = key;
 
+    const folded = this.collapsed.has(this.collapseKey(group));
+
     const head = div(`display:flex;align-items:center;gap:8px;padding:6px 8px;
-      background:${T.bg2};border-bottom:1px solid ${T.line};min-width:0;`);
+      background:${T.bg2};min-width:0;` + (folded ? '' : `border-bottom:1px solid ${T.line};`));
+    head.append(iconButton(folded ? '▸' : '▾', folded ? 'Expand' : 'Collapse',
+      () => this.toggleCollapsed(group)));
     head.append(div(`color:${color};flex-shrink:0;`, icon));
-    head.append(div(`flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
-      font-size:${T.fs.body};font-weight:600;color:${group.header ? T.lib : T.text};`,
-      groupLabel(group, src)));
+    const title = div(`flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+      font-size:${T.fs.body};font-weight:600;color:${group.header ? T.lib : T.text};
+      cursor:pointer;user-select:none;`, groupLabel(group, src));
+    // The whole title bar folds it — a 20px chevron is a small target for something you
+    // do constantly.
+    title.onclick = () => this.toggleCollapsed(group);
+    head.append(title);
+
+    // Folded, the header has to say what is inside, or you are picking blind.
+    if (folded) {
+      const n = group.children.length;
+      head.append(div(`font-size:${T.fs.micro};color:${T.muted};flex-shrink:0;`,
+        n === 1 ? '1 item' : `${n} items`));
+    }
 
     if (active.length) {
       head.append(div(`font-size:${T.fs.micro};color:${T.muted};font-family:${T.mono};
@@ -624,11 +684,20 @@ export class DetailPane {
     }
     const gear = iconButton('⚙', open ? 'Hide settings' : 'Settings', () => {
       if (open) this.expanded.delete(key); else this.expanded.add(key);
+      // A collapsed card cannot show its settings panel — opening one implies opening
+      // the card.
+      this.collapsed.delete(this.collapseKey(group));
+      saveCollapsed(this.collapsed);
       this.render();
     });
     if (open) gear.style.color = T.accent;
     head.append(gear);
     card.append(head);
+
+    if (folded) {
+      host.append(card);
+      return;
+    }
 
     // A `[@schedule]` entry's range is its defining property — it gets a slider right
     // in the header, not buried behind the gear. It is a setting, never a name.

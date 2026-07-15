@@ -79,8 +79,8 @@ Each Prompt Library V2 node also has its own **Library / Editor / Preview / LLM*
 
 | Node | Category | Purpose |
 |---|---|---|
-| XYZ Prompt Library V3 Positive | `XYZNodes/Prompt` | Compile a PLv3 document into [prompt-control](https://github.com/asagi4/comfyui-prompt-control) syntax |
-| XYZ Prompt Library V3 Negative | `XYZNodes/Prompt` | The same, minus regions (they mean nothing on the negative side) |
+| XYZ Prompt Library V3 | `XYZNodes/Prompt` | Compile a PLv3 document into [prompt-control](https://github.com/asagi4/comfyui-prompt-control) syntax (plain textarea) |
+| XYZ Prompt Library V3 Monaco | `XYZNodes/Prompt` | The same, with the full editor embedded in the node (library autocomplete, folding, tags). Regions are for the positive prompt only — don't put one in a negative prompt |
 | XYZ Prompt Library V2 Positive | `XYZNodes/Prompt` | Resolve a positive prompt template against the library |
 | XYZ Prompt Library V2 Negative | `XYZNodes/Prompt` | Resolve a negative prompt template against the library |
 | XYZ Mask Editor | `XYZNodes/Mask` | Draw rectangle masks; one `MASK` output per rectangle ([manual](mask_nodes/README.md)) |

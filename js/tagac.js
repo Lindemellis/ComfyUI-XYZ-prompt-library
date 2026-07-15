@@ -577,6 +577,10 @@ function _tokenStart(text, pos) {
   let start = Math.max(lastComma, lastNewline) + 1;
   const lastDotSpace = text.lastIndexOf('. ', pos - 1);
   if (lastDotSpace !== -1) start = Math.max(start, lastDotSpace + 2);
+  // Skip the segment's leading whitespace so it is NOT part of the range an insertion
+  // replaces — otherwise accepting a tag on an indented line (a PLv3 group body) eats
+  // the indent. Newlines are already the boundary above; only spaces/tabs are skipped.
+  while (start < pos && (text[start] === ' ' || text[start] === '\t')) start++;
   return start;
 }
 
@@ -607,10 +611,17 @@ function getPartialTag(el) {
   const lastClose = text.lastIndexOf(']', pos - 1);
   if (lastOpen > lastClose) return '';
 
-  // Don't trigger inside {choice} braces
-  const lastBrace  = text.lastIndexOf('{', pos - 1);
-  const lastClosed = text.lastIndexOf('}', pos - 1);
-  if (lastBrace > lastClosed) return '';
+  // Where tags are unwelcome inside braces. A host can override the rule: PLv3 uses
+  // `{ }` for group bodies (prompt text, tags welcome) and only wants tags withheld
+  // inside `.set{ }` / a region container, so it supplies its own predicate. Without
+  // one, the default is PLv2's: any open `{` is a `{choice|choice}` and suppresses.
+  if (el._xyzSuppressTags) {
+    if (el._xyzSuppressTags(text, pos)) return '';
+  } else {
+    const lastBrace  = text.lastIndexOf('{', pos - 1);
+    const lastClosed = text.lastIndexOf('}', pos - 1);
+    if (lastBrace > lastClosed) return '';
+  }
 
   // Strip leading paren/angle-bracket weight wrappers and spaces
   const partial = segment.replace(/^\s*[\(\<]+/, '').trim();

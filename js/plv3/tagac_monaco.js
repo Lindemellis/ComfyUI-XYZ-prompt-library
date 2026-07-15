@@ -20,6 +20,8 @@
 // `[` and `.set{}` completions stay with PLv3's own Monaco provider (complete.js) —
 // tagac is attached with `tagsOnly`, so it never offers PLv2's library refs here.
 
+import { braceContextText } from './complete.js';
+
 const NAV_KEYS = new Set(['ArrowDown', 'ArrowUp', 'Enter', 'Tab', 'Escape']);
 
 /** Wait for tagac to have registered itself (it is a separate ComfyUI extension). */
@@ -103,6 +105,11 @@ export async function attachTagAC(editor, container) {
     related: true,           // click a tag in the text -> related tags
     getDelimiter: () => ', ',
   });
+
+  // PLv3's `{ }` is a group body (prompt text — tags belong here), unlike PLv2's
+  // `{choice}`. Only a `.set{ … }` or a region container should withhold danbooru
+  // tags; the same brace-stack complete.js uses decides it, so the two never disagree.
+  host._xyzSuppressTags = (text, pos) => braceContextText(text.slice(0, pos)) !== 'text';
 
   // --- events -------------------------------------------------------------
   //
