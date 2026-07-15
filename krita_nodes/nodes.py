@@ -161,6 +161,29 @@ def split_colors(
     ]
 
 
+#: The most colour masks the node will emit — and the number of fallback slots it
+#: declares. Must match the `count` widget's max and MAX_COLOR_MASKS in js/xyz_krita.js.
+MAX_COLOR_MASKS = 16
+
+
+def _mask_to_np(mask) -> np.ndarray:
+    """A ComfyUI MASK tensor -> a 2-D float array in [0, 1].
+
+    MASK is (B, H, W) or (H, W); we take the first item of a batch. This is the
+    fallback path — the incoming masks stand in for what Krita's colour split would
+    have produced, so they go straight through with no colour maths.
+
+    `np.asarray` reads a torch tensor and a bare numpy array alike, which keeps the
+    maths (and its tests) off torch — torch only crosses back at execute()'s return.
+    """
+    if hasattr(mask, "detach"):  # a torch tensor
+        mask = mask.detach().cpu()
+    arr = np.asarray(mask, dtype=np.float32)
+    if arr.ndim == 3:
+        arr = arr[0]
+    return np.clip(arr, 0.0, 1.0)
+
+
 def _resize(image, mode: str, size: int, round_to: int, interpolation: str):
     """Keeps the aspect ratio; `size` is the target width or height."""
     if mode == "none":
@@ -501,14 +524,21 @@ class XYZKritaFetchColorMasks(_KritaBase):
                     "IMAGE",
                     {"tooltip": "Optional. Scales the masks to this image's size."},
                 ),
-                "fallback": (
-                    "IMAGE",
-                    {
-                        "tooltip": "A flat-colour image used INSTEAD of Krita when Krita "
-                        "is closed, has no document, or no longer has the layer. It is "
-                        "split into colours exactly the same way."
-                    },
-                ),
+                # One fallback MASK per output slot: fallback_i stands in for output
+                # mask_i when Krita is unavailable. js/xyz_krita.js shows exactly `count`
+                # of them; the rest stay hidden. Declared here (not added purely in JS)
+                # so ComfyUI validates the connections.
+                **{
+                    f"fallback_{i}": (
+                        "MASK",
+                        {
+                            "tooltip": "Used INSTEAD of Krita for this slot when Krita is "
+                            "closed, has no document, or no longer has the layer. "
+                            f"Stands in for mask_{i}."
+                        },
+                    )
+                    for i in range(MAX_COLOR_MASKS)
+                },
             },
         }
 
@@ -519,8 +549,7 @@ class XYZKritaFetchColorMasks(_KritaBase):
         tolerance=0.15,
         max_wait=60.0,
         reference=None,
-        fallback=None,
-        **_,
+        **kwargs,
     ):
         import torch
         from PIL import Image as PILImage
@@ -539,38 +568,31 @@ class XYZKritaFetchColorMasks(_KritaBase):
             if missing is not None:
                 raise missing
             image = _decode(client.fetch_image(key, timeout=max_wait)).convert("RGBA")
-            source = f"'{layer}'"
+            array = np.asarray(image, dtype=np.uint8)
+            rgb, alpha = array[:, :, :3], array[:, :, 3]
+
+            colors = pick_colors(rgb, alpha, count)
+            masks = split_colors(rgb, alpha, colors, tolerance)
+            height, width = alpha.shape
+
+            print(f"[XYZ Krita] colour masks from '{layer}':")
+            for i, (color, mask) in enumerate(zip(colors, masks)):
+                share = float(mask.mean()) * 100.0
+                print(f"    mask_{i}  #{color[0]:02x}{color[1]:02x}{color[2]:02x}  {share:.1f}% of the canvas")
+
+            # Fewer colours on the layer than asked for: the spare slots come back
+            # empty rather than erroring (design decision 18). A silent empty region is
+            # the trade — it is in the README.
+            if len(masks) < count:
+                print(
+                    f"[XYZ Krita] only {len(masks)} colour(s) found but count={count} — "
+                    f"{count - len(masks)} mask(s) will be empty"
+                )
+                masks += [np.zeros((height, width), dtype=np.float32)] * (count - len(masks))
         except (RuntimeError, *FALLBACK_ERRORS) as exc:
-            # The stand-in is split by the SAME colour maths, so the slots keep
-            # meaning the same thing.
-            tensor = use_fallback("image", fallback, exc)
-            pixels = tensor[0] if tensor.ndim == 4 else tensor
-            pixels = (pixels.clamp(0, 1) * 255).round().to("cpu").numpy().astype(np.uint8)
-            mode = "RGBA" if pixels.shape[2] == 4 else "RGB"
-            image = PILImage.fromarray(pixels, mode).convert("RGBA")
-            source = "the FALLBACK (not Krita)"
-
-        array = np.asarray(image, dtype=np.uint8)
-        rgb, alpha = array[:, :, :3], array[:, :, 3]
-
-        colors = pick_colors(rgb, alpha, count)
-        masks = split_colors(rgb, alpha, colors, tolerance)
-
-        print(f"[XYZ Krita] colour masks from {source}:")
-        for i, (color, mask) in enumerate(zip(colors, masks)):
-            share = float(mask.mean()) * 100.0
-            print(f"    mask_{i}  #{color[0]:02x}{color[1]:02x}{color[2]:02x}  {share:.1f}% of the canvas")
-
-        # Fewer colours on the layer than asked for: the spare slots come back
-        # empty rather than erroring (design decision 18). A silent empty region is
-        # the trade — it is in the README.
-        height, width = alpha.shape
-        if len(masks) < count:
-            print(
-                f"[XYZ Krita] only {len(masks)} colour(s) found but count={count} — "
-                f"{count - len(masks)} mask(s) will be empty"
-            )
-            masks += [np.zeros((height, width), dtype=np.float32)] * (count - len(masks))
+            # The fallback is now a mask PER slot, not one image re-split: fallback_i
+            # IS output mask_i. Nothing to colour-split — the masks stand in directly.
+            masks, height, width = self._fallback_masks(count, kwargs, exc)
 
         if reference is not None:
             ref_h, ref_w = int(reference.shape[1]), int(reference.shape[2])
@@ -587,6 +609,38 @@ class XYZKritaFetchColorMasks(_KritaBase):
                 ]
 
         return tuple(torch.from_numpy(m).unsqueeze(0) for m in masks)
+
+    @staticmethod
+    def _fallback_masks(count, kwargs, error):
+        """`count` masks from the fallback_* inputs when Krita is unavailable.
+
+        A fallback is the perfect place to hide a wrong answer (Krita quietly closed,
+        the whole batch renders against the stand-in), so — like use_fallback — it only
+        engages when the user has ACTUALLY connected a stand-in. No fallback mask
+        connected means the error surfaces instead of a silent set of empty masks.
+
+        An unconnected slot among connected ones is an empty mask, at the same size as
+        its neighbours: exactly the "spare slots come back empty" contract of the Krita
+        path (design decision 18).
+        """
+        supplied = {i: kwargs.get(f"fallback_{i}") for i in range(count)}
+        if not any(m is not None for m in supplied.values()):
+            raise error
+
+        print(f"[XYZ Krita] !! {error}")
+        print("[XYZ Krita] !! FALLING BACK to the connected masks — this run is NOT using Krita")
+
+        arrays = {i: _mask_to_np(m) for i, m in supplied.items() if m is not None}
+        # The canvas size is whatever the connected masks agree on; the first one sets it.
+        height, width = next(iter(arrays.values())).shape
+        masks = [
+            arrays.get(i, np.zeros((height, width), dtype=np.float32))
+            for i in range(count)
+        ]
+        empty = count - len(arrays)
+        if empty:
+            print(f"[XYZ Krita] {empty} of {count} fallback slot(s) empty (nothing connected there)")
+        return masks, height, width
 
 
 def resolve_path(path: str) -> str:

@@ -27,9 +27,12 @@ const PLACEHOLDER = '(click Refresh layers)';
 // masks are ordered by colour, and colour N stays colour N as long as count does
 // not shrink past it. So: grow freely, and on shrink only the dropped tail loses
 // its links.
+function colorCount(node) {
+  return Math.max(0, Math.round(node.widgets?.find((w) => w.name === 'count')?.value ?? 0));
+}
+
 function syncColorOutputs(node) {
-  const count = node.widgets?.find((w) => w.name === 'count')?.value ?? 0;
-  const wanted = Math.max(0, Math.round(count));
+  const wanted = colorCount(node);
 
   while ((node.outputs?.length ?? 0) > wanted) {
     node.removeOutput(node.outputs.length - 1);
@@ -38,6 +41,53 @@ function syncColorOutputs(node) {
     node.addOutput(`mask_${node.outputs.length}`, 'MASK');
   }
   node.setDirtyCanvas(true, true);
+}
+
+const MAX_COLOR_MASKS = 16; // must match MAX_COLOR_MASKS in krita_nodes/nodes.py
+const isFallback = (input) => input?.name?.startsWith('fallback_');
+
+// One fallback MASK input per output slot, so a closed Krita can be stood in for
+// slot by slot. The backend declares all 16 (ComfyUI validates connections), so
+// LiteGraph builds 16; this trims them to `count`. Slots are POSITIONAL —
+// fallback_i is output mask_i — so unlike Attach Masks there is no compaction: an
+// index keeps its link across a resize, and shrinking past it drops only that tail.
+function syncColorFallbackInputs(node) {
+  if (node.__xyzBusy) return;
+  node.__xyzBusy = true;
+  try {
+    const wanted = colorCount(node);
+
+    // Remember each fallback link by its index, so a resize keeps the wiring.
+    const saved = new Map();
+    for (const input of node.inputs || []) {
+      if (!isFallback(input) || input.link == null) continue;
+      const m = /^fallback_(\d+)$/.exec(input.name);
+      const link = app.graph.links[input.link];
+      if (m && link) saved.set(Number(m[1]), link);
+    }
+
+    for (let i = (node.inputs?.length || 0) - 1; i >= 0; i--) {
+      if (isFallback(node.inputs[i])) node.removeInput(i);
+    }
+    for (let i = 0; i < Math.min(wanted, MAX_COLOR_MASKS); i++) {
+      node.addInput(`fallback_${i}`, 'MASK');
+      node.inputs[node.inputs.length - 1].label = `fallback ${i}`;
+    }
+
+    for (const [idx, link] of saved) {
+      if (idx >= wanted) continue; // its slot no longer exists
+      const source = app.graph.getNodeById(link.origin_id);
+      const slot = node.inputs.findIndex((inp) => inp.name === `fallback_${idx}`);
+      if (source && slot >= 0) source.connect(link.origin_slot, node, slot);
+    }
+
+    // The node def declares all 16 fallback slots; re-fit the node to the ones that
+    // now exist, keeping the width the user has dragged it to.
+    node.setSize([node.size[0], node.computeSize()[1]]);
+    node.setDirtyCanvas(true, true);
+  } finally {
+    node.__xyzBusy = false;
+  }
 }
 
 // One fetch serves every Krita node on the canvas — clicking refresh on one
@@ -208,10 +258,12 @@ app.registerExtension({
       countWidget.callback = function (...args) {
         const result = original?.apply(this, args);
         syncColorOutputs(node);
+        syncColorFallbackInputs(node);
         return result;
       };
     }
     syncColorOutputs(node);
+    syncColorFallbackInputs(node);
 
     const onConfigure = node.onConfigure;
     node.onConfigure = function (info) {
@@ -219,6 +271,9 @@ app.registerExtension({
       // A saved graph already carries the right slots and links; only rebuild if
       // they disagree with `count`.
       syncColorOutputs(this);
+      // The saved graph restores its fallback links; rebuild after LiteGraph has
+      // finished wiring them so this can carry them across the resize.
+      setTimeout(() => syncColorFallbackInputs(this), 0);
       return result;
     };
   },

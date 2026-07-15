@@ -137,6 +137,68 @@ def test_no_colours_gives_no_masks():
     assert split_colors(rgb, alpha, [], 0.15) == []
 
 
+# ------------------------------------------------- colour-mask fallback (§11)
+#
+# When Krita is unavailable, the fallback is now one MASK per output slot —
+# fallback_i stands in for output mask_i — rather than a flat image re-split.
+
+from krita_nodes.nodes import XYZKritaFetchColorMasks as CM  # noqa: E402
+
+_ERR = RuntimeError("krita is closed")
+
+
+def _kw(masks: dict) -> dict:
+    """Fallback kwargs: {index: (H, W) array} -> {'fallback_i': array}."""
+    return {f"fallback_{i}": m for i, m in masks.items()}
+
+
+def test_fallback_masks_stand_in_slot_for_slot():
+    a = np.full((8, 6), 0.5, dtype=np.float32)
+    b = np.ones((8, 6), dtype=np.float32)
+    masks, h, w = CM._fallback_masks(2, _kw({0: a, 1: b}), _ERR)
+    assert (h, w) == (8, 6)
+    assert np.allclose(masks[0], a) and np.allclose(masks[1], b)
+
+
+def test_a_gap_among_connected_fallbacks_is_an_empty_mask():
+    a = np.ones((4, 4), dtype=np.float32)
+    # count=3, only slot 0 and 2 connected; slot 1 comes back empty, same size.
+    masks, h, w = CM._fallback_masks(3, _kw({0: a, 2: a}), _ERR)
+    assert len(masks) == 3
+    assert masks[0].any() and masks[2].any()
+    assert not masks[1].any() and masks[1].shape == (4, 4)
+
+
+def test_more_slots_than_connected_pads_the_tail_empty():
+    a = np.ones((5, 5), dtype=np.float32)
+    masks, _, _ = CM._fallback_masks(4, _kw({0: a}), _ERR)
+    assert len(masks) == 4
+    assert masks[0].any()
+    assert all(not m.any() for m in masks[1:])
+
+
+def test_no_fallback_connected_re_raises_rather_than_hiding_it():
+    # The whole point: a closed Krita with nothing wired in must SURFACE, not
+    # silently render a set of empty masks.
+    with pytest.raises(RuntimeError, match="krita is closed"):
+        CM._fallback_masks(3, {}, _ERR)
+    with pytest.raises(RuntimeError):
+        CM._fallback_masks(3, _kw({0: None, 1: None}), _ERR)
+
+
+def test_a_batched_mask_uses_its_first_item():
+    batch = np.stack([np.ones((3, 3), dtype=np.float32), np.zeros((3, 3), dtype=np.float32)])
+    masks, h, w = CM._fallback_masks(1, _kw({0: batch}), _ERR)
+    assert (h, w) == (3, 3)
+    assert masks[0].all()
+
+
+def test_fallback_values_are_clamped_to_unit_range():
+    wild = np.array([[-1.0, 2.0], [0.5, 0.5]], dtype=np.float32)
+    masks, _, _ = CM._fallback_masks(1, _kw({0: wild}), _ERR)
+    assert masks[0].min() >= 0.0 and masks[0].max() <= 1.0
+
+
 # ---------------------------------------------------------------- cache slots
 
 
