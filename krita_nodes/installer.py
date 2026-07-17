@@ -105,13 +105,17 @@ def krita_running() -> bool:
 
     try:
         if sys.platform == "win32":
+            # Capture BYTES, not text: on a non-English Windows `tasklist` prints its
+            # header in the console codepage (GBK etc.), which is not UTF-8, and
+            # letting subprocess decode it crashes the reader thread — which would
+            # silently make this probe always return False. The process name is
+            # ASCII, so match at the byte level instead.
             out = subprocess.run(
                 ["tasklist", "/FI", "IMAGENAME eq krita.exe"],
                 capture_output=True,
-                text=True,
                 timeout=5,
-            ).stdout.lower()
-            return "krita.exe" in out
+            ).stdout
+            return b"krita.exe" in out.lower()
         out = subprocess.run(
             ["pgrep", "-x", "krita"], capture_output=True, text=True, timeout=5
         )

@@ -805,6 +805,19 @@ class XYZKritaSendToKrita(_KritaBase):
 
         png = _encode(image)
 
+        # new_layer needs a document to add to. When Krita has nothing open — the
+        # usual case when this node is the first thing to touch Krita, or when the
+        # launch above started it fresh — fall back to creating one, so the node is
+        # never a dead end. (A KritaUnreachable from ping propagates: that means the
+        # plugin genuinely can't be reached, which is a different, clearer error.)
+        if mode == "new_layer":
+            if client.ping(timeout=min(max_wait, 15.0)).get("document") is None:
+                print(
+                    "[XYZ Krita] new_layer: Krita has no open document — creating a "
+                    "new one instead"
+                )
+                mode = "new_document"
+
         if mode == "new_document":
             result = client.new_document(png, name=layer_name, timeout=max_wait)
             size = result.get("size", [0, 0])

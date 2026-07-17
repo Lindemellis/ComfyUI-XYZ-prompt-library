@@ -362,6 +362,20 @@ def new_document(png: bytes, name: str = "ComfyUI") -> dict:
         return {"ok": True, "document": doc.name(), "size": [width, height]}
 
 
+def _unique_layer_name(doc, base: str) -> str:
+    """`base`, or `base 2` / `base 3` / … so a new layer never collides with one
+    already in the document. Krita does not enforce unique layer names, so two
+    "ComfyUI" layers are otherwise indistinguishable in the docker."""
+    base = base or "ComfyUI"
+    existing = {node.name() for node in _walk(doc.rootNode())}
+    if base not in existing:
+        return base
+    n = 2
+    while f"{base} {n}" in existing:
+        n += 1
+    return f"{base} {n}"
+
+
 def add_layer(png: bytes, name: str = "ComfyUI", scale_document: bool = False) -> dict:
     """Push an image back into Krita as a new paint layer, on top.
 
@@ -406,7 +420,7 @@ def add_layer(png: bytes, name: str = "ComfyUI", scale_document: bool = False) -
 
         width, height = doc.width(), doc.height()
 
-        node = doc.createNode(name or "ComfyUI", "paintlayer")
+        node = doc.createNode(_unique_layer_name(doc, name), "paintlayer")
         # None => on top of the stack.
         doc.rootNode().addChildNode(node, None)
         _write_pixels(node, image, width, height)
