@@ -1641,6 +1641,14 @@ class TagACHandler {
 
     if (!this.ui.isVisible()) return;
 
+    // A MODIFIED arrow (Ctrl/Alt/Cmd + ↑/↓) is an editor shortcut — weight nudging in the
+    // PLv3 Monaco editor and the PLv2 rich editor — not dropdown navigation. Let it through
+    // (don't preventDefault), or the open suggestion/related list swallows it and the weight
+    // never changes.
+    if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && (e.ctrlKey || e.altKey || e.metaKey)) {
+      return;
+    }
+
     switch (e.key) {
       case 'ArrowDown':
         e.preventDefault();

@@ -72,6 +72,40 @@ export function replaceTextPreservingFolding(model, next) {
   model.applyEdits([{ range, text: next.slice(s, e2) }]);
 }
 
+/** Round to 3 decimals and clamp — kills the 1.2000000004 that plain float adds give. */
+function clampRound(v, min, max) {
+  return Math.min(max, Math.max(min, Math.round(v * 1000) / 1000));
+}
+
+/** A number as short source text: 1.1 not 1.100, 0.95 not 0.9500. */
+function fmtNum(v) {
+  return String(parseFloat(v.toFixed(3)));
+}
+
+/** One Ctrl+↑/↓ step on a piece of prompt text. Returns the rewritten text.
+ *
+ *   - `<lora:name:0.8>`  -> bump the LoRA weight (its own range; may go negative)
+ *   - `(tag:1.1)`        -> bump the attention weight; back to bare `tag` at exactly 1.0
+ *   - `tag`              -> wrap it: `(tag:1.05)`
+ *
+ * The LAST `:number` before `)` is the weight (PLv3 does not escape `:`), so an inner
+ * `a:b` is left intact. */
+function bumpWeight(text, dir, s) {
+  const lora = text.match(/^<([^:<>]+):([^:<>]+):(-?\d*\.?\d+)(?::(-?\d*\.?\d+))?>$/);
+  if (lora) {
+    const w = clampRound(parseFloat(lora[3]) + dir * s.loraStep, s.loraMin, s.loraMax);
+    const clip = lora[4] !== undefined ? `:${lora[4]}` : '';
+    return `<${lora[1]}:${lora[2]}:${fmtNum(w)}${clip}>`;
+  }
+
+  const att = text.match(/^\(\s*([\s\S]*?)\s*:\s*(-?\d*\.?\d+)\s*\)$/);
+  const inner = att ? att[1] : text;
+  const weight = att ? parseFloat(att[2]) : 1.0;
+  const nw = clampRound(weight + dir * s.weightStep, s.weightMin, s.weightMax);
+  if (Math.abs(nw - 1.0) < 1e-9) return inner;   // neutral again — drop the parens
+  return `(${inner}:${fmtNum(nw)})`;
+}
+
 let _cssInjected = false;
 function injectCss() {
   if (_cssInjected) return;
@@ -215,6 +249,72 @@ export class PromptEditor {
       contextMenuGroupId: 'modification',
       run: () => this.promptReplaceInTags(),
     });
+
+    // Ctrl+↑ / Ctrl+↓ — adjust the weight of the selection (or the tag at the cursor),
+    // like ComfyUI's prompt boxes: `tag` -> `(tag:1.05)` -> `(tag:1.1)` …, back to bare
+    // `tag` at 1.0. A `<lora:…>` gets its own weight bumped instead. Overrides Monaco's
+    // default Ctrl+↑/↓ (scroll one line), which nobody reaches for in a prompt.
+    this.editor.addAction({
+      id: 'plv3.weightUp',
+      label: 'PLv3: Increase weight',
+      keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.UpArrow],
+      run: () => this.adjustWeight(+1),
+    });
+    this.editor.addAction({
+      id: 'plv3.weightDown',
+      label: 'PLv3: Decrease weight',
+      keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.DownArrow],
+      run: () => this.adjustWeight(-1),
+    });
+  }
+
+  // --- weight nudging (Ctrl+↑/↓) ---------------------------------------------
+
+  /** The range Ctrl+↑/↓ acts on: the selection if there is one, else the tag around the
+   *  cursor — the run between item separators (`,` newline, or a group's `{ }`), trimmed. */
+  weightTarget() {
+    const model = this.model();
+    const sel = this.editor.getSelection();
+    if (sel && !sel.isEmpty()) return this.trimRange(model, sel);
+
+    const text = model.getValue();
+    const off = model.getOffsetAt(this.editor.getPosition());
+    const isBoundary = (c) => c === ',' || c === '\n' || c === '{' || c === '}';
+    let s = off;
+    let e = off;
+    while (s > 0 && !isBoundary(text[s - 1])) s -= 1;
+    while (e < text.length && !isBoundary(text[e])) e += 1;
+    if (e <= s) return null;
+    return this.trimRange(model,
+      this.monaco.Range.fromPositions(model.getPositionAt(s), model.getPositionAt(e)));
+  }
+
+  /** Shrink a range past leading/trailing whitespace, so the wrap sits tight on the tag. */
+  trimRange(model, range) {
+    const text = model.getValueInRange(range);
+    const lead = text.length - text.trimStart().length;
+    const trail = text.length - text.trimEnd().length;
+    const s = model.getOffsetAt(range.getStartPosition()) + lead;
+    const e = model.getOffsetAt(range.getEndPosition()) - trail;
+    if (e <= s) return null;
+    return this.monaco.Range.fromPositions(model.getPositionAt(s), model.getPositionAt(e));
+  }
+
+  adjustWeight(dir) {
+    const model = this.model();
+    if (!model) return;
+    const range = this.weightTarget();
+    if (!range) return;
+    const before = model.getValueInRange(range);
+    const after = bumpWeight(before, dir, settings());
+    if (after == null || after === before) return;
+
+    this.editor.executeEdits('plv3-weight', [{ range, text: after }]);
+    // Keep the tag selected so a run of presses keeps acting on the same thing (and the
+    // user can see what moved). executeEdits already put the change on the undo stack.
+    const s = model.getOffsetAt(range.getStartPosition());
+    this.editor.setSelection(this.monaco.Range.fromPositions(
+      model.getPositionAt(s), model.getPositionAt(s + after.length)));
   }
 
   // --- model ---

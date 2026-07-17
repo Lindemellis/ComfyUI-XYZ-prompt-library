@@ -535,6 +535,11 @@ function buildUI(node) {
     rects = readRects(node);
     selectedId = null;
     node.__xyzSlotIds = rects.map((r) => r.id);
+    // The serialised height already includes the restored list rows. Reset the
+    // baseline BEFORE layout() runs, or it treats the 0 -> N jump as "the list
+    // just grew" and adds listHeight(N) on top — the node crept taller on every
+    // load / undo / paste without the masks changing at all.
+    lastListH = listHeight(rects.length);
     render();
   };
   render();

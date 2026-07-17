@@ -25,6 +25,13 @@ import { showConfirm, showContextMenu, showPrompt, toast } from './ui.js';
 // state — so those live for the session and no longer.
 const COLLAPSE_KEY = 'xyz.plv3.collapsed';
 
+// A library item was added / edited / deleted somewhere. Every open view of that group —
+// another detail page, the library manager window — is now stale, so it is told to refetch.
+// `source` lets the emitter's own listener skip itself (it has already refreshed directly).
+export function notifyLibraryChanged(paths, source) {
+  document.dispatchEvent(new CustomEvent('plv3:library-changed', { detail: { paths, source } }));
+}
+
 function loadCollapsed() {
   try {
     return new Set(JSON.parse(localStorage.getItem(COLLAPSE_KEY) || '[]'));
@@ -155,9 +162,30 @@ function groupIcon(group) {
 
 // --- controls ---------------------------------------------------------------
 
-function textbox(value, onCommit) {
+// Danbooru autocomplete on a detail-page text box. Same bridge the Monaco editor uses:
+// `tagsOnly` (this is PLv3 text, not a PLv2 `[ref]`), `related` so a click on a token
+// opens its related tags (gated by the global "related" AC setting, like everywhere else).
+function attachAC(el) {
+  try { window.xyzTagAC?.attach(el, { tagsOnly: true, related: true }); } catch { /* AC off */ }
+}
+
+// A single item never has a leading/trailing comma — strip one an autocompletion (which
+// appends "tag, ") or a paste may have left, so it is not stored as part of the prompt.
+function cleanItem(v) {
+  return String(v).replace(/^[\s,]+/, '').replace(/[\s,]+$/, '');
+}
+
+// Split typed text into items on every comma, each trimmed, blanks dropped. What "remember
+// this prompt" does with `a, b, c`: three items. (A comma is always an item separator here,
+// same as PLv3 source — there is no escaped-comma exception.)
+function splitItems(v) {
+  return String(v).split(',').map((s) => s.trim()).filter(Boolean);
+}
+
+function textbox(value, onCommit, { ac = false } = {}) {
   const i = input(value);
   i.onchange = () => onCommit(i.value);
+  if (ac) attachAC(i);
   return i;
 }
 
@@ -179,10 +207,23 @@ export class DetailPane {
    *  one entry is a column of empty space next to the thing it points at. */
   constructor(container, {
     pane, outline = true, presetBar = true, links = null, emptyText = 'Open a node.',
+    memoryStore = null,
   }) {
     this.container = container;
     this.pane = pane; // the PromptEditor — owns the model and the undo stack
     this.outline = outline;
+    // A DISABLED library item is not in the text, so a weight the user gave it has no
+    // home there. This is that home: a document-scoped `{header: {item text: weight}}`
+    // map the host persists (a node's `properties` in the main window, the preset's body
+    // in the library window). It survives a reload, it never touches the library DB, and
+    // two documents remember their own weights for the same item. `null` = no persistence
+    // (a fallback that only lasts the session).
+    this.memoryStore = memoryStore;
+    this._mem = null;
+    this._memNode = undefined;
+    // Identifies this pane's own library edits so its listener does not double-refresh on
+    // an event it just emitted.
+    this._libSrc = Symbol('plv3-detail');
     // `presetBar: false` — the caller IS a preset (the library window). Its root block
     // does not get a "load a preset / save as preset" bar; nested blocks still do.
     this.presetBar = presetBar;
@@ -230,7 +271,65 @@ export class DetailPane {
 
   setCompiled(result) { this.compiled = result; }
 
+  // --- weight memory (spec §5.2 is text-first, but a disabled item leaves the text; its
+  //     weight is remembered here instead of being reset to 1 on re-enable) ---
+
+  /** The remembered map, loaded from the host on first use and cached until the document
+   *  changes (a node switch, or the library window changing preset via resetMemory). */
+  memData() {
+    if (this._mem == null) {
+      try { this._mem = this.memoryStore?.load?.() || {}; } catch { this._mem = {}; }
+      if (!this._mem || typeof this._mem !== 'object') this._mem = {};
+    }
+    return this._mem;
+  }
+
+  memGet(header, text) {
+    const g = this.memData()[header];
+    const w = g && g[text];
+    return typeof w === 'number' ? w : null;
+  }
+
+  /** A weight of 1 (or null) is "no memory" — store nothing, so an item the user left at
+   *  the default does not accrue a stale entry that would resurrect on re-enable. */
+  memSet(header, text, weight) {
+    const data = this.memData();
+    if (weight == null || Math.abs(weight - 1) < 1e-9) {
+      if (data[header]) {
+        delete data[header][text];
+        if (!Object.keys(data[header]).length) delete data[header];
+      }
+    } else {
+      (data[header] || (data[header] = {}))[text] = weight;
+    }
+    try { this.memoryStore?.save?.(data); } catch { /* no store */ }
+  }
+
+  memForget(header, text) { this.memSet(header, text, null); }
+
+  /** Editing a disabled item's text moves the item's row; carry its remembered weight to
+   *  the new text so the edit does not silently drop the weight. */
+  memRename(header, oldText, newText) {
+    const g = this.memData()[header];
+    if (g && g[oldText] != null) {
+      g[newText] = g[oldText];
+      delete g[oldText];
+      try { this.memoryStore?.save?.(this.memData()); } catch { /* no store */ }
+    }
+  }
+
+  /** The document behind the pane changed (the library window opened a different preset).
+   *  Drop the cached map and, optionally, swap in a store bound to the new document. */
+  resetMemory(store) {
+    if (store !== undefined) this.memoryStore = store;
+    this._mem = null;
+  }
+
   setAst(payload, node, { version }) {
+    // A different node is a different document with its own remembered weights — drop the
+    // cache so the next read reloads from that node's store.
+    if (node !== this._memNode) { this._memNode = node; this._mem = null; }
+
     // No negative node any more: regions are always offered (a region simply must not be
     // wired to a negative conditioning — documented, not enforced).
     this.polarity = 'positive';
@@ -269,6 +368,17 @@ export class DetailPane {
   buildShell() {
     if (this.built) return;
     this.built = true;
+
+    // Another view changed a library group we are showing (an item added/deleted/edited in
+    // the library manager, or in another node's detail page). Refetch the affected groups
+    // so a deleted item does not linger here — but ignore our own edits (already refreshed).
+    document.addEventListener('plv3:library-changed', (e) => {
+      if (e.detail?.source === this._libSrc) return;
+      const paths = e.detail?.paths;
+      const affected = (paths || [...this.library.keys()]).filter((p) => this.library.has(p));
+      if (affected.length) this.invalidateLibrary(affected);
+    });
+
     this.body = div('flex:1;min-width:0;overflow-y:auto;overflow-x:hidden;padding:10px 12px;');
     const split = div('display:flex;flex:1;min-width:0;min-height:0;overflow:hidden;');
 
@@ -633,7 +743,8 @@ export class DetailPane {
     const text = src.slice(body.span[0], body.span[1]);
 
     const row = div(`display:flex;gap:8px;align-items:center;min-width:0;padding:2px 0 2px ${depth * 14}px;`);
-    const box = textbox(text, (v) => this.edit([{ span: body.span, text: v.trim() }]));
+    const box = textbox(text, (v) => this.edit([{ span: body.span, text: cleanItem(v) }]),
+      { ac: body.kind !== 'lora' });
     if (body.kind === 'lora') { box.style.color = '#94e2d5'; box.style.fontFamily = T.mono; }
 
     const w = div('width:132px;flex-shrink:0;');
@@ -643,6 +754,9 @@ export class DetailPane {
     w.append(slider(weight, range, { onCommit: (v) => this.itemWeight(node, v) }));
 
     row.append(box, w);
+    // A plain item lives only in the text, so deleting it is just removing it from there.
+    row.append(iconButton('✕', 'Delete this item',
+      () => this.edit([{ span: this.removalSpan(node.span, src), text: '' }])));
     host.append(row);
   }
 
@@ -747,6 +861,15 @@ export class DetailPane {
 
     const enabledTexts = new Set();
     const enabledRefs = new Set();
+    // The library rows, indexed so an enabled item can find its row — an enabled item is
+    // matched to its library row by text (the row stores the unweighted text), and a ref
+    // row by the path it points at. Delete and the disabled-item edits act on that row.
+    const itemByText = new Map();
+    const refByPath = new Map();
+    for (const i of info.items) {
+      if (i.kind === 'ref') refByPath.set(i.ref_path, i);
+      else itemByText.set(i.text, i);
+    }
 
     // In text order — the block's own children.
     for (const child of group.children) {
@@ -754,6 +877,7 @@ export class DetailPane {
         // A nested library block IS an item of this group (a ref).  It gets a switch
         // like any other item; turning it off deletes the whole block.
         enabledRefs.add(child.header);
+        const refItem = refByPath.get(child.header) || null;
         const wrap = div('display:flex;gap:8px;align-items:flex-start;min-width:0;');
         const sw = toggle(true, () =>
           this.edit([{ span: this.removalSpan(child.span, src), text: '' }]));
@@ -763,6 +887,12 @@ export class DetailPane {
         const box = div('flex:1;min-width:0;');
         this.renderNode(child, box, 0, src);
         wrap.append(box);
+        // Delete the reference from the group AND remove its block from the text — the
+        // ✕ means "this item is gone", not "turn it off" (which the switch already does).
+        const del = iconButton('✕', 'Delete this reference from the library and the text',
+          () => this.deleteLibraryItem(group, { refItem, span: child.span }, src));
+        del.style.marginTop = '8px';
+        wrap.append(del);
         host.append(wrap);
         continue;
       }
@@ -773,7 +903,8 @@ export class DetailPane {
       const body = weightedItem(child) ? child.children[0] : child;
       const text = src.slice(body.span[0], body.span[1]).trim();
       enabledTexts.add(text);
-      host.append(this.libraryItemRow(group, { node: child, body, text }, src, true));
+      host.append(this.libraryItemRow(
+        group, { node: child, body, text, item: itemByText.get(text) || null }, src, true));
     }
 
     // Spec §5.6: disabled after enabled, sorted by kind then alphabetically —
@@ -795,6 +926,96 @@ export class DetailPane {
     if (!group.children.length && !off.length) {
       host.append(div(`color:${T.muted};font-size:${T.fs.label};`, 'empty'));
     }
+
+    host.append(this.addItemRow(group, src));
+  }
+
+  /** Add a brand-new item to this library group, straight from the detail page.
+   *
+   *  A typed prompt: created in the group (so it is a real library item) AND written into
+   *  the block, i.e. enabled — "add" means "add it and use it". A duplicate of one the
+   *  group already has just gets enabled (the create fails on UNIQUE, the text insert still
+   *  runs). The Add button is what makes this usable while the autocomplete owns Enter. */
+  addItemRow(group, src) {
+    const row = div('display:flex;gap:6px;align-items:center;min-width:0;margin-top:6px;');
+    const box = input('', { placeholder: 'add item — Enter or +' });
+    attachAC(box);
+    const commit = () => {
+      const text = box.value;
+      if (!text.trim()) return;
+      box.value = '';
+      this.addLibraryItem(group, src, text);
+    };
+    // Enter adds — UNLESS the autocomplete just consumed it to pick a tag. Autocomplete's
+    // keydown handler runs first (it is attached first) and calls preventDefault when it
+    // commits a selection; so if the Enter was already handled, do NOT also add. (Checking
+    // the dropdown's visibility does not work: the pick hides it synchronously first.)
+    box.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter' || e.defaultPrevented) return;
+      e.preventDefault();
+      commit();
+    });
+    row.append(box);
+    const add = button('+', { variant: 'quiet', size: 'sm' });
+    add.title = 'Add this item to the group';
+    add.onclick = commit;
+    row.append(add);
+    return row;
+  }
+
+  async addLibraryItem(group, src, text) {
+    // A comma is the item separator — `tag1, tag2` is TWO items. Split it, or the joined
+    // string gets stored as a third (disabled) library item on top of the two the block text
+    // splits into anyway.
+    const parts = splitItems(text);
+    if (!parts.length) return;
+
+    const info = this.library.get(group.header);
+    const gid = info?.group?.id;
+    if (gid != null) {
+      for (const p of parts) {
+        // Create each as a real library item so it appears at once; blur-sync would do the
+        // same, but only on blur.
+        await this.libApi('POST', `/groups/${gid}/items`, {
+          text: p, kind: p.startsWith('<lora:') ? 'lora' : 'prompt',
+        });
+      }
+    }
+    // Enable them: write them into the block, comma-separated (the parser reads them back
+    // as the same separate items).
+    const [at, laid] = this.insertionPoint(group, src, parts.join(', '));
+    this.edit([{ span: [at, at], text: laid }]);
+    this.invalidateLibrary([group.header]);
+    notifyLibraryChanged([group.header], this._libSrc);
+  }
+
+  /** A small library write (PATCH/DELETE an item) — the disabled-item edits and the ✕ act
+   *  directly on the group, because a disabled item lives only in the DB, not the text. */
+  async libApi(method, path, body) {
+    try {
+      await fetch(`/xyz/plv3/library${path}`, {
+        method,
+        headers: body ? { 'Content-Type': 'application/json' } : undefined,
+        body: body ? JSON.stringify(body) : undefined,
+      });
+    } catch (err) {
+      console.warn('[PLv3] library item op failed', err);
+    }
+  }
+
+  /** Delete an item from the library group — for good, not merely disable it.
+   *
+   *  A disabled item is only a DB row: drop the row. An ENABLED one is in the text too, so
+   *  (the user's call) it is removed from both — the item vanishes entirely rather than
+   *  falling back into the disabled list. The remembered weight goes with it. */
+  async deleteLibraryItem(group, entry, src) {
+    const text = entry.text ?? (entry.item && entry.item.text);
+    if (text != null) this.memForget(group.header, text);
+    if (entry.span) this.edit([{ span: this.removalSpan(entry.span, src), text: '' }]);
+    const id = entry.item?.id ?? entry.refItem?.id;
+    if (id != null) await this.libApi('DELETE', `/items/${id}`);
+    this.invalidateLibrary([group.header]);
+    notifyLibraryChanged([group.header], this._libSrc);   // update the manager / other panes
   }
 
   /** What to delete when an item is disabled.
@@ -859,13 +1080,23 @@ export class DetailPane {
     return `${base}    `;
   }
 
+  /** The current weight of an enabled item, as the text has it. */
+  enabledWeight(node, src) {
+    if (node.kind === 'lora') return loraWeight(src, node);
+    return weightedItem(node) ? node.settings.weight ?? 1 : 1;
+  }
+
   libraryItemRow(group, entry, src, on) {
     const isRef = !on && entry.item?.kind === 'ref';
+    const isLora = on ? entry.body.kind === 'lora' : String(entry.text).startsWith('<lora:');
     const row = div(`display:flex;gap:8px;align-items:center;min-width:0;padding:2px 0;
-      ${on ? '' : 'opacity:.6;'}`);
+      ${on ? '' : 'opacity:.85;'}`);
 
     const sw = toggle(on, async () => {
       if (on) {
+        // Disabling captures the weight the text currently carries, so re-enabling later
+        // brings it back instead of resetting to 1 (the whole point of the memory).
+        this.memSet(group.header, entry.text, this.enabledWeight(entry.node, src));
         return this.edit([{ span: this.removalSpan(entry.node.span, src), text: '' }]);
       }
       if (isRef) {
@@ -883,30 +1114,65 @@ export class DetailPane {
         const [at, laid] = this.insertionPoint(group, src, block, { isGroup: true });
         return this.edit([{ span: [at, at], text: laid.replace(/,$/, '') }]);
       }
-      const [at, text] = this.insertionPoint(group, src, entry.text);
-      this.edit([{ span: [at, at], text }]);
+      // Re-enable with the remembered weight — `(tag:1.2)` if there is one, plain otherwise.
+      const w = isLora ? null : this.memGet(group.header, entry.text);
+      const written = (w != null && Math.abs(w - 1) > 1e-9)
+        ? `(${entry.text}:${fmt(w)})` : entry.text;
+      const [at, laid] = this.insertionPoint(group, src, written);
+      this.edit([{ span: [at, at], text: laid }]);
     });
     sw.style.transform = 'scale(.8)';
     row.append(sw);
 
     if (on) {
       const box = textbox(entry.text, (v) =>
-        this.edit([{ span: entry.body.span, text: v.trim() }]));
-      if (entry.body.kind === 'lora') { box.style.color = '#94e2d5'; box.style.fontFamily = T.mono; }
+        this.edit([{ span: entry.body.span, text: cleanItem(v) }]), { ac: !isLora });
+      if (isLora) { box.style.color = '#94e2d5'; box.style.fontFamily = T.mono; }
       row.append(box);
-      const weight = entry.node.kind === 'lora'
-        ? loraWeight(src, entry.node)
-        : (weightedItem(entry.node) ? entry.node.settings.weight ?? 1 : 1);
+      const weight = this.enabledWeight(entry.node, src);
       const w = div('width:132px;flex-shrink:0;');
-      const range = entry.node.kind === 'lora' ? loraRange() : weightRange();
+      const range = isLora ? loraRange() : weightRange();
       w.append(slider(weight, range, { onCommit: (v) => this.itemWeight(entry.node, v) }));
       row.append(w);
-    } else {
-      const label = isRef ? `→ [${entry.item.ref_path}]` : entry.text;
-      row.append(div(`flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
-        font-size:${T.fs.body};color:${isRef ? T.lib : T.label};padding:4px 0;`, label));
-      row.append(div('width:132px;flex-shrink:0;'));
+      row.append(iconButton('✕', 'Delete this item from the library and the text',
+        () => this.deleteLibraryItem(group, { item: entry.item, text: entry.text, span: entry.node.span }, src)));
+      return row;
     }
+
+    // --- disabled: a DB-only row, but still fully editable (the user's request). ---
+    if (isRef) {
+      row.append(div(`flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+        font-size:${T.fs.body};color:${T.lib};padding:4px 0;`, `→ [${entry.item.ref_path}]`));
+      row.append(div('width:132px;flex-shrink:0;'));
+      row.append(iconButton('✕', 'Delete this reference from the library',
+        () => this.deleteLibraryItem(group, { item: entry.item, text: entry.text }, src)));
+      return row;
+    }
+
+    // Editing a disabled item edits the LIBRARY row (that is all it is), and carries its
+    // remembered weight to the new text so the weight is not lost by a rename.
+    const box = textbox(entry.text, async (v) => {
+      const next = cleanItem(v);
+      if (!next || next === entry.text) return;
+      this.memRename(group.header, entry.text, next);
+      await this.libApi('PATCH', `/items/${entry.item.id}`, { text: next });
+      this.invalidateLibrary([group.header]);
+      notifyLibraryChanged([group.header], this._libSrc);
+    }, { ac: !isLora });
+    if (isLora) { box.style.color = '#94e2d5'; box.style.fontFamily = T.mono; }
+    row.append(box);
+
+    // A disabled item has no text to hold a weight, so the slider writes the memory — and
+    // that is exactly the weight re-enabling will restore.
+    const w = div('width:132px;flex-shrink:0;');
+    const remembered = isLora ? 1 : (this.memGet(group.header, entry.text) ?? 1);
+    if (!isLora) {
+      w.append(slider(remembered, weightRange(),
+        { onCommit: (v) => this.memSet(group.header, entry.text, v) }));
+    }
+    row.append(w);
+    row.append(iconButton('✕', 'Delete this item from the library',
+      () => this.deleteLibraryItem(group, { item: entry.item, text: entry.text }, src)));
     return row;
   }
 
@@ -1325,7 +1591,11 @@ export class DetailPane {
     const res = await fetch('/xyz/plv3/library/presets', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ text: this.pane.text(), path: group.header, name }),
+      // The remembered weights ride along, so a preset saved from here keeps a disabled
+      // item's weight too (§the document-scoped weight memory, persisted into the preset).
+      body: JSON.stringify({
+        text: this.pane.text(), path: group.header, name, weight_memory: this.memData(),
+      }),
     });
     if (!res.ok) {
       toast(`Could not save the preset — ${(await res.json().catch(() => ({}))).error || res.status}`, 'error');

@@ -20,7 +20,7 @@
 // the same editor (PromptEditor) with the same autocomplete. Two copies of that UI
 // would drift apart within a week, and the copy in here would be the worse one.
 
-import { DetailPane } from './detail.js';
+import { DetailPane, notifyLibraryChanged } from './detail.js';
 import { PromptEditor } from './editor_core.js';
 import { settings } from './settings.js';
 import {
@@ -62,6 +62,22 @@ class LibraryWindow {
     this.selected = null;  // group id
     this.preset = null;    // the selected preset, or null = "the group itself"
     this.onInsert = null;  // set by window.js
+    // Tags our own library edits so we don't refresh twice on an event we just emitted.
+    this._libSrc = Symbol('plv3-libwin');
+  }
+
+  /** A library edit landed somewhere (this window's own detail page, or a node's detail
+   *  page in the editor window). Refetch so the tree/items reflect it — but skip our own
+   *  emissions, which have already refreshed. Debounced so a burst collapses to one. */
+  onLibraryChanged(e) {
+    if (e.detail?.source === this._libSrc || !this.isVisible()) return;
+    clearTimeout(this._libRefreshTimer);
+    this._libRefreshTimer = setTimeout(() => this.refresh().catch(() => {}), 60);
+  }
+
+  /** Tell the editor window's detail pages that this window changed the library. */
+  notifyChanged(path) {
+    notifyLibraryChanged(path ? [path] : null, this._libSrc);
   }
 
   isVisible() { return !!this.win && this.win.isVisible(); }
@@ -91,7 +107,7 @@ class LibraryWindow {
     if (this.win) return;
     this.win = makeWindow({
       key: 'xyz.plv3.library',
-      title: 'PLv3 Library',
+      title: 'PLv3 Library Manager',
       defaults: { x: 200, y: 120, w: 1020, h: 620 },
       minW: 720,
       minH: 380,
@@ -131,6 +147,9 @@ class LibraryWindow {
       right,
     );
     this.win.el.addEventListener('plv3:resized', () => this.editor?.relayout());
+    // Live-refresh when a library edit lands from anywhere (esp. a node's detail page in
+    // the editor window deleting/adding an item in a group this window is showing).
+    document.addEventListener('plv3:library-changed', (e) => this.onLibraryChanged(e));
   }
 
   async initEditor() {
@@ -164,8 +183,19 @@ class LibraryWindow {
         set: (path, presetId) => this.linkTo(path, presetId),
         clear: (path) => this.unlink(path),
       },
+      // A preset has no node to hang the weight memory on, so it lives in the preset's
+      // body and is persisted whenever the preset is saved (commitEditor). Seeded from the
+      // body when a preset is opened (renderEditor), so a disabled item's weight survives
+      // the window being closed and reopened.
+      memoryStore: {
+        load: () => this.presetMem || {},
+        save: (dump) => { this.presetMem = dump; this.saveSoon(); },
+      },
       emptyText: 'Pick a preset.',
     });
+    // The embedded detail page's library edits are OUR edits: share the source token so this
+    // window does not treat its own preset-page edits as external and refresh-churn on them.
+    this.detail._libSrc = this._libSrc;
     this.presetModel = this.editor.createModel('');
     this.editor.setModel(this.presetModel);
   }
@@ -388,6 +418,7 @@ class LibraryWindow {
     try { await fn(); }
     catch (err) { toast(err.message, 'error'); return; }
     await this.refresh();
+    this.notifyChanged();   // a group/folder changed — editor detail pages may show it
   }
 
   // --- selection ---
@@ -577,36 +608,54 @@ class LibraryWindow {
           font-size:${T.fs.body};color:${T.lib};`, `→ [${item.ref_path}]`));
       } else {
         const box = input(item.text, { mono: item.kind === 'lora' });
+        if (item.kind !== 'lora') attachAC(box);
         box.onchange = async () => {
-          await api.updateItem(item.id, { text: box.value.trim() });
+          await api.updateItem(item.id, { text: cleanItem(box.value) });
           await this.select(this.selected, this.preset?.id);
+          this.notifyChanged(group.path);
         };
         row.append(box);
         const w = numberBox(item.weight ?? 1, async (v) => {
           await api.updateItem(item.id, { weight: v });
           await this.select(this.selected, this.preset?.id);
+          this.notifyChanged(group.path);
         });
         row.append(w);
       }
       row.append(iconButton('✕', 'Delete from the library', async () => {
         await api.deleteItem(item.id);
         await this.select(this.selected, this.preset?.id);
+        this.notifyChanged(group.path);
       }));
       d.append(row);
     }
 
     const add = div('display:flex;gap:8px;margin-top:10px;min-width:0;');
     const box = input('', { placeholder: 'new item — Enter to add' });
+    attachAC(box);
     const commit = async () => {
-      const text = box.value.trim();
-      if (!text) return;
-      await api.addItem(group.id, { text, kind: text.startsWith('<lora:') ? 'lora' : 'prompt' })
-        .catch((e) => toast(e.message, 'error'));
+      const parts = splitItems(box.value);
+      if (!parts.length) return;
       box.value = '';
+      for (const text of parts) {
+        await api.addItem(group.id, { text, kind: text.startsWith('<lora:') ? 'lora' : 'prompt' })
+          .catch((e) => toast(e.message, 'error'));
+      }
       await this.select(this.selected, this.preset?.id);
+      this.notifyChanged(group.path);
     };
-    box.onkeydown = (e) => e.key === 'Enter' && commit();
+    // Enter adds — unless autocomplete just consumed it to pick a tag (its keydown runs
+    // first and calls preventDefault on a commit). The + button always adds.
+    box.addEventListener('keydown', (e) => {
+      if (e.key !== 'Enter' || e.defaultPrevented) return;
+      e.preventDefault();
+      commit();
+    });
     add.append(box);
+    const addBtn = button('+', { variant: 'quiet', size: 'sm' });
+    addBtn.title = 'Add this item to the group';
+    addBtn.onclick = commit;
+    add.append(addBtn);
 
     const ref = el('select', `background:${T.bg0};border:1px solid ${T.edge};
       border-radius:${T.radiusSm};color:${T.text};font-size:${T.fs.label};max-width:200px;
@@ -628,6 +677,7 @@ class LibraryWindow {
       }
       ref.value = '';
       await this.select(this.selected, this.preset?.id);
+      this.notifyChanged(group.path);
     };
     add.append(ref);
     d.append(add);
@@ -642,12 +692,18 @@ class LibraryWindow {
     if (!this.editor || !this.current) return;
     if (!this.preset) {
       this.links = {};
+      this.presetMem = {};
+      this.detail?.resetMemory();
       this.detail?.clear();
       return;
     }
     // Which nested blocks does this preset FOLLOW? The body keys them by ref-item id;
     // the server hands back the paths, which is what the UI thinks in.
     this.links = { ...(this.preset.links || {}) };
+    // The remembered weights for this preset's disabled items — drop the detail page's
+    // cached copy so it reloads from THIS preset's body, not the last one's.
+    this.presetMem = { ...(this.preset.body?.weight_memory || {}) };
+    this.detail?.resetMemory();
     await this.reloadPresetText();
   }
 
@@ -710,6 +766,7 @@ class LibraryWindow {
         path: this.current.group.path,
         name: this.preset.name,
         links: this.links,   // which nested blocks follow a preset of their own (§5.4)
+        weight_memory: this.presetMem || {},  // disabled items' remembered weights
       });
     } catch (err) {
       this.renderEditorHead('error');
@@ -728,7 +785,27 @@ class LibraryWindow {
     this.current = await api.group(this.selected);
     this.preset = this.current.presets.find((p) => p.id === this.preset.id) || this.preset;
     this.renderPresets();
+    // A blur-sync may have appended items to the group — tell the editor window's detail
+    // pages, whose enable/disable lists are drawn from it.
+    this.notifyChanged(this.current.group.path);
   }
+}
+
+// Danbooru autocomplete on a library detail-page text box (same bridge as the editor):
+// tags-only PLv3 text, click a token for its related tags.
+function attachAC(el) {
+  try { window.xyzTagAC?.attach(el, { tagsOnly: true, related: true }); } catch { /* AC off */ }
+}
+
+// A single item never carries a leading/trailing comma — strip one autocomplete/paste left.
+function cleanItem(v) {
+  return String(v).replace(/^[\s,]+/, '').replace(/[\s,]+$/, '');
+}
+
+// Split typed text into items on every comma, each trimmed, blanks dropped — `a, b, c`
+// becomes three items. A comma is always an item separator; there is no escape exception.
+function splitItems(v) {
+  return String(v).split(',').map((s) => s.trim()).filter(Boolean);
 }
 
 function numberBox(value, onCommit) {

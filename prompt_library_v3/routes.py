@@ -374,6 +374,14 @@ async def _post_preset(request):
     )
 
     preset_body = library.build_preset_body(text, blocks[0], links=links)
+    # A disabled item is not in the text, so its remembered weight cannot be rebuilt from
+    # the block. The client carries it forward — `{header: {item text: weight}}` — and it
+    # rides along in the preset body so re-enabling an item keeps the weight the user set,
+    # even across a reload (the detail page's document-scoped weight memory).
+    wm = body.get("weight_memory")
+    if wm is not None:
+        preset_body["weight_memory"] = wm
+
     pid = repo.write(repo.SavePresetOp(group_id=group_id, name=name, body=preset_body))
     return _json({"id": pid, "body": preset_body, "written_through": written})
 

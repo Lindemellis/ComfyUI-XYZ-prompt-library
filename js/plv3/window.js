@@ -62,7 +62,7 @@ class PLv3Window {
   async _build() {
     this.win = makeWindow({
       key: 'xyz.plv3.window',
-      title: 'Prompt Library V3',
+      title: 'PLv3 Prompt Editor',
       defaults: GEOM,
       minW: 820,
       minH: 420,
@@ -115,7 +115,23 @@ class PLv3Window {
       onAst: (payload, node, meta) => this.detail.setAst(payload, node, meta),
       onLibrarySynced: (paths) => this.detail.invalidateLibrary(paths),
     });
-    this.detail = new DetailPane(this.detailEl, { pane: this.pane });
+    this.detail = new DetailPane(this.detailEl, {
+      pane: this.pane,
+      // A disabled library item's weight lives on the node itself — `properties` is
+      // serialised with the workflow, so it survives a reload, and it belongs to this one
+      // node, so two documents remember their own weights for the same library item. It
+      // never touches the library DB.
+      memoryStore: {
+        load: () => this.pane.activeNode()?.properties?.plv3_weights || {},
+        save: (dump) => {
+          const node = this.pane.activeNode();
+          if (!node) return;
+          node.properties = node.properties || {};
+          node.properties.plv3_weights = dump;
+          node.graph?.setDirtyCanvas(true, true);   // mark dirty so the workflow saves it
+        },
+      },
+    });
     this.detail.clear();
     await this.pane.init();
 
