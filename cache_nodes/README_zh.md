@@ -5,7 +5,7 @@
 | 节点 | 分类 | 用途 |
 |---|---|---|
 | **XYZ Cache Slot Write** | `XYZNodes/Cache` | `IMAGE` → 槽 |
-| **XYZ Cache Slot Read** | `XYZNodes/Cache` | 槽 → `IMAGE` + `width`/`height` |
+| **XYZ Cache Slot Read** | `XYZNodes/Cache` | 槽 → `image` + `mask` + `width`/`height` |
 
 **和 Krita 无关。** 这是纯 ComfyUI 的跨运行中间结果交接方式 —— 存一张底图、存一次放大的结果 —— 免得
 每次想动下一步都要把整条链重跑一遍。Krita 联动是另一条交接路线,两者并存,用途不同。
@@ -45,3 +45,16 @@ XYZ Cache Slot Read  (slot: "base") → 放大 → …
 Read 只列出**存了图**的槽;Write 还会列出你刚建的**空槽**。
 
 每次运行都会重新检查文件,所以你在 ComfyUI 之外改了槽里的图,会立刻生效,而不是被执行缓存挡住。
+
+## 在槽图上画遮罩(Open in MaskEditor | Image Canvas)
+
+右键 **Read** 节点 → **Open in MaskEditor | Image Canvas**,用 ComfyUI **自带**的编辑器在槽图上作画
+—— 和 Load Image 给你的是同一个。你画的遮罩从节点的 **`mask`** 输出出来;**`image`** 输出仍然是实时
+的槽图(在 Image Canvas 上涂的笔触会作为编辑器状态保留、方便你继续改,但**不会**改变 image 输出)。
+
+编辑是**按槽记忆**的:切到别的槽,第一个槽的遮罩就被暂存;切回来还在。遮罩和它作画时的那张图**绑定**:
+如果那个槽之后被**覆盖成另一张图**(mtime 变了),遮罩就被丢掉 —— 它属于旧的那张图。这份记忆存在
+工作流里,存盘/重载都在。
+
+底层就是 ComfyUI 原装编辑器、没改过:它把图层存成 `input/clipspace/` 下的 `clipspace-*.png`,节点
+从画好的那张图的 alpha 通道读遮罩,和 Load Image 一模一样。这里没有任何重造编辑器的代码。

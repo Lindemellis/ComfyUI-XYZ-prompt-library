@@ -144,7 +144,10 @@ Pushes an `IMAGE` into Krita. Two modes:
 | `new_document` | Opens a brand-new Krita document at the image's size. This is the front of the workflow, when Krita has nothing open yet. |
 
 `launch_krita` (on by default) starts Krita first if it is not running, so a cold ComfyUI + a
-closed Krita + one run is all it takes to get a canvas open.
+closed Krita + one run is all it takes to get a canvas open (a freshly started Krita has nothing
+open, so the image lands in a new document regardless of `mode`). Turn `launch_krita` **off** to
+make the node best-effort: if Krita is not running it quietly does nothing instead of failing the
+run — the image is only sent when Krita is already open.
 
 ## The fallback input
 

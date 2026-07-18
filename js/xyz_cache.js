@@ -67,6 +67,91 @@ async function fetchSlots() {
   return data.slots;
 }
 
+// -------------------------------------------------- Mask Editor image-node glue
+//
+// ComfyUI's core "Open in MaskEditor | Image Canvas" menu appears for any node
+// that is an *image node* (`previewMediaType === 'image'`), and the editor loads
+// the picture from `node.images[0]` via `/view`. So we point that at the slot
+// image (which lives in output/xyz_cache/<slot>/image.png) and the whole editor —
+// menu, painting, clipspace save — comes for free. We drive image-node identity
+// through `previewMediaType` and keep `node.imgs` cleared; our opaque DOM preview
+// stays the visible one even if core momentarily draws onto the node body.
+//
+// The editor writes its result (a `clipspace/clipspace-painted-masked-<t>.png
+// [input]` reference, mask in the alpha) into the node's hidden `image` widget.
+// We remember that per slot so switching slots parks the edit and coming back
+// restores it; if the slot's picture is later overwritten (its mtime moves) the
+// edit is dropped — it belonged to a different image.
+
+const slotRef = (slot) => ({
+  filename: 'image.png',
+  subfolder: `xyz_cache/${slot}`,
+  type: 'output',
+});
+
+const currentMtime = (node, slot) =>
+  (node.__xyzSlots ?? []).find((s) => s.name === slot)?.mtime ?? null;
+
+function slotEdits(node) {
+  node.properties = node.properties || {};
+  if (!node.properties.xyz_slot_edits) node.properties.xyz_slot_edits = {};
+  return node.properties.xyz_slot_edits;
+}
+
+// Make the node an image node pointing at `slot`, so the core menu shows up and
+// the editor knows which picture to open. We rely on `previewMediaType` (not
+// `node.imgs`) for image-node identity, and keep `node.imgs` cleared so core does
+// not draw a second picture on the node body behind our (opaque) DOM preview.
+function markImageNode(node, slot) {
+  node.previewMediaType = 'image';
+  node.images = slot && slot !== NO_SLOTS ? [slotRef(slot)] : undefined;
+  node.imgs = undefined;
+}
+
+// Drop edits whose slot image was replaced, then load the current slot's surviving
+// edit into the hidden `image` widget. Idempotent — safe to call on every refresh.
+function refreshImageState(node) {
+  const slot = node.widgets?.find((w) => w.name === 'slot')?.value;
+  const imageWidget = node.widgets?.find((w) => w.name === 'image');
+  const map = slotEdits(node);
+
+  for (const [name, rec] of Object.entries(map)) {
+    const mt = currentMtime(node, name);
+    // Only when we actually know the current mtime AND it moved: a null mtime
+    // means "slots not loaded yet" or "slot gone", neither of which is proof the
+    // picture changed, so we keep the edit rather than lose it wrongly.
+    if (mt != null && rec.mtime != null && mt !== rec.mtime) delete map[name];
+  }
+
+  const rec = slot && slot !== NO_SLOTS ? map[slot] : null;
+  const want = rec ? rec.image : '';
+  if (imageWidget && imageWidget.value !== want) {
+    node.__xyzSettingImage = true;
+    imageWidget.value = want;
+    node.__xyzSettingImage = false;
+  }
+  markImageNode(node, slot);
+}
+
+// The editor just wrote a painted reference into the `image` widget. Record it
+// under the current slot, then put node.images back to the live slot (the editor
+// had pointed it at the clipspace file) so the on-node identity stays the slot.
+function onImageEdited(node, value) {
+  const slot = node.widgets?.find((w) => w.name === 'slot')?.value;
+  if (!slot || slot === NO_SLOTS) return;
+  const v = (value || '').trim();
+  const map = slotEdits(node);
+  if (v) map[slot] = { image: v, mtime: currentMtime(node, slot) };
+  else delete map[slot];
+  // Defer: let the editor's own save finish before we reclaim node.images.
+  setTimeout(() => {
+    node.imgs = undefined;
+    markImageNode(node, slot);
+    node.__xyzUpdatePreview?.();
+    node.setDirtyCanvas(true, true);
+  }, 0);
+}
+
 // ---------------------------------------------------------------- combo refresh
 
 function applySlots(node, slots) {
@@ -90,6 +175,9 @@ function applySlots(node, slots) {
     }
   }
   node.__xyzSlots = slots;
+  // Now that we know each slot's mtime, drop stale edits and restore the current
+  // slot's surviving one.
+  node.__xyzRefreshImageState?.();
   node.__xyzUpdatePreview?.();
   node.setDirtyCanvas(true, true);
 }
@@ -329,10 +417,50 @@ app.registerExtension({
         node.__xyzFitPreview?.();
       };
 
+      // --- core Mask Editor glue -------------------------------------------
+      // The backend gives us a widget named `image` for the editor's clipspace
+      // round-trip. Hide it (the repo idiom), and watch its value: when the editor
+      // writes a painted reference into it, remember it under the current slot.
+      const imageWidget = node.widgets?.find((w) => w.name === 'image');
+      if (imageWidget) {
+        imageWidget.hidden = true;
+        imageWidget.type = 'converted-widget';
+        imageWidget.computeSize = () => [0, -4];
+        let stored = imageWidget.value;
+        Object.defineProperty(imageWidget, 'value', {
+          configurable: true,
+          get() {
+            return stored;
+          },
+          set(next) {
+            const changed = next !== stored;
+            stored = next;
+            if (changed && !node.__xyzSettingImage) onImageEdited(node, next);
+          },
+        });
+      }
+
+      node.__xyzRefreshImageState = () => refreshImageState(node);
+
+      // Guard the whole workflow-load restore: LiteGraph re-applies the saved
+      // `image` value during configure, and that must NOT look like a fresh paint
+      // (which would overwrite the edit's saved mtime with null and make it
+      // un-droppable). Re-derive state from node.properties afterwards.
+      const baseConfigure = node.configure;
+      node.configure = function () {
+        node.__xyzSettingImage = true;
+        const result = baseConfigure?.apply(this, arguments);
+        node.__xyzSettingImage = false;
+        node.__xyzRefreshImageState?.();
+        return result;
+      };
+
       if (slotWidget) {
         const original = slotWidget.callback;
         slotWidget.callback = function (...args) {
           const result = original?.apply(this, args);
+          // A different slot has its own parked edit (or none) — swap it in.
+          node.__xyzRefreshImageState?.();
           node.__xyzUpdatePreview();
           return result;
         };
@@ -344,6 +472,9 @@ app.registerExtension({
         spaceAbovePreview(node) + DEFAULT_PREVIEW,
       ]);
       fit();
+      // Be an image node from the start, so the "Open in MaskEditor | Image
+      // Canvas" menu is there before the first slot poll returns.
+      node.__xyzRefreshImageState?.();
     }
 
     if (node.comfyClass === WRITE_NODE) {

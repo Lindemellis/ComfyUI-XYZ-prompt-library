@@ -140,6 +140,52 @@ def read_slot(slot: str):
     return torch.from_numpy(array).unsqueeze(0), image.size
 
 
+def read_mask(image_ref: str, width: int, height: int):
+    """The MASK output.
+
+    `image_ref` is the value the core Mask Editor writes into our hidden `image`
+    widget — a `clipspace/clipspace-painted-masked-<t>.png [input]` reference. The
+    editor stores the mask in that file's alpha channel, exactly like a Load Image
+    node, so the mask is `1 - alpha` (Load Image's own convention).
+
+    No reference (nothing painted, or the frontend dropped a stale edit) → an all-
+    zero mask the size of the slot image. A reference we cannot open (the clipspace
+    file was cleaned up) → the same, with a warning, never a crash.
+    """
+    import torch
+    from PIL import Image
+
+    blank = torch.zeros((1, height, width), dtype=torch.float32)
+
+    ref = (image_ref or "").strip()
+    if not ref:
+        return blank
+
+    try:
+        import folder_paths
+
+        path = folder_paths.get_annotated_filepath(ref)
+        with Image.open(path) as img:
+            if "A" not in img.getbands():
+                return blank
+            alpha = np.asarray(img.getchannel("A"), dtype=np.float32) / 255.0
+    except Exception as exc:  # noqa: BLE001 - a missing/bad clipspace file is not fatal
+        print(f"[XYZ Cache] could not read the painted mask '{ref}': {exc}")
+        return blank
+
+    mask = 1.0 - alpha
+    tensor = torch.from_numpy(mask).unsqueeze(0)
+
+    # Option A: the IMAGE output is always the live slot, so the mask must line up
+    # with it. The editor works at the image's resolution, so they normally already
+    # match; resize only if some earlier edit was against a differently sized image.
+    if tensor.shape[1] != height or tensor.shape[2] != width:
+        tensor = torch.nn.functional.interpolate(
+            tensor.unsqueeze(0), size=(height, width), mode="nearest"
+        ).squeeze(0)
+    return tensor
+
+
 # ------------------------------------------------------------------ the nodes
 
 
@@ -189,10 +235,15 @@ class XYZCacheSlotWrite:
 class XYZCacheSlotRead:
     NAME = "XYZ Cache Slot Read"
     CATEGORY = "XYZNodes/Cache"
-    DESCRIPTION = "Reads back the image parked in a cache slot."
+    DESCRIPTION = (
+        "Reads back the image parked in a cache slot.\n"
+        "Right-click -> 'Open in MaskEditor | Image Canvas' to paint a mask on the "
+        "slot image (ComfyUI's own editor). The image output stays the live slot; "
+        "the mask output is whatever you painted."
+    )
     FUNCTION = "execute"
-    RETURN_TYPES = ("IMAGE", "INT", "INT")
-    RETURN_NAMES = ("image", "width", "height")
+    RETURN_TYPES = ("IMAGE", "MASK", "INT", "INT")
+    RETURN_NAMES = ("image", "mask", "width", "height")
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -201,15 +252,23 @@ class XYZCacheSlotRead:
             "required": {
                 "slot": (slots or [NO_SLOTS],),
             },
+            # The Mask Editor round-trip writes the painted 'clipspace-…' reference
+            # here; the frontend hides this widget and drives it per slot. It is a
+            # plain string so an old workflow without it still loads.
+            "optional": {
+                "image": ("STRING", {"default": "", "multiline": False}),
+            },
         }
 
     @classmethod
-    def IS_CHANGED(cls, slot=NO_SLOTS, **_):
-        # The file changes behind ComfyUI's back, so key the cache on its mtime.
+    def IS_CHANGED(cls, slot=NO_SLOTS, image="", **_):
+        # The slot file changes behind ComfyUI's back, so key on its mtime; the
+        # painted mask changes the 'image' reference, so key on that too.
         try:
-            return str((slot_path(slot) / IMAGE_NAME).stat().st_mtime_ns)
+            mtime = str((slot_path(slot) / IMAGE_NAME).stat().st_mtime_ns)
         except (OSError, ValueError):
-            return "missing"
+            mtime = "missing"
+        return f"{mtime}:{image}"
 
     @classmethod
     def VALIDATE_INPUTS(cls, slot=None, **_):
@@ -217,11 +276,12 @@ class XYZCacheSlotRead:
         # at startup; don't let ComfyUI reject it.
         return True
 
-    def execute(self, slot=NO_SLOTS, **_):
+    def execute(self, slot=NO_SLOTS, image="", **_):
         if slot == NO_SLOTS:
             raise RuntimeError(
                 "No cache slot chosen. Write one with 'XYZ Cache Slot Write' first."
             )
         tensor, (width, height) = read_slot(slot)
+        mask = read_mask(image, width, height)
         print(f"[XYZ Cache] read slot '{slot}' -> {width}x{height}")
-        return (tensor, width, height)
+        return (tensor, mask, width, height)

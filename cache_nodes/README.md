@@ -5,7 +5,7 @@ Park an image in a named slot; pick it up on a later run.
 | Node | Category | Purpose |
 |---|---|---|
 | **XYZ Cache Slot Write** | `XYZNodes/Cache` | An `IMAGE` → a slot |
-| **XYZ Cache Slot Read** | `XYZNodes/Cache` | A slot → `IMAGE` + its `width`/`height` |
+| **XYZ Cache Slot Read** | `XYZNodes/Cache` | A slot → `image` + `mask` + `width`/`height` |
 
 **Nothing to do with Krita.** This is the plain-ComfyUI way of handing an intermediate result to a
 later run — a base image, an upscale — instead of re-running the whole chain every time you want to
@@ -54,3 +54,19 @@ Read only offers slots that hold an image; Write also offers the empty ones you 
 
 Reading re-checks the file on every run, so editing a slot's image outside ComfyUI takes effect
 immediately rather than being served from the execution cache.
+
+## Painting a mask on the slot (Open in MaskEditor | Image Canvas)
+
+Right-click the **Read** node → **Open in MaskEditor | Image Canvas** to paint on the slot image
+with ComfyUI's own editor — the same one a Load Image node gives you. What you paint comes out of the
+node's **`mask`** output; the **`image`** output stays the live slot (painting on the Image Canvas is
+kept as editor state so you can keep refining, but it does not change the image output).
+
+The edit is **remembered per slot**. Switch to another slot and the first slot's mask is parked;
+switch back and it is still there. The mask is bound to the picture it was painted on: if that slot's
+image is later **overwritten with a different one** (its mtime moves), the mask is dropped — it
+belonged to the old picture. This lives in the workflow, so it survives save/reload.
+
+Under the hood this is ComfyUI's stock editor, unchanged: it stores the layers as `clipspace-*.png`
+files in `input/clipspace/` and the node reads the mask from the painted file's alpha channel, exactly
+like Load Image. Nothing here re-implements the editor.

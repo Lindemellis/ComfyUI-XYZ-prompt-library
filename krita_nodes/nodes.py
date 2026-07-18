@@ -743,7 +743,10 @@ class XYZKritaSendToKrita(_KritaBase):
         "the whole document (scale_document) or is scaled down.\n"
         "new_document: opens a brand-new Krita document at the image's size. This is "
         "the front of the workflow, when Krita has nothing open yet.\n"
-        "With launch_krita on, Krita is started if it is not already running."
+        "launch_krita on: Krita is started if it is not already running (a freshly "
+        "started Krita has nothing open, so the image lands in a new document).\n"
+        "launch_krita off: if Krita is not running the node quietly does nothing, "
+        "so an unopened Krita never breaks the run."
     )
     RETURN_TYPES = ()
     OUTPUT_NODE = True
@@ -775,8 +778,9 @@ class XYZKritaSendToKrita(_KritaBase):
                     "BOOLEAN",
                     {
                         "default": True,
-                        "tooltip": "Start Krita if it is not running, and wait for it. "
-                        "Krita takes ~20s to come up.",
+                        "tooltip": "On: start Krita if it is not running, and wait "
+                        "for it (~20s to come up). Off: if Krita is not running, "
+                        "skip this node quietly instead of failing the run.",
                     },
                 ),
                 "max_wait": (
@@ -799,7 +803,16 @@ class XYZKritaSendToKrita(_KritaBase):
         if image is None:
             raise RuntimeError("nothing connected to `image`")
 
-        if launch_krita and not launcher.is_running():
+        if not launcher.is_running():
+            if not launch_krita:
+                # launch_krita is off and Krita is not open. This node is then
+                # best-effort: do nothing rather than fail the whole run. Turn
+                # launch_krita on (or open Krita yourself) to have the image sent.
+                print(
+                    "[XYZ Krita] Krita is not running and launch_krita is off — "
+                    "skipping this node (nothing sent)."
+                )
+                return {}
             print("[XYZ Krita] Krita is not running — starting it")
             launcher.launch(timeout=max(60.0, max_wait))
 

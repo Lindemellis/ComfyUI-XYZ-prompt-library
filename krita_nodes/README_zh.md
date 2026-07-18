@@ -129,7 +129,9 @@ curl -X POST localhost:8188/xyz/krita/executable -d '{"path": "C:/Program Files/
 | `new_document` | 按图片尺寸新建一个 Krita 文档。这是工作流的**开头** —— Krita 还什么都没开的时候。 |
 
 `launch_krita`(默认开)会在 Krita 没跑时先把它启动起来。所以「ComfyUI 冷启动 + Krita 没开 +
-跑一次」就能直接得到一张打开的画布。
+跑一次」就能直接得到一张打开的画布(刚启动的 Krita 什么都没开,所以不管 `mode` 是什么,图都会落到
+一个新建文档里)。把 `launch_krita` **关掉**后,节点变成尽力而为:Krita 没开时就安静地什么都不做、
+而不是让整条 run 报错 —— 只有 Krita 已经开着时才会把图送过去。
 
 ## fallback 输入
 
