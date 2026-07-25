@@ -31,7 +31,8 @@ def _region(r: Region | None) -> dict | None:
         "mask": list(r.mask) if r.mask else None,
         "imask": r.imask,
         "feather": r.feather,
-        "region_weight": r.region_weight,
+        "mask_weight": r.mask_weight,
+        "cond_weight": r.cond_weight,
         "include_in_base": r.include_in_base,
     }
 

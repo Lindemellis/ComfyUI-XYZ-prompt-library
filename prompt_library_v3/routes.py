@@ -92,7 +92,8 @@ async def _post_compile(request):
                     "imask": s.imask,
                     "mask": list(s.mask) if s.mask else None,
                     "feather": s.feather,
-                    "region_weight": s.region_weight,
+                    "mask_weight": s.mask_weight,
+                    "cond_weight": s.cond_weight,
                 }
                 for s in result.segments
             ],

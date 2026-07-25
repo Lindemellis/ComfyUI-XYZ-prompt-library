@@ -48,9 +48,48 @@ def test_no_regions_means_a_single_line():
 
 
 def test_rectangle_mask_expression():
-    src = "q, {illya}.set{region: {mask: [0, 0.2, 0.1, 0.3], region_weight: 0.8}}"
+    src = "q, {illya}.set{region: {mask: [0, 0.2, 0.1, 0.3], mask_weight: 0.8}}"
     got = compile_text(src, region_mode="mask").text
-    assert got == "q\nAND MASK(0 0.2, 0.1 0.3, 0.8) q, illya"
+    assert got == "MASK(0 0.2, 0.1 0.3, 0.8) q, illya"
+
+
+def test_region_weight_is_a_legacy_alias_for_mask_weight():
+    a = compile_text("{x}.set{region: {imask: 0, region_weight: 0.8}}", region_mode="couple").text
+    b = compile_text("{x}.set{region: {imask: 0, mask_weight: 0.8}}", region_mode="couple").text
+    assert a == b == "COUPLE IMASK(0, 0.8) x"
+
+
+def test_cond_weight_is_a_trailing_colon_w_on_every_kind():
+    # cond strength: a trailing ` :w`, unescaped, on base / fill / mask / imask alike
+    src = (
+        "[@region]: { "
+        "[mask_weight: 2, cond_weight: 0.7]: { 2girls, } "
+        "[kind: fill, cond_weight: 0.5]: { bg, } "
+        "[imask: 0, cond_weight: 1.3]: { a, } }"
+    )
+    got = compile_text(src, region_mode="couple").text
+    assert got == (
+        "FILL() bg :0.5\n"
+        "COUPLE MASK(0 1, 0 1, 2) 2girls :0.7\n"
+        "COUPLE IMASK(0, 1) a :1.3"
+    )
+
+
+def test_base_mask_weight_becomes_a_full_image_mask_only_with_regions():
+    # base competes spatially only when a region exists; a lone base needs no mask
+    with_region = "{2g}.set{region: {kind: base, mask_weight: 0.5}} {a}.set{region: {imask: 0}}"
+    assert compile_text(with_region, region_mode="couple").text == (
+        "MASK(0 1, 0 1, 0.5) 2g\nCOUPLE IMASK(0, 1) a"
+    )
+    lone = "{2g}.set{region: {kind: base, mask_weight: 0.5}}"
+    assert compile_text(lone, region_mode="couple").text == "2g"
+
+
+def test_fill_carries_cond_weight_but_never_a_mask_weight():
+    # mask_weight on a fill is dropped (decision); cond_weight still applies
+    src = "{bg}.set{region: {kind: fill, mask_weight: 3, cond_weight: 0.6}} {a}.set{region: {imask: 0}}"
+    got = compile_text(src, region_mode="couple").text
+    assert got == "FILL() bg :0.6\nCOUPLE IMASK(0, 1) a"
 
 
 def test_feather_is_emitted_after_the_mask():
@@ -106,7 +145,7 @@ def test_mask_mode_synthesises_fill_and_warns_W12():
 def test_scheduled_region_survives_into_the_backend():
     src = "q, {illya}.set{region: {imask: 0}, schedule: {0.2, 0.5}}"
     got = compile_text(src, region_mode="couple").text
-    assert got == "q\nCOUPLE IMASK(0, 1) [q, illya, :0.2,0.5]"
+    assert got == "COUPLE IMASK(0, 1) [q, illya, :0.2,0.5]"
 
 
 def test_unknown_region_mode_falls_back_to_couple():

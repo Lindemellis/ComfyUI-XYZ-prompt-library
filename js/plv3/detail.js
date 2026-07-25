@@ -494,9 +494,17 @@ export class DetailPane {
       parts.push(`mask: [${m.map(fmt).join(', ')}]`);
     }
     if (kind === 'imask') parts.push(`imask: ${Math.trunc(r.imask ?? 0)}`);
-    if (kind !== 'base' && r.feather) parts.push(`feather: ${Math.trunc(r.feather)}`);
-    if (kind !== 'base' && r.region_weight != null && r.region_weight !== 1) {
-      parts.push(`region_weight: ${fmt(r.region_weight)}`);
+    // feather is an edge — only meaningful for a bounded region, not full-image base/fill.
+    if ((kind === 'mask' || kind === 'imask') && r.feather) {
+      parts.push(`feather: ${Math.trunc(r.feather)}`);
+    }
+    // mask weight = spatial share; base/mask/imask have it, fill does not.
+    if (kind !== 'fill' && r.mask_weight != null && r.mask_weight !== 1) {
+      parts.push(`mask_weight: ${fmt(r.mask_weight)}`);
+    }
+    // cond weight = semantic strength; every kind can carry it.
+    if (r.cond_weight != null && r.cond_weight !== 1) {
+      parts.push(`cond_weight: ${fmt(r.cond_weight)}`);
     }
     if ((kind === 'mask' || kind === 'imask') && r.include_in_base) {
       parts.push('include_in_base: true');
@@ -1331,7 +1339,7 @@ export class DetailPane {
         () => this.removeSetting(group, 'region')));
     }
     panel.append(head);
-    if (!r || kind === 'base') return panel;   // base has nothing else to say
+    if (!r) return panel;
 
     // --- extent -------------------------------------------------------------
     if (kind === 'mask') {
@@ -1382,15 +1390,27 @@ export class DetailPane {
       row.append(chip('imask', n));
     }
 
-    const f = numberInput(r.feather ?? 0, { min: 0 });
-    f.style.width = '58px';
-    f.onchange = () => this.setRegionField(group, 'feather', String(Math.trunc(Number(f.value) || 0)));
-    row.append(chip('feather', f));
+    // feather is an edge; base/fill are full-image, so only mask/imask show it.
+    if (kind === 'mask' || kind === 'imask') {
+      const f = numberInput(r.feather ?? 0, { min: 0 });
+      f.style.width = '58px';
+      f.onchange = () => this.setRegionField(group, 'feather', String(Math.trunc(Number(f.value) || 0)));
+      row.append(chip('feather', f));
+    }
 
-    const w = div('width:110px;flex-shrink:0;');
-    w.append(slider(r.region_weight ?? 1, weightRange(),
-      { onCommit: (v) => this.setRegionField(group, 'region_weight', fmt(v)) }));
-    row.append(chip('weight', w));
+    // cond weight = semantic strength; every kind carries it (compiles to a trailing :w).
+    const cw = div('width:110px;flex-shrink:0;');
+    cw.append(slider(r.cond_weight ?? 1, weightRange(),
+      { onCommit: (v) => this.setRegionField(group, 'cond_weight', fmt(v)) }));
+    row.append(chip('cond weight', cw));
+
+    // mask weight = spatial share; base/mask/imask have it, fill does not.
+    if (kind !== 'fill') {
+      const mw = div('width:110px;flex-shrink:0;');
+      mw.append(slider(r.mask_weight ?? 1, weightRange(),
+        { onCommit: (v) => this.setRegionField(group, 'mask_weight', fmt(v)) }));
+      row.append(chip('mask weight', mw));
+    }
 
     if (kind === 'mask' || kind === 'imask') {
       row.append(chip('in base', toggle(r.include_in_base, (v) =>

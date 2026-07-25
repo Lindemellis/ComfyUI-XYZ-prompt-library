@@ -41,7 +41,7 @@ def test_segments_carry_the_region_the_user_wrote():
     # the preview names its tabs from these; without them it can only fall back on
     # the segment index, and `imask: 0` would show up as "imask 1"
     _, body = post({"text": "q, {a}.set{region: {imask: 3, feather: 8}}"})
-    seg = body["segments"][1]
+    seg = body["segments"][0]
     assert seg["kind"] == "imask" and seg["imask"] == 3 and seg["feather"] == 8
 
 
@@ -49,8 +49,8 @@ def test_region_mode_selects_the_backend():
     src = "q, {x}.set{region: {imask: 0}}"
     _, couple = post({"text": src, "region_mode": "couple"})
     _, masked = post({"text": src, "region_mode": "mask"})
-    assert "COUPLE " in couple["text"]
-    assert "\nAND " in masked["text"]
+    assert couple["text"] == "COUPLE IMASK(0, 1) q, x"
+    assert masked["text"] == "IMASK(0, 1) q, x"
 
 
 def test_unknown_region_mode_falls_back_instead_of_failing():

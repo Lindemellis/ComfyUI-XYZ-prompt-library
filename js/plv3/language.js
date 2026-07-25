@@ -23,7 +23,8 @@ const REGION_FIELDS = [
   ['mask', '[x1, x2, y1, y2]', 'Rectangle, 0-1 or pixels'],
   ['imask', 'int', 'Index of an externally attached mask (= attach order!)'],
   ['feather', 'int', 'Edge feather, in pixels'],
-  ['region_weight', 'number', 'Region weight'],
+  ['mask_weight', 'number', 'Mask weight — spatial share (base/mask/imask)'],
+  ['cond_weight', 'number', 'Cond weight — semantic strength (all kinds)'],
   ['include_in_base', 'boolean', 'Also copy this content into the base segment'],
 ];
 

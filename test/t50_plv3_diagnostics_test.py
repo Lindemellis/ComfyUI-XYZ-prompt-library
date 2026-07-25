@@ -79,7 +79,8 @@ def test_W04_child_of_region_block_declaring_its_own_region():
     src = "[@region]: { [imask: 0]: { a, }.set{region: {imask: 9}} }"
     r = compile_text(src)
     assert W04 in [d.code for d in r.diagnostics]
-    assert [s.key for s in r.segments] == [("base",), ("imask", 0)]
+    # no `region: base` group and no include_in_base -> no base segment
+    assert [s.key for s in r.segments] == [("imask", 0)]
 
 
 def test_W05_empty_schedule_intersection_drops_the_item():
@@ -130,7 +131,8 @@ def test_W13_region_in_a_negative_node_is_ignored():
 
 def test_positive_node_keeps_the_region():
     r = compile_text("q, {blurry}.set{region: {imask: 0}}", polarity="positive")
-    assert len(r.segments) == 2
+    # ambient + one region, no base group -> just the region segment
+    assert [s.key for s in r.segments] == [("imask", 0)]
 
 
 # --- warnings: recoverable syntax -------------------------------------------

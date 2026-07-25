@@ -37,7 +37,8 @@ class Segment:
     mask: tuple[float, float, float, float] | None = None
     imask: int | None = None
     feather: int = 0
-    region_weight: float = 1.0
+    mask_weight: float = 1.0
+    cond_weight: float = 1.0
     schedule: tuple[float, float] = FULL
 
 
@@ -236,7 +237,9 @@ def _collect_regions(
 
 
 def build_segments(root: Group, seed: int, diags: Diagnostics) -> list[Segment]:
-    """AST -> segment list.  BASE always exists, even with no region groups."""
+    """AST -> segment list.  A BASE segment exists only when the user wrote a
+    `region: base` group, or when there are no region groups at all (a plain
+    prompt).  Ambient text alone no longer forces a base into existence."""
     found: list[tuple[Group, tuple[float, float]]] = []
     _collect_regions(root, FULL, found, diags)
 
@@ -251,7 +254,8 @@ def build_segments(root: Group, seed: int, diags: Diagnostics) -> list[Segment]:
             # Same mask -> same segment (spec §4.3).  The first group's values win.
             if (
                 existing.feather != region.feather
-                or existing.region_weight != region.region_weight
+                or existing.mask_weight != region.mask_weight
+                or existing.cond_weight != region.cond_weight
                 or existing.schedule != _seg_schedule(region.kind, interval)
             ):
                 diags.warn(W11, pos=group.pos)
@@ -262,19 +266,31 @@ def build_segments(root: Group, seed: int, diags: Diagnostics) -> list[Segment]:
             mask=region.mask,
             imask=region.imask,
             feather=region.feather,
-            region_weight=region.region_weight,
+            mask_weight=region.mask_weight,
+            cond_weight=region.cond_weight,
             schedule=_seg_schedule(region.kind, interval),
         )
         by_key[key] = seg
         segments.append(seg)
 
     base = by_key.get(("base",))
-    if base is None:
-        base = Segment(kind="base", key=("base",))
-        segments.insert(0, base)
-    else:
+    # `include_in_base: true` on any region is the user explicitly asking for base
+    # content, so it conjures a base even without a `region: base` group.
+    wants_base = any(g.settings.region.include_in_base for g, _ in found)
+    has_regions = any(s.kind in ("mask", "imask", "fill") for s in segments)
+    if base is not None:
+        # The user wrote an explicit `region: base` group — keep it, at the front.
         segments.remove(base)
         segments.insert(0, base)
+    elif wants_base or not has_regions:
+        # A base is wanted: include_in_base asked for one, or there are no regions
+        # at all (a plain prompt whose whole text is simply the base).
+        base = Segment(kind="base", key=("base",))
+        segments.insert(0, base)
+    # Otherwise: regions present but neither a `region: base` group nor any
+    # include_in_base -> NO base segment.  The ambient text still injects into
+    # every region segment (unchanged); it just no longer conjures a full-image
+    # base the user never asked for.
 
     for seg in segments:
         # The segment wrapper below already applies seg.schedule, so the render

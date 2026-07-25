@@ -463,8 +463,10 @@ def _settings_of(group: Group) -> dict:
             region["imask"] = r.imask
         if r.feather:
             region["feather"] = r.feather
-        if r.region_weight != 1.0:
-            region["region_weight"] = r.region_weight
+        if r.mask_weight != 1.0:
+            region["mask_weight"] = r.mask_weight
+        if r.cond_weight != 1.0:
+            region["cond_weight"] = r.cond_weight
         if r.include_in_base:
             region["include_in_base"] = True
         out["region"] = region

@@ -44,9 +44,14 @@ def test_include_in_base_adds_the_content_to_base_at_its_text_position():
     assert got[("imask", 2)] == "A, E, D"
 
 
-def test_base_segment_always_exists_even_with_no_base_group():
-    got = segs("quality, {x}.set{region: {imask: 0}}")
-    assert got[("base",)] == "quality"
+def test_ambient_alone_no_longer_conjures_a_base_segment():
+    # a region with no `region: base` group and no include_in_base produces NO
+    # base segment — ambient text injects into the region instead of forcing a
+    # full-image base the user never asked for
+    r = compile_text("quality, {x}.set{region: {imask: 0}}")
+    got = {s.key: s.text for s in r.segments}
+    assert ("base",) not in got
+    assert got[("imask", 0)] == "quality, x"
 
 
 def test_several_base_groups_merge_in_text_order():
@@ -73,9 +78,9 @@ def test_merged_regions_that_disagree_warn_W11_and_the_first_one_wins():
     assert any(d.code == W11 for d in r.diagnostics)
 
 
-def test_ambient_text_inside_a_plain_group_keeps_its_weight_in_every_segment():
+def test_ambient_text_inside_a_plain_group_keeps_its_weight_when_injected():
     got = segs("{quality, best}.set{weight: 1.2} {x}.set{region: {imask: 0}}")
-    assert got[("base",)] == "(quality, best:1.2)"
+    assert ("base",) not in got
     assert got[("imask", 0)] == "(quality, best:1.2), x"
 
 
@@ -118,8 +123,8 @@ def test_a_scheduled_region_wraps_the_whole_segment():
     r = compile_text("quality, {illya}.set{region: {imask: 0}, schedule: {0.2, 0.5}}")
     seg = next(s for s in r.segments if s.key == ("imask", 0))
     assert seg.text == "[quality, illya, :0.2,0.5]"
-    base = next(s for s in r.segments if s.kind == "base")
-    assert base.text == "quality"
+    # no `region: base` group and no include_in_base -> no base segment
+    assert not any(s.kind == "base" for s in r.segments)
 
 
 def test_a_scheduled_region_block_pushes_the_window_onto_each_region():

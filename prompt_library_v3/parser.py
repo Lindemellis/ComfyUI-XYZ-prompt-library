@@ -78,7 +78,8 @@ class Region:
     mask: tuple[float, float, float, float] | None = None
     imask: int | None = None
     feather: int = 0
-    region_weight: float = 1.0
+    mask_weight: float = 1.0
+    cond_weight: float = 1.0
     include_in_base: bool = False
 
     def key(self) -> tuple:
@@ -164,7 +165,9 @@ _KNOWN_REGION_FIELDS = {
     "mask",
     "imask",
     "feather",
-    "region_weight",
+    "mask_weight",
+    "cond_weight",
+    "region_weight",  # legacy alias for mask_weight — still parsed, never emitted
     "include_in_base",
 }
 
@@ -966,9 +969,13 @@ class Parser:
             elif key == "feather":
                 f = _as_int(value, self.diags, pos, 0)
                 r.feather = max(0, f if f is not None else 0)
-            elif key == "region_weight":
+            elif key in ("mask_weight", "region_weight"):
+                # `region_weight` is the legacy name; both write mask_weight.
                 w = _as_float(value, self.diags, pos, 1.0)
-                r.region_weight = w if w is not None else 1.0
+                r.mask_weight = w if w is not None else 1.0
+            elif key == "cond_weight":
+                w = _as_float(value, self.diags, pos, 1.0)
+                r.cond_weight = w if w is not None else 1.0
             elif key == "include_in_base":
                 r.include_in_base = _as_bool(value, self.diags, pos, False)
         # `region: { imask: 0 }` — infer the kind from what was written (spec §3.3).
