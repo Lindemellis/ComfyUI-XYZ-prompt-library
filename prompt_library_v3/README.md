@@ -129,6 +129,12 @@ Two rules that are easy to get wrong, and both are deliberate:
 - **`imask: i` is the CLIP *attach order*, not the Mask Editor's output slot number.** Nothing
   can validate it for you; only your wiring knows.
 
+`include_in_base: true` additionally copies a group's own content into the base segment, at its
+position in the text — without leaking it into the *other* region segments. It works on any
+region kind, `fill` included (a background written in the fill is often wanted in the full-image
+base too); on a `base` group it would say nothing, so the detail page hides the switch there.
+A region asking for it also *creates* the base segment when no `base` group was written.
+
 `region_mode` on the node picks the backend: `couple` (attention couple) or `mask` (latent
 mask, `AND` + `MASK`). `kind` is *inferred* — a `mask:` field means it is a mask region, an
 `imask:` field means it is an imask region. `base` and `fill` are bare words.

@@ -44,6 +44,20 @@ def test_include_in_base_adds_the_content_to_base_at_its_text_position():
     assert got[("imask", 2)] == "A, E, D"
 
 
+def test_include_in_base_works_on_a_fill_region_too():
+    # §4.2's walk never looks at the kind: a fill's background text can be asked into
+    # the base as well, and — like any other region — it conjures the base segment
+    # when no `region: base` group was written.
+    src = (
+        "A, {C}.set{region: {imask: 1}} "
+        "{E}.set{region: {kind: fill, include_in_base: true}} D"
+    )
+    got = segs(src)
+    assert got[("base",)] == "A, E, D"
+    assert got[("fill",)] == "A, E, D"
+    assert got[("imask", 1)] == "A, C, D"
+
+
 def test_ambient_alone_no_longer_conjures_a_base_segment():
     # a region with no `region: base` group and no include_in_base produces NO
     # base segment — ambient text injects into the region instead of forcing a

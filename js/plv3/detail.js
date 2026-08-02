@@ -506,7 +506,9 @@ export class DetailPane {
     if (r.cond_weight != null && r.cond_weight !== 1) {
       parts.push(`cond_weight: ${fmt(r.cond_weight)}`);
     }
-    if ((kind === 'mask' || kind === 'imask') && r.include_in_base) {
+    // in-base is kind-agnostic (§4.2 walks it without looking at the kind) — a `fill`
+    // keeps it too. Only `base` drops it, where it is a tautology.
+    if (kind !== 'base' && r.include_in_base) {
       parts.push('include_in_base: true');
     }
 
@@ -1412,7 +1414,11 @@ export class DetailPane {
       row.append(chip('mask weight', mw));
     }
 
-    if (kind === 'mask' || kind === 'imask') {
+    // in base = "also copy my content into the base segment". Every region kind can ask
+    // for it (spec §4.2 is kind-agnostic, and a fill's background text is exactly the
+    // sort of thing you want in the full-image base too). On a `base` group it would be
+    // a tautology, so that one kind alone hides it.
+    if (kind !== 'base') {
       row.append(chip('in base', toggle(r.include_in_base, (v) =>
         this.setRegionField(group, 'include_in_base', String(v)))));
     }
