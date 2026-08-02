@@ -25,6 +25,7 @@ from . import assembly as _assembly
 from . import client as _client
 from . import chat as _chat
 from . import tools as _tools
+from . import templates as _templates
 
 logger = logging.getLogger("xyz.llm.routes")
 
@@ -211,6 +212,46 @@ async def _set_active_variant(request: web.Request) -> web.Response:
 
 
 # ---------------------------------------------------------------------------
+# Templates (named variant sets — see llm/templates.py)
+# ---------------------------------------------------------------------------
+
+async def _get_templates(request: web.Request) -> web.Response:
+    data = _templates.list_templates()
+    data["tools"] = _templates.tool_gate()
+    return _ok(data)
+
+
+async def _apply_template(request: web.Request) -> web.Response:
+    b = await _json(request)
+    try:
+        return _ok(_templates.apply_template(b.get("id")))
+    except ValueError as e:
+        return _err(400, "bad_template", str(e))
+    except Exception as e:
+        return _err(500, "apply_failed", str(e))
+
+
+async def _save_template(request: web.Request) -> web.Response:
+    b = await _json(request)
+    try:
+        return _ok(_templates.save_as_template(b.get("name")))
+    except ValueError as e:
+        return _err(400, "bad_template", str(e))
+    except Exception as e:
+        return _err(500, "save_failed", str(e))
+
+
+async def _delete_template(request: web.Request) -> web.Response:
+    name = request.match_info.get("name", "")
+    try:
+        return _ok(_templates.delete_template(name))
+    except ValueError as e:
+        return _err(400, "bad_template", str(e))
+    except Exception as e:
+        return _err(500, "delete_failed", str(e))
+
+
+# ---------------------------------------------------------------------------
 # Conversations + messages
 # ---------------------------------------------------------------------------
 
@@ -328,9 +369,13 @@ async def _post_chat(request: web.Request) -> web.Response:
         return _err(400, "no_api_key",
                     f"Set an API key for {pcfg.get('provider', 'the active provider')} in Settings → LLM first.")
 
+    # A tool is only attached when the block documenting it is enabled — otherwise the
+    # model would be handed a tool its system prompt never mentions. This is what the
+    # krea2 template rides on: it disables `tooldoc`, so there is no danbooru lookup.
+    gate = _templates.tool_gate()
     sources = _tools.resolve_sources(shared)
-    enable_tools = bool(shared.get("lookup_enabled", True)) and len(sources) > 0
-    enable_web_search = bool(shared.get("web_search_enabled", False))
+    enable_tools = bool(shared.get("lookup_enabled", True)) and len(sources) > 0 and gate["lookup"]
+    enable_web_search = bool(shared.get("web_search_enabled", False)) and gate["web_search"]
 
     messages = _assembly.build_messages(conversation_id, base_prompt, user_request)
 
@@ -540,6 +585,11 @@ def register(server) -> None:
     r.post(r"/xyz/llm/blocks/{id:\d+}/active-variant")(_set_active_variant)
     r.patch(r"/xyz/llm/blocks/{id:\d+}/variants/{vid:\d+}")(_patch_variant)
     r.delete(r"/xyz/llm/blocks/{id:\d+}/variants/{vid:\d+}")(_delete_variant)
+
+    r.get("/xyz/llm/templates")(_get_templates)
+    r.post("/xyz/llm/templates/apply")(_apply_template)
+    r.post("/xyz/llm/templates/save")(_save_template)
+    r.delete(r"/xyz/llm/templates/{name}")(_delete_template)
 
     r.get("/xyz/llm/conversations")(_get_conversations)
     r.post("/xyz/llm/conversations")(_post_conversation)

@@ -57,8 +57,14 @@ _SHARED_DEFAULTS: Dict[str, Any] = {
     "web_search_enabled": False,
     "seeded": False,
     "anima_seeded": False,
+    "krea2_seeded": False,
     "preset_reflowed": False,
     "anima_preset_version": 0,
+    "krea2_preset_version": 0,
+    # The named variant set the blocks are currently switched to (see llm/templates.py).
+    "active_template": "default",
+    # User-saved templates: {name: {"disabled_block_ids": [int, ...]}}
+    "custom_templates": {},
 }
 
 
@@ -88,6 +94,14 @@ def _normalize(data: Dict[str, Any]) -> Dict[str, Any]:
     if isinstance(data.get("lookup_sources"), dict):
         src.update({k: bool(v) for k, v in data["lookup_sources"].items() if k in src})
     out["lookup_sources"] = src
+    # Both of these default to a MUTABLE literal in _SHARED_DEFAULTS, which the shallow
+    # dict() copy above would share across every caller — rebuild them per read.
+    ct = data.get("custom_templates")
+    out["custom_templates"] = {
+        str(k): (dict(v) if isinstance(v, dict) else {}) for k, v in ct.items()
+    } if isinstance(ct, dict) else {}
+    if not isinstance(out.get("active_template"), str) or not out["active_template"]:
+        out["active_template"] = "default"
 
     providers = _empty_providers()
     if isinstance(data.get("providers"), dict):
@@ -198,6 +212,7 @@ def public() -> Dict[str, Any]:
         "lookup_enabled": s["lookup_enabled"],
         "lookup_sources": s["lookup_sources"],
         "web_search_enabled": s["web_search_enabled"],
+        "active_template": s["active_template"],
         "db_status": db_status(),
     }
 
@@ -257,6 +272,83 @@ def update(patch: Dict[str, Any]) -> Dict[str, Any]:
     return public()
 
 
+def _set(key: str, value: Any) -> None:
+    """Write one known shared key. Unknown keys are dropped by _normalize, so this is
+    only ever called with a key declared in _SHARED_DEFAULTS."""
+    with _LOCK:
+        data = _read_raw()
+        data[key] = value
+        _write_raw(data)
+
+
+# --- per-template seed flags / preset versions ------------------------------
+# A template id maps to two settings keys ("<id>_seeded", "<id>_preset_version"), both
+# declared in _SHARED_DEFAULTS. A template without them is simply never marked as
+# seeded-once — harmless, since the seeding itself is idempotent.
+
+def _seed_key(template_id: str) -> str:
+    return f"{template_id}_seeded"
+
+
+def _version_key(template_id: str) -> str:
+    return f"{template_id}_preset_version"
+
+
+def is_template_seeded(template_id: str) -> bool:
+    return bool(load().get(_seed_key(template_id)))
+
+
+def mark_template_seeded(template_id: str) -> None:
+    key = _seed_key(template_id)
+    if key in _SHARED_DEFAULTS:
+        _set(key, True)
+
+
+def get_preset_version(template_id: str) -> int:
+    try:
+        return int(load().get(_version_key(template_id), 0))
+    except Exception:
+        return 0
+
+
+def set_preset_version(template_id: str, version: int) -> None:
+    key = _version_key(template_id)
+    if key in _SHARED_DEFAULTS:
+        _set(key, int(version))
+
+
+# --- active template + user-saved templates ---------------------------------
+
+def get_active_template() -> str:
+    return str(load().get("active_template") or "default")
+
+
+def set_active_template(name: str) -> None:
+    _set("active_template", str(name or "default"))
+
+
+def get_custom_templates() -> Dict[str, Any]:
+    return load().get("custom_templates") or {}
+
+
+def put_custom_template(name: str, entry: Dict[str, Any]) -> None:
+    with _LOCK:
+        data = _read_raw()
+        ct = dict(data.get("custom_templates") or {})
+        ct[str(name)] = dict(entry or {})
+        data["custom_templates"] = ct
+        _write_raw(data)
+
+
+def drop_custom_template(name: str) -> None:
+    with _LOCK:
+        data = _read_raw()
+        ct = dict(data.get("custom_templates") or {})
+        ct.pop(str(name), None)
+        data["custom_templates"] = ct
+        _write_raw(data)
+
+
 def mark_seeded() -> None:
     with _LOCK:
         data = _read_raw()
@@ -269,14 +361,11 @@ def is_seeded() -> bool:
 
 
 def mark_anima_seeded() -> None:
-    with _LOCK:
-        data = _read_raw()
-        data["anima_seeded"] = True
-        _write_raw(data)
+    mark_template_seeded("anima")
 
 
 def is_anima_seeded() -> bool:
-    return bool(load().get("anima_seeded"))
+    return is_template_seeded("anima")
 
 
 def mark_preset_reflowed() -> None:
@@ -291,14 +380,8 @@ def is_preset_reflowed() -> bool:
 
 
 def get_anima_preset_version() -> int:
-    try:
-        return int(load().get("anima_preset_version", 0))
-    except Exception:
-        return 0
+    return get_preset_version("anima")
 
 
 def set_anima_preset_version(version: int) -> None:
-    with _LOCK:
-        data = _read_raw()
-        data["anima_preset_version"] = int(version)
-        _write_raw(data)
+    set_preset_version("anima", version)

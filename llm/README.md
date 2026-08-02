@@ -3,12 +3,13 @@
 **English** | [中文](README_zh.md)
 
 A floating window that calls a large language model to **generate or optimize txt2img
-prompts**, and can ground danbooru-style tags against your **local tag database** so the
-model only uses tags that actually exist.
+prompts**. It ships **prompt templates** for different image models — a booru-tag default,
+**Anima**, and **Krea 2** — and can ground danbooru-style tags against your **local tag
+database** so the model only uses tags that actually exist.
 
-It lives next to the Text Editor / Library / Preview windows and is opened from the node's
-**🤖 LLM** button, the top-bar menu (*Prompt Library V2 — LLM Prompt*), or the Text Editor's
-**🤖 LLM** button.
+It binds to a **Prompt Library V3** node and is opened from that node's **🤖 LLM** button,
+from the top-bar menu (*XYZ Tools → LLM Prompt Assistant*), or from the PLv2 Text Editor's
+**🤖 LLM** button (which opens it without binding anything).
 
 ## Providers
 
@@ -77,35 +78,70 @@ Default blocks (seeded on first run, fully editable):
 `Base prompt`, `User request` and `History chats` are special placeholders (no text box).
 Add your own custom blocks with **＋ Add block**.
 
-### Anima preset
+### Templates — switching the whole system prompt
 
-Each text block ships a second **`anima`** variant, tuned for the [Anima](https://huggingface.co/circlestone-labs/Anima)
-model (Qwen3-0.6B text encoder; danbooru/gelbooru tags + natural language + combinations;
-gelbooru-preferred spellings; `@artist` prefix; higher prompt weights ~1.4+). Switch any
-block's **variant** dropdown to `anima` to use it. The anima preset:
+Different image models want completely different prompts, so the **Template** dropdown at the
+top of the Blocks tab (and of the Chat tab) switches every block at once:
 
-- never writes a negative prompt unless you ask;
-- only looks up tags **it introduces** and is unsure of — it never re-verifies tags **you**
-  already wrote (your quality/artist/character tags are taken as-is);
-- adapts its answer to your intent: a full prompt, an optimization, **just one element's
-  tags**, or plain conversation — it won't force a full prompt when you only asked a question.
+| Template | For | What it does |
+|---|---|---|
+| **Danbooru (default)** | SDXL / Illustrious / Pony and friends | Comma-separated lowercase booru tags, tag lookup on. |
+| **Anima** | [Anima](https://huggingface.co/circlestone-labs/Anima) | Tags **+** natural language mixed; gelbooru-preferred spellings; `@artist` prefix; higher weights (~1.4+). Tag lookup on. |
+| **Krea 2** | [krea-ai/krea-2](https://github.com/krea-ai/krea-2) | Plain descriptive English, **no tags, no weights, no negative prompt**. Tag lookup **off**. |
 
-The preset auto-updates on new releases (only for variants you haven't hand-edited).
+A template **is** a variant name: switching to `krea2` points every block at its `krea2`
+variant and sets which blocks are on. That is the same thing the per-block **variant**
+dropdown does — the two are two views of one list, so you can still fine-tune a single block
+after switching.
+
+**A disabled block also withholds its tool.** Krea 2 turns the *Danbooru lookup tool* block
+off, so the danbooru tool isn't attached to the request at all — the model is never handed a
+tool its system prompt never mentioned. (Your global *Settings → LLM* toggles still apply on
+top; a template can only take a tool away, never grant one.)
+
+- **Save as…** snapshots every block's current text **and** its on/off state as your own
+  template — the way to add a preset for a model that isn't bundled.
+- **🗑** deletes the selected user template (the bundled three can't be deleted).
+- **— mixed —** means the blocks are on variants of several different names (you hand-picked
+  them). Pick a template to line them all up again.
+
+The active template is **derived from the blocks**, not remembered separately, so it never
+claims a template you aren't actually on.
+
+Both bundled presets:
+
+- adapt to your intent — a full prompt, an optimization, **just one element**, or plain
+  conversation; they won't force a full prompt when you only asked a question;
+- never write a negative prompt unless you ask (Krea 2 never writes one at all — the model
+  has no negative prompt; it tells you the positive fix instead);
+- keep explanations short, in prose or a dash list, never markdown tables.
+
+Krea 2 additionally weighs **two or three** style / medium / lighting options in its head
+before committing to one — otherwise every request drifts to the same "cinematic, highly
+detailed" default — and keeps that weighing internal, so you get the finished prompt rather
+than a tour of the options it rejected. Its first authoring rule, outranking the rest, is
+faithfulness: detail must be drawn out of what you said, never invented alongside it.
+
+The bundled presets auto-update on new releases — only for variants you haven't hand-edited.
 
 ## Tab 2 — Chat
 
-- **Base prompt** (top): bind a Prompt Library V2 node so its **resolved** prompt becomes the
-  optimization target (re-resolved live, read-only), or detach to *Free edit*. A
-  collapse button and a drag handle control the section's height.
+- **Template** (top): the same switcher as the Blocks tab, so changing target model is one
+  click away without leaving the conversation.
+- **Base prompt**: bind a **Prompt Library V3** node so its **compiled** output — what the
+  sampler would actually receive, with library groups expanded — becomes the optimization
+  target (re-compiled live, read-only), or detach to *Free edit*. A collapse button and a
+  drag handle control the section's height.
 - **Conversations** (left): create, rename (double-click), delete. Conversations are global
   and not tied to any node.
 - **Messages** (right): the conversation log. Type a request (any language) and click
   **Send** (Enter = newline). While generating you can **Stop**; the last reply has a
   **↻ regenerate**. When the model wraps its result in a ```prompt fenced block, **Copy** and
-  **Apply** buttons appear — **Apply** writes it straight into the bound node's prompt
-  template, first running your normalization settings over it (underscore→space, bracket
-  escaping, full-width→half-width, comma spacing). The bound base prompt re-resolves live when
-  you edit the node, the Text Editor, or any library entry it references.
+  **Apply** buttons appear — **Apply** writes it straight into the bound node's `text`, and
+  the embedded Monaco editor and the floating PLv3 window both pick it up immediately. The
+  text is written **verbatim** (no PLv2-style normalization: escaping the parentheses of a
+  Krea 2 sentence or of a `(tag:1.2)` weight would corrupt it). The base prompt re-compiles
+  live whenever you edit that node anywhere.
 - **流式 (streaming)** toggle (next to Send): when on, the reply streams in token-by-token and
   the model's reasoning appears live in a collapsible **💭 思维链** box (which also shows on
   past replies that have reasoning). Turn it off for a single non-streaming response.
@@ -121,7 +157,9 @@ database only verifies existence + post count). It does **not** waste lookups re
 tags you already provided. Toggle the **danbooru** / **gelbooru** sources independently; a
 source whose database isn't installed shows as unavailable.
 
-When lookup is **off**, the model relies only on its own knowledge (no tool calls).
+When lookup is **off** — globally, or because the active template disabled the *Danbooru
+lookup tool* block (Krea 2 does) — the model relies only on its own knowledge. That is
+correct for Krea 2: it takes any words at all, so there is nothing to verify.
 
 ## Web search (optional, off by default)
 
@@ -140,5 +178,10 @@ so it stays off unless you turn it on.
 - Some DeepSeek models emit tool calls as in-text markup instead of structured calls; this is
   parsed and executed transparently, and never leaks into the displayed answer.
 - Errors surface inline (a red bubble); a missing API key sends you to *Settings → LLM*.
-- The optimized prompt is a flat tag string. **Apply** overwrites the bound node's template
-  with it (the curated `[ref]` structure of that node is replaced — by design).
+- The optimized prompt is a flat string. **Apply** overwrites the bound node's whole document
+  with it — a PLv3 document that used library groups, regions or schedules is flattened by the
+  round trip. That is by design (plain comma-separated text is valid PLv3); copy instead of
+  applying if you want to keep the structure.
+- The *Web search tool* block works in every template; Krea 2's version tells the model to
+  search for what something **looks like** and then describe it, since there is no tag to
+  verify.

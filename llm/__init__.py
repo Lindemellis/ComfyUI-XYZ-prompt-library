@@ -15,10 +15,13 @@ def setup(server=None) -> None:
     """Seed the default preset (once) and register the /xyz/llm/ routes."""
     try:
         from . import store
+        from .defaults import TEMPLATES
         store.seed_defaults_if_needed()
-        store.seed_anima_variants_if_needed()
+        for template_id in TEMPLATES:
+            store.seed_template_variants_if_needed(template_id)
         store.reflow_existing_presets_if_needed()
-        store.sync_anima_preset_if_outdated()
+        for template_id in TEMPLATES:
+            store.sync_template_if_outdated(template_id)
     except Exception as e:
         print(f"[LLM] default seed skipped: {e}")
 

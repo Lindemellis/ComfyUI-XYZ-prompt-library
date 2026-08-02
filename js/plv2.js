@@ -100,6 +100,11 @@ const api = {
     updateVariant:      (id, vid, body) => _req('PATCH',  `/xyz/llm/blocks/${id}/variants/${vid}`, body),
     deleteVariant:      (id, vid)       => _req('DELETE', `/xyz/llm/blocks/${id}/variants/${vid}`),
     setActiveVariant:   (id, vid)       => _req('POST',   `/xyz/llm/blocks/${id}/active-variant`, { variant_id: vid }),
+    // Prompt templates — a template IS a variant name applied across every block.
+    getTemplates:       ()              => _req('GET',    '/xyz/llm/templates'),
+    applyTemplate:      (id)            => _req('POST',   '/xyz/llm/templates/apply', { id }),
+    saveTemplate:       (name)          => _req('POST',   '/xyz/llm/templates/save', { name }),
+    deleteTemplate:     (name)          => _req('DELETE', `/xyz/llm/templates/${encodeURIComponent(name)}`),
     getConversations:   ()              => _req('GET',    '/xyz/llm/conversations'),
     createConversation: (title)         => _req('POST',   '/xyz/llm/conversations', { title }),
     renameConversation: (id, title)     => _req('PATCH',  `/xyz/llm/conversations/${id}`, { title }),
@@ -1296,15 +1301,12 @@ app.registerExtension({
     const edBtn  = _nodeBtn('📝 Editor');
     const libBtn = _nodeBtn('📚 Library');
     const pvBtn  = _nodeBtn('👁 Preview');
-    const llmBtn = _nodeBtn('🤖 LLM');
     edBtn.addEventListener('click',  () => editorWin.toggle(node));
     libBtn.addEventListener('click', () => libraryWin.toggle());
     pvBtn.addEventListener('click',  () => previewWin.showNode(node.id));   // #7
-    llmBtn.addEventListener('click', () => {
-      llmWin.show();
-      document.dispatchEvent(new CustomEvent('plv2:llm-bind', { detail: { nodeId: node.id } }));
-    });
-    wrap.append(edBtn, libBtn, pvBtn, llmBtn);
+    // No LLM button here: the assistant binds to PLv3 nodes now (js/plv3.js), and a
+    // button that opened it un-bound would just look broken.
+    wrap.append(edBtn, libBtn, pvBtn);
 
     const w = node.addDOMWidget('plv2_open_btns', 'custom', wrap, {
       getValue: () => '', setValue: () => {}, serialize: false,

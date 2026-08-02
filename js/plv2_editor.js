@@ -348,12 +348,10 @@ function _build(col) {
   row1.appendChild(previewBtn);
 
   const llmBtn = _flatBtn('🤖 LLM');
-  llmBtn.title = 'Open the LLM prompt assistant (binds the active pane\'s node)';
-  llmBtn.addEventListener('click', () => {
-    window.plv2.windows.llm.show();
-    const nid = _active?.node?.id;
-    if (nid != null) document.dispatchEvent(new CustomEvent('plv2:llm-bind', { detail: { nodeId: nid } }));
-  });
+  // Opens the assistant only — it binds to PLv3 nodes now (use the node's own 🤖 button,
+  // or the Base-prompt selector inside the window).
+  llmBtn.title = 'Open the LLM prompt assistant';
+  llmBtn.addEventListener('click', () => window.plv2.windows.llm.show());
   row1.appendChild(llmBtn);
 
   // ── Top bar, row 2: orientation + (single: tabs + node select) ──

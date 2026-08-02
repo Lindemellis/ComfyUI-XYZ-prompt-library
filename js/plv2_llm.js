@@ -1,12 +1,14 @@
 /**
- * Prompt Library V2 — LLM Prompt Assistant window (4th floating window).
+ * LLM Prompt Assistant window (the 4th floating window).
  *
  * Rendered into window.plv2.windows.llm.body (the _makeWindow registration lives in
- * plv2.js). Two tabs:
- *   • Blocks — the system-prompt template: reorderable blocks, each with an enable
- *     switch, a saved-variant dropdown, and a resizable textarea. Special blocks
- *     (history / base_prompt / user_request) are placeholders.
- *   • Chat — bind a PLv2 node's resolved prompt as the base prompt, pick/seed a
+ * plv2.js — the window is just a host; the assistant itself drives PLv3 nodes). Two tabs:
+ *   • Blocks — the system prompt: a TEMPLATE switcher (default / anima / krea2 / your
+ *     own) over reorderable blocks, each with an enable switch, a saved-variant dropdown
+ *     and a resizable textarea. Special blocks (history / base_prompt / user_request)
+ *     are placeholders. A template IS a variant name, so the two dropdowns are two views
+ *     of one thing.
+ *   • Chat — bind a PLv3 node's COMPILED prompt as the base prompt, pick/seed a
  *     conversation, send a request → /xyz/llm/chat (tool loop) → render the reply,
  *     with Stop / Regenerate and Copy / Apply on the model's ```prompt block.
  *
@@ -16,9 +18,10 @@
 
 import { app } from '../../../scripts/app.js';
 
-const PLV2_TYPES = new Set([
-  'XYZ Prompt Library V2 Positive',
-  'XYZ Prompt Library V2 Negative',
+// The assistant binds to PLv3 nodes (kept in step with js/plv3/window.js).
+const PLV3_TYPES = new Set([
+  'XYZ Prompt Library V3',
+  'XYZ Prompt Library V3 Monaco',
 ]);
 const SPECIAL = new Set(['history', 'base_prompt', 'user_request']);
 const BASE_H_KEY = 'plv2_llm_base_h';
@@ -55,6 +58,11 @@ function toast(severity, summary, detail) {
 }
 
 // ─── module state ───────────────────────────────────────────────────────────────
+let _templates = [];       // [{id, label, builtin, disabled_kinds, blocks}]
+let _activeTemplate = 'default';
+let _activeMixed = false;  // blocks sit on variants of several names — no single template
+let _tmplSelects = [];     // every rendered template <select> (Blocks bar + Chat bar)
+let _tmplNote = null;      // the "tools this template allows" line under the Blocks bar
 let _built = false;
 let _tabBlocks = null, _tabChat = null, _activeTab = 'chat';
 let _blocksHost = null;
@@ -97,9 +105,113 @@ function _render(body) {
     _selectTab(_activeTab);
   }
   // refresh data each show
+  _loadTemplates();
   _loadBlocks();
   _loadConversations();
   _refreshNodeOptions();
+}
+
+// ════════════════════════════════════════════════════════════════════════════════
+// TEMPLATES — one named variant set across every block (see llm/templates.py)
+// ════════════════════════════════════════════════════════════════════════════════
+
+/** A template <select>, registered so every copy of it stays in step. */
+function _templateSelect(extraCss) {
+  const sel = el('select', `background:${C.input};color:${C.text};border:1px solid ${C.border};` +
+    `border-radius:5px;padding:3px 6px;font-size:11px;` + (extraCss || ''));
+  sel.title = 'Switch the whole system prompt: every block jumps to this template\'s variant';
+  sel.addEventListener('change', () => _applyTemplate(sel.value));
+  _tmplSelects.push(sel);
+  _fillTemplateSelect(sel);
+  return sel;
+}
+
+function _fillTemplateSelect(sel) {
+  const cur = _activeTemplate;
+  sel.innerHTML = '';
+  // "Mixed" is a real state, not a template: the blocks are on variants of several names
+  // (hand-picked in the variant dropdowns). Show it rather than claiming a template.
+  if (_activeMixed) { const op = el('option', '', '— mixed —'); op.value = '__mixed__'; sel.append(op); }
+  for (const t of _templates) {
+    const op = el('option', '', t.builtin ? t.label : `${t.label} ·`);
+    op.value = t.id;
+    sel.append(op);
+  }
+  // an active template that no longer exists still deserves to be shown, not silently swapped
+  if (!_activeMixed && !_templates.some(t => t.id === cur)) {
+    const op = el('option', '', `${cur} (missing)`); op.value = cur; sel.append(op);
+  }
+  sel.value = _activeMixed ? '__mixed__' : cur;
+}
+
+function _syncTemplateSelects() {
+  _tmplSelects = _tmplSelects.filter(s => s.isConnected);
+  for (const s of _tmplSelects) _fillTemplateSelect(s);
+  if (_tmplNote) {
+    const t = _templates.find(x => x.id === _activeTemplate);
+    const off = (t?.disabled_kinds || []);
+    _tmplNote.textContent = _activeMixed
+      ? 'Blocks are on variants of different names — pick a template to line them all up.'
+      : (off.length ? `Off in this template: ${off.join(', ')} — the matching tool is withheld too.` : '');
+  }
+}
+
+async function _loadTemplates() {
+  try {
+    const r = await api().getTemplates();
+    _templates = r?.templates ?? [];
+    _activeTemplate = r?.active ?? 'default';
+    _activeMixed = !!r?.mixed;
+  } catch { return; }
+  _syncTemplateSelects();
+}
+
+async function _applyTemplate(id) {
+  if (!id || id === '__mixed__') { _syncTemplateSelects(); return; }   // "mixed" is a state, not a choice
+  let r;
+  try { r = await api().applyTemplate(id); } catch (e) { toast('error', 'Switch failed', String(e)); return; }
+  if (r?.error) { toast('warn', 'Switch failed', r.error.message); await _loadTemplates(); return; }
+  await _loadTemplates();
+  _loadBlocks();
+  const gate = r.tools || {};
+  const tools = [gate.lookup ? 'danbooru' : null, gate.web_search ? 'web' : null].filter(Boolean);
+  const miss = (r.missing || []).length ? ` (no variant for: ${r.missing.join(', ')})` : '';
+  toast('success', `Template: ${id}`, `Tools: ${tools.join(' + ') || 'none'}.${miss}`);
+}
+
+function _templateBar() {
+  const bar = el('div', `display:flex;flex-direction:column;gap:4px;padding:7px 9px;` +
+    `background:${C.panel};border-bottom:1px solid ${C.border};flex-shrink:0;`);
+  const row = el('div', 'display:flex;align-items:center;gap:6px;');
+  row.append(el('span', `font-size:11px;color:${C.sub};`, 'Template'));
+  row.append(_templateSelect('flex:1;'));
+
+  const saveBtn = btn('Save as…', '', async () => {
+    const name = await askText('Save the current blocks as a template named:', '');
+    if (!name || !name.trim()) return;
+    const r = await api().saveTemplate(name.trim());
+    if (r?.error) { toast('warn', 'Cannot save', r.error.message); return; }
+    _activeTemplate = name.trim();
+    await _loadTemplates();
+    toast('success', 'Saved', `Template "${name.trim()}" captured the current text and on/off state.`);
+  });
+  saveBtn.title = 'Snapshot every block\'s current text + enabled state as a new template';
+
+  const delBtn = btn('🗑', '', async () => {
+    const t = _templates.find(x => x.id === _activeTemplate);
+    if (!t || t.builtin) { toast('warn', 'Built-in', 'The bundled templates cannot be deleted.'); return; }
+    if (!await askConfirm(`Delete template "${_activeTemplate}"?`, { okLabel: 'Delete', danger: true })) return;
+    const r = await api().deleteTemplate(_activeTemplate);
+    if (r?.error) { toast('warn', 'Cannot delete', r.error.message); return; }
+    await _loadTemplates();
+    _loadBlocks();
+  });
+  delBtn.title = 'Delete the selected user template';
+
+  row.append(saveBtn, delBtn);
+  _tmplNote = el('div', `font-size:10px;color:${C.sub};min-height:12px;`);
+  bar.append(row, _tmplNote);
+  return bar;
 }
 
 function _selectTab(id) {
@@ -112,6 +224,7 @@ function _selectTab(id) {
     t.style.background = on ? C.bg : 'transparent';
     t.style.color = on ? C.accent : C.sub;
   }
+  _loadTemplates();   // a manual variant switch can leave the stored name stale
   if (id === 'blocks') _loadBlocks();
   if (id === 'chat') { _loadConversations(); _refreshNodeOptions(); }
 }
@@ -124,7 +237,7 @@ function _buildBlocksTab(host) {
   _blocksHost = el('div', 'display:flex;flex-direction:column;gap:8px;');
   const addBtn = btn('＋ Add block', `align-self:flex-start;background:${C.accent2};color:#11111b;font-weight:600;`, _addBlock);
   scroll.append(_blocksHost, addBtn);
-  host.append(scroll);
+  host.append(_templateBar(), scroll);
 }
 
 async function _loadBlocks() {
@@ -227,6 +340,7 @@ function _textBody(b, head) {
   vsel.addEventListener('change', async () => {
     activeVid = parseInt(vsel.value);
     await api().setActiveVariant(b.id, activeVid);
+    _loadTemplates();   // one block off-template ⇒ the stored template name may be stale
     const vs = (await api().getVariants(b.id))?.variants ?? [];
     const v = vs.find(x => x.id === activeVid);
     ta.value = v ? (v.text || '') : '';
@@ -410,6 +524,12 @@ function _afterElement(container, y) {
 function _buildChatTab(host) {
   // base-prompt binding bar
   const bar = el('div', `display:flex;flex-direction:column;gap:5px;padding:7px 9px;background:${C.panel};border-bottom:1px solid ${C.border};flex-shrink:0;`);
+  // Template row — the same switcher as the Blocks tab, so a model change is one click
+  // away without leaving the conversation.
+  const r0 = el('div', 'display:flex;align-items:center;gap:6px;');
+  r0.append(el('span', `font-size:11px;color:${C.sub};width:12px;`, ''),
+            el('span', `font-size:11px;color:${C.sub};`, 'Template:'),
+            _templateSelect('flex:1;'));
   const r1 = el('div', 'display:flex;align-items:center;gap:6px;');
   // collapse / expand toggle for the whole base-prompt text section
   const collapseBtn = el('span', `cursor:pointer;color:${C.sub};font-size:12px;user-select:none;width:12px;`, '▾');
@@ -419,7 +539,7 @@ function _buildChatTab(host) {
   _nodeSelectEl.addEventListener('change', () => _bindNode(_nodeSelectEl.value === '' ? null : parseInt(_nodeSelectEl.value)));
   r1.append(_nodeSelectEl);
   _baseTextEl = el('textarea', `width:100%;box-sizing:border-box;height:${localStorage.getItem(BASE_H_KEY) || '46px'};resize:none;background:${C.input};color:${C.text};border:1px solid ${C.border};border-radius:5px;padding:5px 8px;font-family:"Fira Code",Consolas,monospace;font-size:11px;outline:none;`);
-  _baseTextEl.placeholder = '(optional) the txt2img prompt to optimize — bind a node or free-edit';
+  _baseTextEl.placeholder = '(optional) the txt2img prompt to optimize — bind a PLv3 node (shows its compiled output) or free-edit';
   _baseTextEl.addEventListener('input', () => { if (_boundNodeId == null) _baseText = _baseTextEl.value; });
 
   // vertical resize handle (drag to set the base-prompt textarea height)
@@ -456,7 +576,7 @@ function _buildChatTab(host) {
     applyCollapse();
   });
 
-  bar.append(r1, _baseTextEl, resizeHandle);
+  bar.append(r0, r1, _baseTextEl, resizeHandle);
   applyCollapse();
 
   // body: conversation list | active conversation
@@ -830,24 +950,28 @@ async function _regenerate() {
   await _doSend(lastUser.content, base, '🤖 regenerating…');
 }
 
-// ── base-prompt node binding ──
-function _plv2Nodes() {
-  return (app.graph?._nodes ?? app.graph?.nodes ?? []).filter(n => PLV2_TYPES.has(n.comfyClass));
+// ── base-prompt node binding (PLv3) ──
+// The base prompt is the node's COMPILED output (/xyz/plv3/compile), i.e. what the
+// sampler would actually receive — library groups expanded, schedules resolved. Apply
+// writes the model's prompt back into the node's `text` widget, which is PLv3 source:
+// plain comma-separated text is valid PLv3, so a round trip through the model flattens
+// the document (accepted — same trade the PLv2 assistant made).
+function _plv3Nodes() {
+  return (app.graph?._nodes ?? app.graph?.nodes ?? []).filter(n => PLV3_TYPES.has(n.comfyClass));
 }
 function _refreshNodeOptions() {
   if (!_nodeSelectEl) return;
   const cur = _nodeSelectEl.value;
   _nodeSelectEl.innerHTML = '';
   const free = el('option', '', 'Free edit (no node)'); free.value = ''; _nodeSelectEl.append(free);
-  for (const n of _plv2Nodes()) {
+  for (const n of _plv3Nodes()) {
     const op = el('option', '', `#${n.id} ${n.title || n.comfyClass}`); op.value = n.id; _nodeSelectEl.append(op);
   }
-  if (_boundNodeId != null && _plv2Nodes().find(n => n.id === _boundNodeId)) _nodeSelectEl.value = String(_boundNodeId);
+  if (_boundNodeId != null && _plv3Nodes().find(n => n.id === _boundNodeId)) _nodeSelectEl.value = String(_boundNodeId);
   else _nodeSelectEl.value = cur && [..._nodeSelectEl.options].some(o => o.value === cur) ? cur : '';
 }
-function _nodeTemplate(nodeId) {
-  const n = _plv2Nodes().find(x => x.id === nodeId);
-  return n?.widgets?.find(w => w.name === 'prompt_template')?.value ?? null;
+function _nodeWidget(nodeId, name) {
+  return _plv3Nodes().find(x => x.id === nodeId)?.widgets?.find(w => w.name === name) ?? null;
 }
 async function _bindNode(nodeId) {
   _boundNodeId = nodeId;
@@ -866,26 +990,37 @@ async function _bindNode(nodeId) {
 const _resolveBaseDebounced = debounce(() => _resolveBase(), 350);
 async function _resolveBase() {
   if (_boundNodeId == null) return;
-  const tmpl = _nodeTemplate(_boundNodeId);
-  if (tmpl == null) { _baseText = ''; _baseTextEl.value = '(node not found)'; return; }
+  const tw = _nodeWidget(_boundNodeId, 'text');
+  if (!tw) { _baseText = ''; _baseTextEl.value = '(node not found)'; return; }
+  const src = tw.value ?? '';
   try {
-    const r = await window.plv2.api.resolveTemplate(tmpl, 0);
-    _baseText = r?.text ?? '';
-  } catch { _baseText = tmpl; }
+    const resp = await fetch('/xyz/plv3/compile', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        text: src,
+        seed: Number(_nodeWidget(_boundNodeId, 'seed')?.value ?? 0),
+        region_mode: _nodeWidget(_boundNodeId, 'region_mode')?.value ?? 'couple',
+      }),
+    });
+    const j = await resp.json();
+    // A document that is mid-edit compiles in recovering mode: take the partial text
+    // rather than blanking the base prompt exactly when the user is typing.
+    _baseText = (j?.text ?? '') || src;
+  } catch { _baseText = src; }   // routes not loaded → the raw source is still useful
   _baseTextEl.value = _baseText;
 }
 function _applyToBoundNode(text) {
   if (_boundNodeId == null) { toast('warn', 'No node bound', 'Bind a node in the Base prompt selector first.'); return; }
-  // Normalise the model's prompt on apply — underscores, bracket escaping, full-width
-  // punctuation and comma spacing per the user's PLv2 normalization settings.
-  try { text = window.plv2.normalizePrompt(text); } catch {}
-  const n = _plv2Nodes().find(x => x.id === _boundNodeId);
-  const w = n?.widgets?.find(x => x.name === 'prompt_template');
+  // No PLv2-style normalisation here: PLv3 text is its own language (`[refs]`, `(x:1.2)`,
+  // `{a - b: …}`) and a krea2 prompt is prose — escaping its parentheses would corrupt both.
+  const w = _nodeWidget(_boundNodeId, 'text');
   if (!w) { toast('warn', 'Node not found', ''); return; }
   w.value = text;
+  // The widget callback is what plv3.js wrapped to emit plv3:node-edited, so the embedded
+  // Monaco editor and the floating window both pick the new text up from this one call.
+  try { w.callback?.call(_plv3Nodes().find(x => x.id === _boundNodeId), text); } catch {}
   if (w.inputEl) { w.inputEl.value = text; w.inputEl.dispatchEvent(new Event('input', { bubbles: true })); }
   try { app.graph.setDirtyCanvas(true, true); } catch {}
-  document.dispatchEvent(new CustomEvent('plv2:node-edited', { detail: { nodeId: _boundNodeId, value: text } }));
   toast('success', 'Applied', `Wrote the prompt into node #${_boundNodeId}.`);
   _resolveBase();
 }
@@ -897,12 +1032,12 @@ app.registerExtension({
     const wait = () => new Promise(r => setTimeout(r, 50));
     for (let i = 0; i < 40 && !window.plv2?.windows?.llm; i++) await wait();
     const win = window.plv2?.windows?.llm;
-    if (!win) { console.warn('[PLv2 LLM] window.plv2.windows.llm not found'); return; }
+    if (!win) { console.warn('[LLM] window.plv2.windows.llm not found'); return; }
 
     win.onShow(() => _render(win.body));
 
-    // node / editor "🤖 LLM" buttons → bind a node's resolved prompt as base.
-    document.addEventListener('plv2:llm-bind', async (e) => {
+    // The PLv3 node's "🤖 LLM" button → bind that node's compiled prompt as base.
+    document.addEventListener('plv3:llm-bind', async (e) => {
       const nid = e.detail?.nodeId;
       if (nid == null) return;
       if (!win.isVisible()) win.show();
@@ -912,19 +1047,13 @@ app.registerExtension({
       await _bindNode(nid);
     });
 
-    // bound node edited on canvas → re-resolve the base prompt (debounced).
-    document.addEventListener('plv2:node-edited', (e) => {
-      if (_boundNodeId != null && e.detail?.nodeId === _boundNodeId) _resolveBaseDebounced();
+    // The bound node's text changed — on the canvas, in the embedded Monaco, or in the
+    // floating PLv3 window. All three funnel through the `text` widget callback, which
+    // plv3.js wrapped to emit this one event. Re-compile the base prompt (debounced).
+    document.addEventListener('plv3:node-edited', (e) => {
+      if (_boundNodeId != null && String(e.detail?.nodeId) === String(_boundNodeId)) {
+        _resolveBaseDebounced();
+      }
     });
-    // The bound node's resolved output also changes when its template is edited in the Text
-    // Editor (writes the widget + emits editor-changed, NOT node-edited) or when any library
-    // entry it resolves through is edited (entry detail box / prompt-list / island). Mirror the
-    // preview window: re-resolve the bound node on these too. (A library re-resolve is cheap;
-    // we don't track which entries the template references, so just re-resolve when bound.)
-    const _reresolveIfBound = () => { if (_boundNodeId != null) _resolveBaseDebounced(); };
-    document.addEventListener('plv2:editor-changed', _reresolveIfBound);
-    document.addEventListener('plv2:entry-content-changed', _reresolveIfBound);
-    document.addEventListener('plv2:entry-changed', _reresolveIfBound);
-    document.addEventListener('plv2:node-renamed', _reresolveIfBound);
   },
 });

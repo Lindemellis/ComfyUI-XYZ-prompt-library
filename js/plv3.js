@@ -170,7 +170,22 @@ app.registerExtension({
         setTimeout(() => (edit.textContent = 'Editor'), 4000);
       });
     });
-    wrap.append(edit);
+    // The LLM Prompt Assistant (js/plv2_llm.js) binds to THIS node: it shows the node's
+    // compiled output as the base prompt and Apply writes the model's prompt back into
+    // the `text` widget. The window itself is hosted by plv2.js, hence the plv2 handle.
+    const llm = button('🤖 LLM');
+    llm.addEventListener('click', () => {
+      const win = window.plv2?.windows?.llm;
+      if (!win) {
+        console.warn('[PLv3] the LLM window is not available');
+        llm.textContent = 'LLM unavailable';
+        setTimeout(() => (llm.textContent = '🤖 LLM'), 4000);
+        return;
+      }
+      win.show();
+      document.dispatchEvent(new CustomEvent('plv3:llm-bind', { detail: { nodeId: node.id } }));
+    });
+    wrap.append(edit, llm);
 
     const w = node.addDOMWidget('plv3_open_btns', 'custom', wrap, {
       getValue: () => '',
