@@ -267,12 +267,30 @@ def _follow_text_link(
 #   <positive prompt, may span lines>
 #   Negative prompt: <negative prompt, may span lines>
 #   Steps: 20, Sampler: Euler a, CFG scale: 7, Seed: 1234, Model: foo
-_PARAMS_NEG_RE = re.compile(r"\nNegative prompt:\s*", re.IGNORECASE)
+# NB: the trailing run must NOT be ``\s*`` — an empty negative (``Negative
+# prompt: \nSteps: …``, which is what a no-negative model like krea2 writes)
+# would let it swallow the newline before the kv line, and the kv blob would
+# then be read as the negative prompt.  Horizontal whitespace only.
+_PARAMS_NEG_RE = re.compile(r"\nNegative prompt:[^\S\r\n]*", re.IGNORECASE)
 _PARAMS_KV_RE = re.compile(
     r"([A-Za-z][A-Za-z0-9 _-]*?)\s*:\s*"
     r"([^,]+?)"
     r"(?=,\s*[A-Za-z][A-Za-z0-9 _-]*?\s*:|$)"
 )
+
+
+def _peel_kv_line(block: str) -> tuple[str, str]:
+    """Split ``block`` into (prompt, kv line).
+
+    The kv blob is always the last line, but only if it looks like one — a
+    prompt that happens to end on its own line must not be eaten.
+    """
+    if "\n" not in block:
+        return block, ""
+    head, tail = block.rsplit("\n", 1)
+    if ":" in tail and "," in tail:
+        return head, tail
+    return block, ""
 
 
 def _derive_from_parameters(text: str) -> dict[str, Any]:
@@ -283,23 +301,12 @@ def _derive_from_parameters(text: str) -> dict[str, Any]:
     neg_match = _PARAMS_NEG_RE.search(text)
     if neg_match:
         positive = text[: neg_match.start()]
-        rest = text[neg_match.end():]
-        if "\n" in rest:
-            negative, kv_line = rest.rsplit("\n", 1)
-        else:
-            negative, kv_line = rest, ""
+        negative, kv_line = _peel_kv_line(text[neg_match.end():])
         out["negative_prompt"] = negative.strip()
     else:
         # No negative section — the trailing line may still be the kv blob
         # (some forks omit negatives entirely).
-        if "\n" in text:
-            head, tail = text.rsplit("\n", 1)
-            if ":" in tail and "," in tail:
-                positive, kv_line = head, tail
-            else:
-                positive, kv_line = text, ""
-        else:
-            positive, kv_line = text, ""
+        positive, kv_line = _peel_kv_line(text)
 
     out["positive_prompt"] = positive.strip()
 
