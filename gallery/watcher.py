@@ -237,7 +237,9 @@ class Coalescer:
         self._buf: Dict[str, _Pending] = {}
         self._stop = threading.Event()
         self._tick = threading.Thread(
-            target=self._tick_loop, name="xyz-gallery-coalescer", daemon=True,
+            target=self._supervised_tick_loop,
+            name="xyz-gallery-coalescer",
+            daemon=True,
         )
         self._folder_mono: Optional[float] = None
         self._watcher_job_id: Optional[str] = None
@@ -342,10 +344,57 @@ class Coalescer:
             jid, root_id=r_id, phase="", ok=1, failed=0,
         )
 
+    _CRASH_RESTART_SLEEP_S: float = 1.0
+
+    def _supervised_tick_loop(self) -> None:
+        """Restart ``_tick_loop`` if it ever escapes, mirroring ``WriteQueue``.
+
+        A dead coalescer is invisible: watchdog keeps delivering events and
+        ``add()`` keeps buffering them, but nothing ever flushes, so the whole
+        gallery silently downgrades to the 30 s heartbeat ``delta_scan`` until
+        ComfyUI is restarted.  Losing the loop must be loud and temporary.
+        """
+        while not self._stop.is_set():
+            try:
+                self._tick_loop()
+                return
+            except Exception:
+                logger.exception(
+                    "coalescer tick loop crashed; restarting (root_id=%s)",
+                    self._root.get("id"),
+                )
+                if self._stop.wait(self._CRASH_RESTART_SLEEP_S):
+                    return
+
+    def _flush_one(self, pend: _Pending) -> None:
+        """Apply one coalesced event.  Raises only on genuinely unexpected errors."""
+        from . import indexer as _indexer
+        from . import service as _service
+
+        if pend.act == "d":
+            iid = _indexer.delete_one(
+                pend.path,
+                db_path=self._db_path,
+                write_queue=self._write_queue,
+            )
+            if iid is not None:
+                _service.broadcast_image_deleted(int(iid))
+            return
+        if not _is_image_name(os.path.basename(pend.path)):
+            return
+        if _is_derivative_excluded_path(pend.path, str(self._root["path"])):
+            return
+        iid = _indexer.index_one(
+            pend.path, root=self._root,
+            db_path=self._db_path,
+            write_queue=self._write_queue,
+        )
+        if iid is not None:
+            _service.broadcast_image_upserted(int(iid))
+
     def _tick_loop(self) -> None:
         from . import indexer as _indexer
         from . import job_registry as _jobs
-        from . import service as _service
 
         while not self._stop.is_set():
             if self._stop.wait(self._TICK_S):
@@ -402,29 +451,18 @@ class Coalescer:
                 for i in range(0, nflush, self.FLUSH_MAX):
                     chunk = to_flush[i: i + self.FLUSH_MAX]
                     for _k, pend in chunk:
-                        if pend.act == "d":
-                            iid = _indexer.delete_one(
-                                pend.path,
-                                db_path=self._db_path,
-                                write_queue=self._write_queue,
+                        try:
+                            self._flush_one(pend)
+                        except Exception:
+                            # One unreadable file — or a transient "database is
+                            # locked" from a second writer — must never take the
+                            # thread down with it.  Skip the item, keep the loop.
+                            logger.exception(
+                                "watcher flush failed (root_id=%s): %s",
+                                self._root.get("id"), pend.path,
                             )
-                            if iid is not None:
-                                _service.broadcast_image_deleted(int(iid))
-                        else:
-                            if not _is_image_name(os.path.basename(pend.path)):
-                                pass
-                            elif _is_derivative_excluded_path(
-                                pend.path, str(self._root["path"]),
-                            ):
-                                pass
-                            else:
-                                iid = _indexer.index_one(
-                                    pend.path, root=self._root,
-                                    db_path=self._db_path,
-                                    write_queue=self._write_queue,
-                                )
-                                if iid is not None:
-                                    _service.broadcast_image_upserted(int(iid))
+                        # Progress still advances for a failed item, or the job
+                        # never reaches done == planned and the modal hangs.
                         if self._watcher_job_id is not None:
                             with self._lock:
                                 self._watcher_cum_done += 1

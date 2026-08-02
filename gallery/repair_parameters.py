@@ -66,6 +66,13 @@ def repair(db_path: Path, *, dry_run: bool) -> int:
 
     wq = None
     if not dry_run:
+        # This opens a SECOND writer on a DB that a running ComfyUI also writes
+        # to.  WAL serialises them, but a burst can still push the live process
+        # past its busy timeout.  Prefer running this with ComfyUI stopped.
+        print(
+            f"note: writing {len(suspects)} rows; stop ComfyUI first if you can "
+            "(a second writer can make the running instance hit 'database is locked')"
+        )
         wq = _repo.WriteQueue(db_path)
         wq.start()
 
