@@ -31,6 +31,8 @@ import urllib.parse
 from datetime import datetime, timezone
 from typing import Any, Dict, Generator, Iterable, List, Optional
 
+from .db import unescape_html_entities
+
 logger = logging.getLogger("xyz.tagdb.scraper")
 
 DANBOORU_BASE = "https://danbooru.donmai.us"
@@ -565,7 +567,10 @@ def _build_gelbooru_auth(api_key: Optional[str], user_id: Optional[str]) -> str:
 def _map_gelbooru_tag(tag: Dict[str, Any]) -> Dict[str, Any]:
     cat, dep = GELBOORU_CATEGORY_MAP.get(int(tag.get("type", 0)), (0, 0))
     return {
-        "name": tag.get("name", ""),
+        # Gelbooru HTML-escapes names even in its JSON dapi: `girls&#039;_frontline`,
+        # `fate&#039;s`, `&amp;`, `&quot;`. Decode here — the stored name is what the
+        # autocomplete shows AND inserts, and what aliases.canonical joins against.
+        "name": unescape_html_entities(tag.get("name", "")),
         "category": cat,
         "post_count": int(tag.get("count", 0)),
         "is_deprecated": dep,
@@ -687,8 +692,11 @@ def scrape_gelbooru_aliases(
         if data_rows == 0:
             break
         for ant, cons in pairs:
-            alias = urllib.parse.unquote(ant).strip()
-            canonical = urllib.parse.unquote(cons).strip()
+            # Percent-decode first, then HTML-decode: gelbooru percent-encodes the
+            # tag into the href (`%27` for an apostrophe), but a name that was
+            # HTML-escaped before being encoded comes back as `&#039;`.
+            alias = unescape_html_entities(urllib.parse.unquote(ant)).strip()
+            canonical = unescape_html_entities(urllib.parse.unquote(cons)).strip()
             if alias and canonical and alias != canonical:
                 yield {"alias": alias, "canonical": canonical}
         pid += GELBOORU_ALIAS_PAGE_SIZE

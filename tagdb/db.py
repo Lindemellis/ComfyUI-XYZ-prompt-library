@@ -17,15 +17,23 @@ Tables:
 V2 meta watermark keys (see plan §"Provenance / time-binding"):
   schema_kind, origin_official_version, structure_synced_through,
   full_count_synced_at, aliases_synced_through
+
+V3 is a data repair, not a schema change: it decodes the HTML entities gelbooru's
+API leaves in tag names (`girls&#039;_frontline`) and rebuilds the FTS index.
 """
 
 from __future__ import annotations
 
+import html
+import re
 import sqlite3
 from pathlib import Path
 from typing import Union
 
-__all__ = ["connect_read", "connect_write", "migrate", "SCHEMA_VERSION"]
+__all__ = [
+    "connect_read", "connect_write", "migrate", "SCHEMA_VERSION",
+    "unescape_html_entities",
+]
 
 _MMAP_BYTES = 256 * 1024 * 1024
 _BUSY_TIMEOUT_MS = 5000
@@ -37,6 +45,25 @@ def _apply_pragmas(conn: sqlite3.Connection) -> None:
     conn.execute("PRAGMA temp_store = MEMORY")
     conn.execute(f"PRAGMA mmap_size = {_MMAP_BYTES}")
     conn.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
+
+
+# A well-formed HTML entity: `&name;`, `&#123;` or `&#x1f;`. We deliberately do NOT
+# use html.unescape() directly — it is lenient and also decodes SEMICOLON-LESS forms
+# (`&amp` → `&`, `&not` → `¬`, `&gt` → `>`), which would corrupt real tag names that
+# contain a bare ampersand (danbooru has 194 of them: `p&d`, `fear_&_hunger`, …).
+_ENTITY_RE = re.compile(r"&(?:#[0-9]{1,7}|#[xX][0-9a-fA-F]{1,6}|[A-Za-z][A-Za-z0-9]{1,31});")
+
+
+def unescape_html_entities(s: str) -> str:
+    """Decode well-formed HTML entities in a tag name (`girls&#039;_frontline` → `girls'_frontline`).
+
+    Gelbooru HTML-escapes tag names in BOTH its JSON dapi and its HTML pages, so
+    apostrophes/ampersands/quotes come back as entities and must be decoded before
+    they are stored. Danbooru's API does not escape, so this is a no-op there.
+    """
+    if not s or "&" not in s:
+        return s
+    return _ENTITY_RE.sub(lambda m: html.unescape(m.group(0)), s)
 
 
 _PathLike = Union[str, Path]
@@ -57,7 +84,7 @@ def connect_write(path: _PathLike) -> sqlite3.Connection:
     return conn
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _V1_DDL = """\
 CREATE TABLE IF NOT EXISTS meta (
@@ -208,6 +235,83 @@ def _migrate_v2(conn: sqlite3.Connection) -> None:
         )
 
 
+def _migrate_v3(conn: sqlite3.Connection) -> int:
+    """Decode HTML entities left in tag/alias/translation text by the gelbooru scrape.
+
+    Gelbooru's JSON dapi returns HTML-escaped names (`girls&#039;_frontline`), and
+    every gelbooru dataset built before this migration stored them verbatim — so the
+    autocomplete displayed and INSERTED the escaped form, and the alias join
+    (`aliases.canonical = tags.name`) missed those tags entirely. Danbooru text is
+    never escaped, so this is a no-op on a danbooru DB.
+
+    Returns the number of rows changed (0 ⇒ the caller can skip the FTS rebuild).
+    Collisions are resolved by dropping the escaped row: the decoded twin already
+    holds the name/PK, and the escaped one was never reachable by a correct query.
+    """
+    changed = 0
+
+    # tags.name is UNIQUE — check for a decoded twin before updating.
+    rows = conn.execute("SELECT id, name FROM tags WHERE name LIKE '%&%'").fetchall()
+    for tag_id, name in rows:
+        fixed = unescape_html_entities(name)
+        if fixed == name:
+            continue
+        twin = conn.execute(
+            "SELECT id FROM tags WHERE name = ? AND id <> ?", (fixed, tag_id)
+        ).fetchone()
+        if twin:
+            conn.execute("DELETE FROM tags WHERE id = ?", (tag_id,))
+        else:
+            conn.execute("UPDATE tags SET name = ? WHERE id = ?", (fixed, tag_id))
+        changed += 1
+
+    # aliases.alias is the PK; canonical is a plain column.
+    rows = conn.execute(
+        "SELECT alias, canonical FROM aliases WHERE alias LIKE '%&%' OR canonical LIKE '%&%'"
+    ).fetchall()
+    for alias, canonical in rows:
+        f_alias = unescape_html_entities(alias)
+        f_canon = unescape_html_entities(canonical)
+        if (f_alias, f_canon) == (alias, canonical):
+            continue
+        if f_alias != alias and conn.execute(
+            "SELECT 1 FROM aliases WHERE alias = ?", (f_alias,)
+        ).fetchone():
+            conn.execute("DELETE FROM aliases WHERE alias = ?", (alias,))
+        else:
+            conn.execute(
+                "UPDATE aliases SET alias = ?, canonical = ? WHERE alias = ?",
+                (f_alias, f_canon, alias),
+            )
+        changed += 1
+
+    # translations PK is (tag, lang).
+    rows = conn.execute(
+        "SELECT tag, lang, text FROM translations WHERE tag LIKE '%&%' OR text LIKE '%&%'"
+    ).fetchall()
+    for tag, lang, text in rows:
+        f_tag = unescape_html_entities(tag)
+        f_text = unescape_html_entities(text)
+        if (f_tag, f_text) == (tag, text):
+            continue
+        if f_tag != tag and conn.execute(
+            "SELECT 1 FROM translations WHERE tag = ? AND lang = ?", (f_tag, lang)
+        ).fetchone():
+            conn.execute("DELETE FROM translations WHERE tag = ? AND lang = ?", (tag, lang))
+        else:
+            conn.execute(
+                "UPDATE translations SET tag = ?, text = ? WHERE tag = ? AND lang = ?",
+                (f_tag, f_text, tag, lang),
+            )
+        changed += 1
+
+    if changed:
+        # The contentless FTS index holds the escaped names; it must be rebuilt.
+        from .snapshots import rebuild_fts  # local import: snapshots imports this module
+        rebuild_fts(conn)
+    return changed
+
+
 def migrate(conn: sqlite3.Connection) -> None:
     """Apply forward-only migrations. executescript issues an implicit COMMIT first."""
     ver = conn.execute("PRAGMA user_version").fetchone()[0]
@@ -217,4 +321,6 @@ def migrate(conn: sqlite3.Connection) -> None:
         conn.executescript(_V1_DDL)
     if ver < 2:
         _migrate_v2(conn)
+    if ver < 3:
+        _migrate_v3(conn)
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")

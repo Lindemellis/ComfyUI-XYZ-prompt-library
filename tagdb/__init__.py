@@ -42,6 +42,7 @@ def setup(server) -> None:
     (DATA_DIR / "snapshots" / "local").mkdir(exist_ok=True)
 
     _rename_legacy_working_db()  # tagdb.sqlite → danbooru.sqlite (before routes open it)
+    _migrate_working_dbs()       # forward-only schema/data migrations (before any reads)
 
     from .routes import register
     register(server, DATA_DIR)
@@ -75,6 +76,36 @@ def _rename_legacy_working_db() -> None:
                                src.name, WORKING_DB.name, exc)
                 return
     logger.info("[TagDB] Renamed working DB tagdb.sqlite → danbooru.sqlite")
+
+
+def _migrate_working_dbs() -> None:
+    """Run forward-only migrations on the working DBs that are already on disk.
+
+    A DB installed by an OLDER version only ever gets migrated on the path that
+    created it (download/seed/build), so a migration added later would never reach
+    it. Runs before routes open their read connections, and is a no-op once
+    `PRAGMA user_version` is current (V3 repairs gelbooru's HTML-escaped names —
+    see db._migrate_v3).
+    """
+    from . import db as _db
+
+    for path in (WORKING_DB, DATA_DIR / "gelbooru.sqlite"):
+        if not path.exists():
+            continue
+        try:
+            conn = _db.connect_write(path)
+        except Exception:
+            logger.exception("[TagDB] Could not open %s for migration", path.name)
+            continue
+        try:
+            if conn.execute("PRAGMA user_version").fetchone()[0] >= _db.SCHEMA_VERSION:
+                continue
+            _db.migrate(conn)
+            logger.info("[TagDB] Migrated %s to schema v%d", path.name, _db.SCHEMA_VERSION)
+        except Exception:
+            logger.exception("[TagDB] Migration of %s failed", path.name)
+        finally:
+            conn.close()
 
 
 def _migrate_legacy_layout() -> None:

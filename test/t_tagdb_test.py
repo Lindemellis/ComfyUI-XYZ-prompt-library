@@ -37,7 +37,7 @@ def test_migrate_v1_to_v2():
 
     conn = _db.connect_write(p)
     _db.migrate(conn)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == _db.SCHEMA_VERSION
     cols = {r[1] for r in conn.execute("PRAGMA table_info(tags)")}
     assert {"danbooru_id", "created_at", "post_count_synced_at", "structure_synced_at"} <= cols
     tables = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -296,6 +296,65 @@ def test_search_tags_multi_merge_dedupe_and_authority():
     # single-source result keeps the legacy shape (no `sources` key)
     legacy = _repo.search_tags("miku", dan, 10)
     assert legacy and "sources" not in legacy[0]
+
+
+# ── gelbooru HTML entities (V3 repair) ───────────────────────────────────────
+
+def test_unescape_html_entities_keeps_bare_ampersands():
+    u = _db.unescape_html_entities
+    assert u("girls&#039;_frontline") == "girls'_frontline"
+    assert u("a&amp;b") == "a&b"
+    assert u("&quot;x&quot;") == '"x"'
+    assert u("&lt;3") == "<3"
+    # A real danbooru tag with a bare `&` must survive untouched — html.unescape()
+    # alone would mangle `&not`/`&amp` (no semicolon) and `&gt` here.
+    assert u("fear_&_hunger") == "fear_&_hunger"
+    assert u("alraune_(p&d)") == "alraune_(p&d)"
+    assert u("a&notb") == "a&notb"
+    assert u("a&amp") == "a&amp"
+
+
+def test_gelbooru_tag_names_are_unescaped_at_scrape():
+    t = _sc._map_gelbooru_tag({"name": "404_(girls&#039;_frontline)", "count": 7, "type": 4})
+    assert t["name"] == "404_(girls'_frontline)"
+
+
+def test_migrate_v3_repairs_escaped_names_and_fts():
+    from tagdb.snapshots import rebuild_fts
+
+    p = _tmp_db()
+    conn = _db.connect_write(p)
+    _db.migrate(conn)
+    conn.execute("BEGIN")
+    for name in ("404_(girls&#039;_frontline)", "a&amp;b", "fear_&_hunger"):
+        conn.execute("INSERT INTO tags(name,source,category,post_count) VALUES(?,?,0,10)",
+                     (name, "gelbooru"))
+    # A decoded twin already exists → the escaped duplicate is dropped, not renamed.
+    conn.execute("INSERT INTO tags(name,source,category,post_count) VALUES('60''s','gelbooru',0,9)")
+    conn.execute("INSERT INTO tags(name,source,category,post_count) VALUES('60&#039;s','gelbooru',0,3)")
+    conn.execute("INSERT INTO aliases(alias,canonical) VALUES(?,?)",
+                 ("gf&#039;", "404_(girls&#039;_frontline)"))
+    conn.execute("COMMIT")
+    rebuild_fts(conn)
+    conn.execute("PRAGMA user_version = 2")    # pretend it predates the repair
+    conn.close()
+
+    conn = _db.connect_write(p)
+    _db.migrate(conn)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == _db.SCHEMA_VERSION
+    names = {r[0] for r in conn.execute("SELECT name FROM tags")}
+    assert names == {"404_(girls'_frontline)", "a&b", "fear_&_hunger", "60's"}
+    assert conn.execute("SELECT canonical FROM aliases WHERE alias=?", ("gf'",)).fetchone()[0] \
+        == "404_(girls'_frontline)"
+    conn.close()
+
+    # FTS was rebuilt from the decoded names: the apostrophe form is now findable
+    # and the escaped form is gone.
+    assert [r["name"] for r in _repo.search_tags("girls'_front", p, 10)] == \
+        ["404_(girls'_frontline)"]
+    assert _repo.search_tags("&#039", p, 10) == []
+    # …and the alias still points at the tag (aliases_text join is by decoded name).
+    assert [r["name"] for r in _repo.search_tags("gf'", p, 10)] == ["404_(girls'_frontline)"]
 
 
 if __name__ == "__main__":
