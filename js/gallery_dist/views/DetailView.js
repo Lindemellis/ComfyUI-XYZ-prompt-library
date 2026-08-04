@@ -267,23 +267,56 @@ export const DetailView = defineComponent({
       }
     }
 
-    async function fetchNeighbors(id) {
-      neighborsLoading.value = true;
-      prevId.value = null;
-      nextId.value = null;
+    // The neighbour ids are computed server-side against the CURRENT
+    // filter+sort, so they go stale the moment an image enters or leaves
+    // that set — which is exactly what a fresh render does. `silent` is the
+    // in-place refresh: it never nulls the ids and never touches
+    // neighborsLoading (that flag is bound to the nav buttons' :disabled),
+    // so an unchanged answer re-renders nothing at all.
+    async function fetchNeighbors(id, opts = {}) {
+      const silent = !!(opts && opts.silent);
+      if (!silent) {
+        neighborsLoading.value = true;
+        prevId.value = null;
+        nextId.value = null;
+      }
       try {
         const q = apiQueryObject();
         const nb = await api.get(`/image/${id}/neighbors`, { query: q });
+        // A silent refresh can land after the user moved on — the ids it
+        // carries belong to the previous image, so drop them.
+        if (Number(props.id) !== Number(id)) return;
         prevId.value = (typeof nb.prev_id === 'number') ? nb.prev_id : null;
         nextId.value = (typeof nb.next_id === 'number') ? nb.next_id : null;
       } catch (exc) {
         // Non-fatal: leave prev/next null, user can still navigate
         // manually. We don't surface this error — the main load state
-        // is the authoritative one.
-        prevId.value = null;
-        nextId.value = null;
+        // is the authoritative one. A silent refresh keeps what it already
+        // had instead of crippling the buttons over one flaky request.
+        if (!silent) {
+          prevId.value = null;
+          nextId.value = null;
+        }
       } finally {
-        neighborsLoading.value = false;
+        if (!silent) neighborsLoading.value = false;
+      }
+    }
+
+    // One render batch = one image.upserted per file; coalesce the storm
+    // into a single /neighbors round-trip.
+    const NEIGHBORS_REFRESH_MS = 400;
+    let neighborsRefreshTimer = null;
+    function scheduleNeighborsRefresh() {
+      if (neighborsRefreshTimer) return;
+      neighborsRefreshTimer = setTimeout(() => {
+        neighborsRefreshTimer = null;
+        void fetchNeighbors(props.id, { silent: true });
+      }, NEIGHBORS_REFRESH_MS);
+    }
+    function cancelNeighborsRefresh() {
+      if (neighborsRefreshTimer) {
+        clearTimeout(neighborsRefreshTimer);
+        neighborsRefreshTimer = null;
       }
     }
 
@@ -306,28 +339,41 @@ export const DetailView = defineComponent({
       }
     }
 
-    async function gotoPrev() {
-      if (neighborsLoading.value) return;
-      let target = prevId.value;
-      if (target == null) {
-        // Wrap: at head → jump to tail of current filter+sort set.
-        target = await wrapTarget('last');
-      }
-      if (target != null) {
-        window.location.hash = `#/image/${target}`;
+    // Not a ref: it guards a double-click / key-repeat from firing two
+    // boundary lookups, and must NOT reach the buttons' :disabled (that
+    // would be the very flash the silent refresh exists to avoid).
+    let navBusy = false;
+
+    // A null id means "we are at the end" — but it was computed when the
+    // image opened, and the WS refresh above can be late or the socket down
+    // (connection.js backs off up to 30 s). Re-check once before wrapping,
+    // or a new render sitting right next to us gets skipped and we loop to
+    // the far end of the set instead.
+    async function gotoEdge(dir) {
+      if (neighborsLoading.value || navBusy) return;
+      const side = dir === 'prev' ? prevId : nextId;
+      navBusy = true;
+      try {
+        let target = side.value;
+        if (target == null) {
+          cancelNeighborsRefresh();
+          await fetchNeighbors(props.id, { silent: true });
+          target = side.value;
+        }
+        if (target == null) {
+          // Genuinely at the end → wrap to the other end of the set.
+          target = await wrapTarget(dir === 'prev' ? 'last' : 'first');
+        }
+        if (target != null) {
+          window.location.hash = `#/image/${target}`;
+        }
+      } finally {
+        navBusy = false;
       }
     }
 
-    async function gotoNext() {
-      if (neighborsLoading.value) return;
-      let target = nextId.value;
-      if (target == null) {
-        target = await wrapTarget('first');
-      }
-      if (target != null) {
-        window.location.hash = `#/image/${target}`;
-      }
-    }
+    function gotoPrev() { return gotoEdge('prev'); }
+    function gotoNext() { return gotoEdge('next'); }
 
     function fit() {
       const iw = imgNatural.value.w;
@@ -581,13 +627,23 @@ export const DetailView = defineComponent({
         }
       });
       unsubRecon = subscribeReconcile(() => {
-        fetchRecord(props.id);
-        fetchNeighbors(props.id);
+        // Focus reconcile fires precisely when the set changed while the tab
+        // was away, so it must be silent too — a plain fetch here nulls the
+        // record and flashes the whole canvas on every tab-back.
+        void fetchRecord(props.id, { silent: true });
+        void fetchNeighbors(props.id, { silent: true });
       });
       unsubEvent = subscribeGalleryEvent((env) => {
         const t = env && env.type;
         const d = (env && env.data) || {};
-        if (d.id != null && Number(d.id) !== Number(props.id)) return;
+        if (d.id != null && Number(d.id) !== Number(props.id)) {
+          // Another image entered or left the set — a fresh render, or a
+          // delete elsewhere. Our cached prev/next predate it, so refresh
+          // them; without this, "previous" on the newest image still
+          // believes it is at the head and wraps to the oldest one.
+          if (t === EV.UPSERTED || t === EV.DELETED) scheduleNeighborsRefresh();
+          return;
+        }
         if (t === EV.DELETED) {
           error.value = { code: 'not_found', message: 'Image was removed' };
           record.value = null;
@@ -597,6 +653,8 @@ export const DetailView = defineComponent({
           // Silent refresh: full fetch would set record=null and flash the canvas
           // (e.g. metadata_sync wrote PNG chunks → watcher upsert).
           void fetchRecord(props.id, { silent: true });
+          // Our own mtime/size may have moved us within the sort order.
+          scheduleNeighborsRefresh();
           return;
         }
         if (t === EV.UPDATED) {
@@ -625,6 +683,7 @@ export const DetailView = defineComponent({
       window.removeEventListener('mouseup', onAsideSplitUp, true);
       if (unsubEvent) { unsubEvent(); unsubEvent = null; }
       if (unsubRecon) { unsubRecon(); unsubRecon = null; }
+      cancelNeighborsRefresh();
       if (resizeObs) { resizeObs.disconnect(); resizeObs = null; }
       if (copyTimer) { clearTimeout(copyTimer); copyTimer = null; }
     });
@@ -634,6 +693,8 @@ export const DetailView = defineComponent({
       nameEditing.value = false;
       renameErr.value = '';
       folderTreeFlat.value = null;
+      // A pending silent refresh would only duplicate the full load below.
+      cancelNeighborsRefresh();
       fetchRecord(newId);
       fetchNeighbors(newId);
       // Reset zoom between images so the next image starts fit-to-
