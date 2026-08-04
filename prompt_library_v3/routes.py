@@ -127,6 +127,73 @@ async def _post_ast(request):
     )
 
 
+# --- documents --------------------------------------------------------------
+#
+# The document is the source of truth: the same tree as the text, plus a stable id
+# and an on/off switch per item.  The text is what its ENABLED items render to, so
+# an item switched off is nowhere in the text — which is the whole point, and also
+# why the frontend cannot work these out for itself.
+
+
+def _doc_of(body) -> "Document":
+    """The posted document, or a fresh one built from the posted text."""
+    from .document import Document, from_text, reconcile
+
+    raw = body.get("doc")
+    text = body.get("text") or ""
+    if not raw:
+        return from_text(text)
+    doc = Document.from_json(raw)
+    # A text came with it: the user has been typing, so fold those edits in first.
+    if "text" in body and render_doc(doc) != text:
+        doc = reconcile(doc, text)
+    return doc
+
+
+def render_doc(doc) -> str:
+    from .document import render
+
+    return render(doc)
+
+
+async def _post_doc_sync(request):
+    """text (+ the document we last handed out) -> the document that matches it.
+
+    Called on the same beat as the editor's lint, so the parked items survive
+    whatever the user just typed.  With no document posted this is simply
+    "wrap this text", which is how an older workflow gets one.
+    """
+    try:
+        body = await request.json()
+        doc = _doc_of(body)
+    except Exception as exc:  # noqa: BLE001
+        return web.json_response({"error": f"bad request: {exc}"}, status=400)
+
+    return web.json_response({"ok": True, "doc": doc.to_json(), "text": render_doc(doc)})
+
+
+async def _post_doc_toggle(request):
+    """Switch one item on or off, and say which characters that changes.
+
+    Returning the edit rather than the whole text lets the detail page push it
+    through its existing span-edit path — version stamp, rebase, one undo step.
+    """
+    try:
+        body = await request.json()
+        node_id = str(body.get("id") or "")
+        enabled = bool(body.get("enabled"))
+        doc = _doc_of(body)
+    except Exception as exc:  # noqa: BLE001
+        return web.json_response({"error": f"bad request: {exc}"}, status=400)
+
+    from .document import toggle_edit
+
+    edit = toggle_edit(doc, node_id, enabled)
+    if edit is None:
+        return web.json_response({"error": f"unknown item '{node_id}'"}, status=404)
+    return web.json_response({"ok": True, **edit})
+
+
 # --- library (spec §5) ------------------------------------------------------
 
 
@@ -403,6 +470,10 @@ def register(server) -> None:
     r = server.routes
     r.post("/xyz/plv3/compile")(_post_compile)
     r.post("/xyz/plv3/ast")(_post_ast)
+
+    # Documents (item on/off switches)
+    r.post("/xyz/plv3/doc/sync")(_post_doc_sync)
+    r.post("/xyz/plv3/doc/toggle")(_post_doc_toggle)
 
     # Library
     r.get("/xyz/plv3/library/tree")(_get_tree)

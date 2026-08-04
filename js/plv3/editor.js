@@ -41,6 +41,19 @@ export class EditorPane extends PromptEditor {
           polarity: nodePolarity(node),
         };
       },
+      // The document lives in the node's own hidden `doc` widget, so the items you
+      // switched OFF — which are by design nowhere in the text — are saved with the
+      // workflow and travel with it.
+      docStore: {
+        get: () => widget(this.activeNode(), 'doc')?.value ?? '',
+        set: (json) => {
+          const node = this.activeNode();
+          const w = widget(node, 'doc');
+          if (!w || w.value === json) return;
+          w.value = json;
+          node.graph?.setDirtyCanvas(true, true);
+        },
+      },
       onCompiled: (result) => onCompiled?.(result, this.activeNode()),
       onAst: (payload, meta) => onAst?.(payload, this.activeNode(), meta),
       onLibrarySynced: (paths) => onLibrarySynced?.(paths),

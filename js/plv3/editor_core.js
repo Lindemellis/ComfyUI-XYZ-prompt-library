@@ -138,10 +138,16 @@ export class PromptEditor {
    *                                      (typing does not come through here)
    * @param onBlur()                      the text lost focus — time to persist
    * @param syncOnBlur                    run the library blur-sync (spec §5.3)
+   * @param docStore   { get(): string|null, set(json) } — where the structured
+   *                   document lives. The document is the source of truth: it holds
+   *                   every item WITH its on/off switch, and the text is what its
+   *                   enabled items render to. The main window backs this with the
+   *                   node's hidden `doc` widget so it travels with the workflow;
+   *                   without a store it lives for the session only.
    */
   constructor(container, {
     params, onCompiled, onAst, onLibrarySynced, onEdited, onBlur,
-    syncOnBlur = true, options = {},
+    syncOnBlur = true, options = {}, docStore = null,
   } = {}) {
     this.container = container;
     this.params = params || (() => ({}));
@@ -152,10 +158,34 @@ export class PromptEditor {
     this.onBlur = onBlur || (() => {});
     this.syncOnBlur = syncOnBlur;
     this.options = options;
+    this.docStore = docStore;
+    this._doc = null;          // the session fallback when there is no store
     this.monaco = null;
     this.editor = null;
     this._lintTimer = null;
     this._decorations = [];
+  }
+
+  /** The structured document as JSON text, or '' when there is none yet. */
+  docJson() {
+    const raw = this.docStore ? this.docStore.get() : this._doc;
+    return typeof raw === 'string' ? raw : '';
+  }
+
+  doc() {
+    const raw = this.docJson();
+    if (!raw) return null;
+    try {
+      return JSON.parse(raw);
+    } catch {
+      return null;   // a corrupt store must not take the editor down with it
+    }
+  }
+
+  setDoc(doc) {
+    const json = doc ? JSON.stringify(doc) : '';
+    if (this.docStore) this.docStore.set(json);
+    else this._doc = json;
   }
 
   init() {
@@ -514,18 +544,27 @@ export class PromptEditor {
 
     let result;
     let ast;
+    let sync;
     try {
-      [result, ast] = await Promise.all([post('compile', body), post('ast', body)]);
+      // The document rides along with the lint rather than on a round trip of its
+      // own: it has to be folded forward through the same text the AST was parsed
+      // from, or a switched-off item would be reconciled against stale text.
+      [result, ast, sync] = await Promise.all([
+        post('compile', body),
+        post('ast', body),
+        post('doc/sync', { text, doc: this.doc() }),
+      ]);
     } catch (err) {
       console.warn('[PLv3] lint failed', err);
       return;
     }
     if (this.model() !== model) return; // the user switched documents mid-flight
 
+    if (sync?.doc) this.setDoc(sync.doc);
     this.setMarkers(model, result.diagnostics || []);
     this.onCompiled(result);
     // The AST snapshot is only usable against the text it was parsed from.
-    this.onAst(ast, { version, text });
+    this.onAst(ast, { version, text, doc: sync?.doc ?? null });
   }
 
   setMarkers(model, diagnostics) {

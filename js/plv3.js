@@ -58,6 +58,21 @@ function hideTextWidget(node) {
   if (tw.inputEl) tw.inputEl.style.display = 'none';
 }
 
+/** The structured document (spec §5.2 as rewritten): the same tree as `text`, plus a
+ *  stable id and an on/off switch per item. It is the backend's source of truth, and
+ *  it is where the items you switched OFF live — they are deliberately nowhere in the
+ *  text, so without this widget they would not survive a save.
+ *
+ *  Hidden like the Monaco node's textarea: a one-line JSON blob is not something to
+ *  draw on a node, but it must stay a real serialised widget. */
+function hideDocWidget(node) {
+  const dw = node.widgets?.find((x) => x.name === 'doc');
+  if (!dw) return;
+  dw.hidden = true;
+  dw.computeSize = () => [0, -4];
+  if (dw.inputEl) dw.inputEl.style.display = 'none';
+}
+
 /** editor text -> the node's `text` widget (the value the backend reads). Routed
  *  through the widget callback so an open floating window sees the change too. */
 function pushToNode(node, pe) {
@@ -110,6 +125,17 @@ async function mountEditor(node) {
       region_mode: node.widgets?.find((x) => x.name === 'region_mode')?.value ?? 'couple',
       polarity: nodePolarity(node),
     }),
+    // Same store as the floating window: the node's own hidden `doc` widget. Both
+    // editors are views of ONE document, so an item switched off in the window is
+    // still off here.
+    docStore: {
+      get: () => node.widgets?.find((x) => x.name === 'doc')?.value ?? '',
+      set: (json) => {
+        const dw = node.widgets?.find((x) => x.name === 'doc');
+        if (!dw || dw.value === json) return;
+        dw.value = json;
+      },
+    },
     onEdited: () => pushToNode(node, pe),
     onBlur: () => pushToNode(node, pe),
     syncOnBlur: true,
@@ -154,6 +180,7 @@ app.registerExtension({
   async nodeCreated(node) {
     if (!PLV3_TYPES.has(node.comfyClass)) return;
     node.serialize_widgets = true;
+    hideDocWidget(node);
 
     const wrap = document.createElement('div');
     wrap.style.cssText = `display:flex;align-items:center;gap:6px;width:100%;
