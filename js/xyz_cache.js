@@ -89,6 +89,54 @@ const slotRef = (slot) => ({
   type: 'output',
 });
 
+// `clipspace/clipspace-painted-masked-123.png [input]` → the /view triple. This is
+// ComfyUI's "annotated filepath" format, the same one the backend hands to
+// folder_paths.get_annotated_filepath.
+function paintedRef(value) {
+  const raw = (value || '').trim();
+  if (!raw) return null;
+  const match = /^(.*?)\s*\[(\w+)\]$/.exec(raw);
+  const path = (match ? match[1] : raw).trim();
+  const type = match ? match[2] : 'input';
+  const cut = path.lastIndexOf('/');
+  return {
+    filename: cut > -1 ? path.slice(cut + 1) : path,
+    subfolder: cut > -1 ? path.slice(0, cut) : '',
+    type,
+  };
+}
+
+const refUrl = (ref) =>
+  api.apiURL(
+    `/view?filename=${encodeURIComponent(ref.filename)}` +
+      `&subfolder=${encodeURIComponent(ref.subfolder)}` +
+      `&type=${encodeURIComponent(ref.type)}`,
+  );
+
+// The edit parked on the CURRENT slot, if any.
+function currentEdit(node) {
+  const slot = node.widgets?.find((w) => w.name === 'slot')?.value;
+  if (!slot || slot === NO_SLOTS) return null;
+  return slotEdits(node)[slot] ?? null;
+}
+
+// Core's own on-node picture. `pasteFromClipspace` (the Mask Editor's save path)
+// sets `node.imgs`, and core's onDrawBackground then adds a `$$canvas-image-preview`
+// widget for it — a SECOND picture, which peeked out from under our own preview box.
+// Nothing removes that widget once `node.imgs` is cleared, so we remove it ourselves.
+const CORE_PREVIEW = '$$canvas-image-preview';
+
+function dropCorePreview(node) {
+  node.imgs = undefined;
+  node.imageIndex = null;
+  const index = node.widgets?.findIndex((w) => w.name === CORE_PREVIEW) ?? -1;
+  if (index > -1) {
+    node.widgets[index].onRemove?.();
+    node.widgets.splice(index, 1);
+  }
+  return index > -1;
+}
+
 const currentMtime = (node, slot) =>
   (node.__xyzSlots ?? []).find((s) => s.name === slot)?.mtime ?? null;
 
@@ -98,14 +146,20 @@ function slotEdits(node) {
   return node.properties.xyz_slot_edits;
 }
 
-// Make the node an image node pointing at `slot`, so the core menu shows up and
-// the editor knows which picture to open. We rely on `previewMediaType` (not
-// `node.imgs`) for image-node identity, and keep `node.imgs` cleared so core does
-// not draw a second picture on the node body behind our (opaque) DOM preview.
+// Make the node an image node, so the core menu shows up and the editor knows
+// which picture to open. We rely on `previewMediaType` (not `node.imgs`) for
+// image-node identity, and keep `node.imgs` cleared so core does not draw a second
+// picture on the node body behind our (opaque) DOM preview.
+//
+// Which picture: the slot's, unless the slot carries a painted edit — then that
+// one, so re-opening the editor CONTINUES the painting instead of throwing it away.
+// It is also what the node now outputs.
 function markImageNode(node, slot) {
   node.previewMediaType = 'image';
-  node.images = slot && slot !== NO_SLOTS ? [slotRef(slot)] : undefined;
-  node.imgs = undefined;
+  const edit = slot && slot !== NO_SLOTS ? slotEdits(node)[slot] : null;
+  const ref = edit ? paintedRef(edit.image) : null;
+  node.images = ref ? [ref] : slot && slot !== NO_SLOTS ? [slotRef(slot)] : undefined;
+  dropCorePreview(node);
 }
 
 // Drop edits whose slot image was replaced, then load the current slot's surviving
@@ -145,7 +199,6 @@ function onImageEdited(node, value) {
   else delete map[slot];
   // Defer: let the editor's own save finish before we reclaim node.images.
   setTimeout(() => {
-    node.imgs = undefined;
     markImageNode(node, slot);
     node.__xyzUpdatePreview?.();
     node.setDirtyCanvas(true, true);
@@ -384,6 +437,18 @@ app.registerExtension({
         return result;
       };
 
+      // Core re-adds its own picture widget from `node.imgs` on any draw that
+      // follows a clipspace paste, and clearing `node.imgs` alone does not take
+      // the widget away again. Strip it here, where every draw passes.
+      const onDrawBackground = node.onDrawBackground;
+      node.onDrawBackground = function (...args) {
+        const result = onDrawBackground?.apply(this, args);
+        if (this.imgs?.length || this.widgets?.some((w) => w.name === CORE_PREVIEW)) {
+          if (dropCorePreview(this)) this.setDirtyCanvas(true, true);
+        }
+        return result;
+      };
+
       const onConfigure = node.onConfigure;
       node.onConfigure = function (info) {
         const result = onConfigure?.apply(this, arguments);
@@ -394,6 +459,23 @@ app.registerExtension({
       node.__xyzUpdatePreview = () => {
         const slot = slotWidget?.value;
         const record = (node.__xyzSlots ?? []).find((s) => s.name === slot);
+
+        // Painted beats parked: what the node OUTPUTS is what it should show, or
+        // you paint on the Image Canvas and the node keeps showing the old picture.
+        const edit = currentEdit(node);
+        const painted = edit ? paintedRef(edit.image) : null;
+        if (painted) {
+          const showing = `painted:${edit.image}`;
+          if (node.__xyzShowing !== showing) {
+            img.src = refUrl(painted);
+            node.__xyzShowing = showing;
+          }
+          img.style.display = '';
+          empty.style.display = 'none';
+          node.__xyzFitPreview?.();
+          return;
+        }
+
         if (!slot || slot === NO_SLOTS || !record?.has_image) {
           img.style.display = 'none';
           img.removeAttribute('src');

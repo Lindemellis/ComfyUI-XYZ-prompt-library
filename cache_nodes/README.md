@@ -55,18 +55,23 @@ Read only offers slots that hold an image; Write also offers the empty ones you 
 Reading re-checks the file on every run, so editing a slot's image outside ComfyUI takes effect
 immediately rather than being served from the execution cache.
 
-## Painting a mask on the slot (Open in MaskEditor | Image Canvas)
+## Painting on the slot (Open in MaskEditor | Image Canvas)
 
 Right-click the **Read** node → **Open in MaskEditor | Image Canvas** to paint on the slot image
-with ComfyUI's own editor — the same one a Load Image node gives you. What you paint comes out of the
-node's **`mask`** output; the **`image`** output stays the live slot (painting on the Image Canvas is
-kept as editor state so you can keep refining, but it does not change the image output).
+with ComfyUI's own editor — the same one a Load Image node gives you.
 
-The edit is **remembered per slot**. Switch to another slot and the first slot's mask is parked;
-switch back and it is still there. The mask is bound to the picture it was painted on: if that slot's
-image is later **overwritten with a different one** (its mtime moves), the mask is dropped — it
-belonged to the old picture. This lives in the workflow, so it survives save/reload.
+**Painted beats parked.** Once you have painted, the node emits what you painted: `image` is the
+painted picture, `mask` is what you brushed as a mask, and `width`/`height` follow them — all three
+come out of the one file the editor saved, so they can never disagree. The node's own preview shows
+it too, and re-opening the editor continues from your painting rather than throwing it away. The
+slot on disk is **not** touched; painting never writes back to `output/xyz_cache/`.
+
+The edit is **remembered per slot**. Switch to another slot and the first slot's painting is parked;
+switch back and it is still there. It is bound to the picture it was painted on: if that slot's image
+is later **overwritten with a different one** (its mtime moves), the edit is dropped and the node
+goes back to emitting the live slot — the painting belonged to the old picture. This lives in the
+workflow, so it survives save/reload.
 
 Under the hood this is ComfyUI's stock editor, unchanged: it stores the layers as `clipspace-*.png`
-files in `input/clipspace/` and the node reads the mask from the painted file's alpha channel, exactly
-like Load Image. Nothing here re-implements the editor.
+files in `input/clipspace/`, and the node reads that file exactly like Load Image does — RGB for the
+image, `1 - alpha` for the mask. Nothing here re-implements the editor.

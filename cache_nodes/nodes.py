@@ -140,45 +140,64 @@ def read_slot(slot: str):
     return torch.from_numpy(array).unsqueeze(0), image.size
 
 
-def read_mask(image_ref: str, width: int, height: int):
-    """The MASK output.
+def open_painted(image_ref: str):
+    """The core Mask Editor's saved file, or None.
 
-    `image_ref` is the value the core Mask Editor writes into our hidden `image`
-    widget — a `clipspace/clipspace-painted-masked-<t>.png [input]` reference. The
-    editor stores the mask in that file's alpha channel, exactly like a Load Image
-    node, so the mask is `1 - alpha` (Load Image's own convention).
+    `image_ref` is the value the editor writes into our hidden `image` widget — a
+    `clipspace/clipspace-painted-masked-<t>.png [input]` reference. That file is
+    exactly what a Load Image node would read: the **painted** RGB, with the mask
+    in the alpha channel. Both of our outputs come out of it.
 
-    No reference (nothing painted, or the frontend dropped a stale edit) → an all-
-    zero mask the size of the slot image. A reference we cannot open (the clipspace
-    file was cleaned up) → the same, with a warning, never a crash.
+    No reference (nothing painted, or the frontend dropped a stale edit) → None.
+    A reference we cannot open (the clipspace file was cleaned up) → None with a
+    warning, never a crash.
     """
-    import torch
     from PIL import Image
-
-    blank = torch.zeros((1, height, width), dtype=torch.float32)
 
     ref = (image_ref or "").strip()
     if not ref:
-        return blank
+        return None
 
     try:
         import folder_paths
 
         path = folder_paths.get_annotated_filepath(ref)
-        with Image.open(path) as img:
-            if "A" not in img.getbands():
-                return blank
-            alpha = np.asarray(img.getchannel("A"), dtype=np.float32) / 255.0
+        image = Image.open(path)
+        image.load()  # the file handle closes here; the pixels stay
+        return image
     except Exception as exc:  # noqa: BLE001 - a missing/bad clipspace file is not fatal
-        print(f"[XYZ Cache] could not read the painted mask '{ref}': {exc}")
+        print(f"[XYZ Cache] could not read the painted image '{ref}': {exc}")
+        return None
+
+
+def to_image_tensor(image):
+    """A PIL image → the IMAGE tensor ComfyUI expects (1,H,W,3, 0..1)."""
+    import torch
+
+    array = np.asarray(image.convert("RGB"), dtype=np.float32) / 255.0
+    return torch.from_numpy(array).unsqueeze(0)
+
+
+def read_mask(painted, width: int, height: int):
+    """The MASK output, from `open_painted`'s image.
+
+    The editor stores the mask in the alpha channel, so the mask is `1 - alpha`
+    (Load Image's own convention). Nothing painted → an all-zero mask the size of
+    the emitted image.
+    """
+    import torch
+
+    blank = torch.zeros((1, height, width), dtype=torch.float32)
+
+    if painted is None or "A" not in painted.getbands():
         return blank
 
-    mask = 1.0 - alpha
-    tensor = torch.from_numpy(mask).unsqueeze(0)
+    alpha = np.asarray(painted.getchannel("A"), dtype=np.float32) / 255.0
+    tensor = torch.from_numpy(1.0 - alpha).unsqueeze(0)
 
-    # Option A: the IMAGE output is always the live slot, so the mask must line up
-    # with it. The editor works at the image's resolution, so they normally already
-    # match; resize only if some earlier edit was against a differently sized image.
+    # The mask and the image come out of the same file, so they normally already
+    # agree; this only catches the odd case where the painted image was dropped
+    # (unreadable RGB, say) and the slot's own size is what we emit.
     if tensor.shape[1] != height or tensor.shape[2] != width:
         tensor = torch.nn.functional.interpolate(
             tensor.unsqueeze(0), size=(height, width), mode="nearest"
@@ -237,9 +256,10 @@ class XYZCacheSlotRead:
     CATEGORY = "XYZNodes/Cache"
     DESCRIPTION = (
         "Reads back the image parked in a cache slot.\n"
-        "Right-click -> 'Open in MaskEditor | Image Canvas' to paint a mask on the "
-        "slot image (ComfyUI's own editor). The image output stays the live slot; "
-        "the mask output is whatever you painted."
+        "Right-click -> 'Open in MaskEditor | Image Canvas' to paint on the slot "
+        "image (ComfyUI's own editor). Once you have painted, the outputs are what "
+        "you painted -- image, mask and size all come from that one file; the slot "
+        "on disk is untouched, and overwriting it drops the painting."
     )
     FUNCTION = "execute"
     RETURN_TYPES = ("IMAGE", "MASK", "INT", "INT")
@@ -282,6 +302,18 @@ class XYZCacheSlotRead:
                 "No cache slot chosen. Write one with 'XYZ Cache Slot Write' first."
             )
         tensor, (width, height) = read_slot(slot)
-        mask = read_mask(image, width, height)
-        print(f"[XYZ Cache] read slot '{slot}' -> {width}x{height}")
+
+        # Painted beats parked: if the Mask Editor left an edit on this slot, THAT
+        # is the picture — image, mask and size all come out of the one file, so
+        # they cannot disagree. The slot on disk is untouched, and the frontend
+        # drops the edit as soon as the slot is overwritten (its mtime moves), so
+        # a later run falls back to the live slot on its own.
+        painted = open_painted(image)
+        if painted is not None:
+            tensor = to_image_tensor(painted)
+            height, width = tensor.shape[1], tensor.shape[2]
+
+        mask = read_mask(painted, width, height)
+        source = "painted" if painted is not None else "slot"
+        print(f"[XYZ Cache] read slot '{slot}' ({source}) -> {width}x{height}")
         return (tensor, mask, width, height)
