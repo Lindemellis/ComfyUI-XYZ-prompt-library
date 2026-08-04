@@ -33,10 +33,13 @@ def test_node_inputs(cls):
     assert spec["seed"][1]["control_after_generate"] is True
 
 
-def test_output_is_a_single_string():
-    assert PromptLibraryV3Node.RETURN_TYPES == ("STRING",)
+def test_outputs_are_prompt_and_plain():
+    # `plain` (T61) is the same document with the regions ignored; with no region in
+    # the text the two are simply identical.
+    assert PromptLibraryV3Node.RETURN_TYPES == ("STRING", "STRING")
+    assert PromptLibraryV3Node.RETURN_NAMES == ("prompt", "plain")
     out = PromptLibraryV3Node().execute(text="1girl, {a, b}.set{weight: 1.2}")
-    assert out == ("1girl, (a, b:1.2)",)
+    assert out == ("1girl, (a, b:1.2)", "1girl, (a, b:1.2)")
 
 
 def test_the_two_variants_compile_identically():

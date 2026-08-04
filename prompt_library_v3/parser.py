@@ -160,6 +160,11 @@ _KNOWN_FIELDS = {
     "schedule",
     "region",
 }
+#: Where `parse_config_seq` keeps the entries that were written WITHOUT a `key:`.
+#: A sentinel object rather than a string, so it can never collide with something
+#: the user typed. Only the region reads it — a bare leading `base` / `fill`.
+POSITIONAL = object()
+
 _KNOWN_REGION_FIELDS = {
     "kind",
     "mask",
@@ -763,7 +768,9 @@ class Parser:
                 body_span = (head.pos + 1, self.peek().pos)
                 close = self.expect(lx.RBRACKET)
                 if not isinstance(params, dict):
-                    raise self.error("region params must be key: value pairs", head.pos)
+                    # All positional: `[base]`, `[fill]` — the kind on its own, which
+                    # is the shortest legal header. region_from reads it back out.
+                    params = {POSITIONAL: params} if params else {}
                 region = self.region_from(params, head.pos)
                 decl = (head.pos, close.pos + 1)
             elif head.kind == lx.TEXT:
@@ -868,7 +875,14 @@ class Parser:
                 items.append(value)
         if not self.at(end):
             self.fail("unclosed config block", self.peek().pos)
-        return (pairs, spans) if pairs else (items, spans)
+        if pairs:
+            # Keep the positional entries instead of dropping them on the floor: a
+            # region header leads with a bare kind (`[fill, mask_weight: 0.3]`), and
+            # losing it made that a silent BASE region.
+            if items:
+                pairs[POSITIONAL] = items
+            return pairs, spans
+        return items, spans
 
     def parse_config_value(self):
         self._skip_ws()
@@ -897,6 +911,8 @@ class Parser:
     def settings_from(self, raw: dict, pos: int, spans: Spans | None = None) -> Settings:
         s = Settings()
         for key, value in raw.items():
+            if key is POSITIONAL:
+                continue  # `.set{}` has no positional entries; only a region does
             if key not in _KNOWN_FIELDS:
                 self.diags.warn(W07, f"unknown .set{{}} field {key!r}; ignored", pos)
                 continue
@@ -925,6 +941,9 @@ class Parser:
                     s.region = self.region_from({"kind": value}, pos)
                 elif isinstance(value, dict):
                     s.region = self.region_from(value, pos)
+                elif isinstance(value, list) and value:
+                    # `region: { fill }` — a block holding nothing but the bare kind.
+                    s.region = self.region_from({POSITIONAL: value}, pos)
                 else:
                     self.diags.warn(W08, "region must be a name or a block", pos)
                 if spans is not None and s.region is not None:
@@ -953,6 +972,8 @@ class Parser:
         r = Region()
         kind = None
         for key, value in raw.items():
+            if key is POSITIONAL:
+                continue
             if key not in _KNOWN_REGION_FIELDS:
                 self.diags.warn(W07, f"unknown region field {key!r}; ignored", pos)
                 continue
@@ -978,6 +999,20 @@ class Parser:
                 r.cond_weight = w if w is not None else 1.0
             elif key == "include_in_base":
                 r.include_in_base = _as_bool(value, self.diags, pos, False)
+        # A BARE leading kind: `[base, mask_weight: 0.5]`, `region: { fill }`.
+        # base and fill carry no value of their own, so they are written as a plain
+        # word — and the header always starts with the kind (spec §3.3). Without
+        # this the word is only a positional entry, and positional entries used to be
+        # dropped the moment a `key: value` joined them: `[fill, mask_weight: 0.3]`
+        # silently parsed as a BASE region.
+        if kind is None:
+            for word in raw.get(POSITIONAL) or []:
+                w = str(word).strip().lower()
+                if w in ("base", "fill", "mask", "imask"):
+                    kind = w
+                    break
+                self.diags.warn(W08, f"unknown region kind {word!r}; ignored", pos)
+
         # `region: { imask: 0 }` — infer the kind from what was written (spec §3.3).
         if kind is None:
             if r.mask is not None:
