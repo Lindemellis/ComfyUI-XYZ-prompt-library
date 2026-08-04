@@ -119,6 +119,66 @@ export function braceContextText(text) {
   return stack.length ? stack[stack.length - 1] : 'text';
 }
 
+/** Is the caret in the one place a region SEGMENT can start?
+ *
+ *  That is: directly inside a `[` that is itself directly inside the `[@region]: { … }`
+ *  block. Anything deeper is something else entirely and must not be offered the kind
+ *  list —
+ *
+ *      [@region]: { [|] }                    yes — a segment is being opened
+ *      [@region]: { [mask: [|]] }            no  — inside the rectangle
+ *      [@region]: { [base]: { [| } }         no  — inside a segment BODY (a library path)
+ *      [@region]: { [base]: { {[|]} } }      no  — deeper still
+ *
+ *  `braceContext` alone cannot answer this: it only balances `{ … }`, so every one of
+ *  those reads as 'region'. This walks brackets too and looks at the innermost two
+ *  openers — the top must be a `[`, and the one under it the region block itself. */
+export function regionSegmentSlot(text) {
+  const stack = [];
+  let inStr = false;
+  for (let i = 0; i < text.length; i++) {
+    const c = text[i];
+    if (c === '"' && text[i - 1] !== '\\') { inStr = !inStr; continue; }
+    if (inStr) continue;
+    if (c === '{') {
+      const pre = text.slice(0, i);
+      if (/\.set\s*$/.test(pre)) stack.push('set');
+      else if (/\[@region\]\s*:?\s*$/.test(pre)) stack.push('region');
+      else stack.push('text');
+    } else if (c === '[') {
+      stack.push('bracket');
+    } else if (c === '}' || c === ']') {
+      stack.pop();
+    }
+  }
+  return stack.length >= 2
+    && stack[stack.length - 1] === 'bracket'
+    && stack[stack.length - 2] === 'region';
+}
+
+/** The four region kinds, as the head of a segment.
+ *
+ *  The header is `[<kind>, <params>]` with the kind ALWAYS first: `base` and `fill` are
+ *  bare words, `mask` and `imask` carry their value. No invented `feather` — a default
+ *  nobody asked for is a line to delete. */
+function regionKinds(I) {
+  return [
+    ['base', 'region segment · the whole image',
+      'Everything outside any region, plus this content. Written first in the block.',
+      `base]: { \${0} }`],
+    ['mask', 'region segment · a rectangle',
+      'mask: [x1, x2, y1, y2] — 0–1 fractions, or pixels of the 512 canvas',
+      `mask: [\${1:0}, \${2:0.5}, \${3:0}, \${4:1}]]: { \${0} }`],
+    ['imask', 'region segment · an attached mask',
+      'imask: i is the CLIP ATTACH ORDER (XYZ Attach Masks mask_1 = IMASK(0)), '
+        + 'not the Mask Editor’s output slot number',
+      `imask: \${1:0}]: { \${0} }`],
+    ['fill', 'region segment · whatever no other region covers',
+      'Compiles to FILL() — the complement of every other mask. Only in couple mode.',
+      `fill]: { \${0} }`],
+  ];
+}
+
 /** The `[@schedule]` / `[@region]` blocks, and — inside a region — its segments.
  *
  *  These are snippets, not plain text: the block's shape is the whole point, and typing
@@ -133,26 +193,24 @@ function specialBlocks(monaco, model, position, range, needle, ctx) {
   const I = `${indent}    `;
 
   const items = ctx === 'region'
-    ? [
-      ['@imask', 'region segment · an attached mask',
-        'imask: i is the CLIP ATTACH ORDER, not the Mask Editor’s output slot number',
-        `imask: \${1:0}, feather: \${2:12}]: {\n${I}    \${3:red dress},\n${I}}`],
-      ['@mask', 'region segment · a rectangle',
-        'mask: [x1, x2, y1, y2] — 0–1 fractions or pixels',
-        `mask: [\${1:0}, \${2:0.5}, \${3:0}, \${4:1}], feather: \${5:12}]: {\n${I}    \${6:red dress},\n${I}}`],
-    ]
+    ? regionKinds(I)
     : [
       ['@schedule', 'schedule block',
         'Each entry lives in its own slice of the run: `0 - 0.3: closed eyes`',
         `@schedule]: {\n${I}\${1:0} - \${2:0.3}: \${3:closed eyes},\n${I}\${2:0.3} - 1: \${4:open eyes},\n${indent}}`],
+      // A skeleton, not a demo: no sample text to delete, no invented `feather`,
+      // and every imask index is a tab stop — those are the two numbers you always
+      // change, and they used to be the only things you could NOT tab to.
       ['@region', 'region block',
-        'base is everything; each segment adds the ambient text plus its own content',
-        `@region]: {\n${I}base: { \${1:2girls} }\n\n${I}[imask: 0, feather: 12]: {\n${I}    \${2:red dress},\n${I}}\n\n${I}fill: { \${3:detailed background} }\n${indent}}`],
+        'base is everything; each segment adds the ambient text plus its own content. imask: i is the CLIP ATTACH ORDER',
+        // One header shape everywhere: `[<kind>, <params>]`, the kind first.
+        `@region]: {\n${I}[base]: { \${1} }\n\n${I}[imask: \${2:0}]: { \${3} }\n\n${I}[imask: \${4:1}]: { \${5} }\n\n${I}[fill]: { \${0} }\n${indent}}`],
     ];
 
+  const want = needle.toLowerCase().replace(/^@/, '');
   return items
-    .filter(([label]) => label.toLowerCase().includes(needle.toLowerCase().replace(/^@/, '')))
-    .map(([label, detail, doc, insertText]) => ({
+    .filter(([label]) => label.toLowerCase().includes(want))
+    .map(([label, detail, doc, insertText], i) => ({
       label,
       kind: monaco.languages.CompletionItemKind.Struct,
       detail,
@@ -160,7 +218,10 @@ function specialBlocks(monaco, model, position, range, needle, ctx) {
       insertText,
       insertTextRules: monaco.languages.CompletionItemInsertTextRule.InsertAsSnippet,
       range: r,
-      sortText: `0${label}`,   // above the library paths: they are what `[` is FOR here
+      // Above the library paths: they are what `[` is FOR here. Ordered as written
+      // (base, mask, imask, fill) rather than alphabetically — that is the order they
+      // go in a block, and `base` first is the one you almost always want.
+      sortText: `0${i}${label}`,
     }));
 }
 
@@ -178,11 +239,20 @@ export async function provideCompletions(monaco, model, position, { onInsertBloc
   };
 
   if (ctx.kind === 'path') {
-    // Inside a `[@region]: { … }` a `[` opens a SEGMENT, not a library path — offer
-    // `[imask …]` / `[mask …]` and nothing else. Library groups belong in a segment's
-    // BODY, which is 'text'.
+    // Inside a `[@region]: { … }` a `[` opens a SEGMENT, not a library path — offer the
+    // four kinds (base / mask / imask / fill) and nothing else. Library groups belong in
+    // a segment's BODY, which is 'text'.
     const needle = ctx.word.toLowerCase();
     if (brace === 'region') {
+      // ...but only at the block's own level. Inside a `mask: [ … ]` rectangle, or any
+      // other nested bracket, a kind is not what comes next — and offering one there
+      // would let `[mask: [ba` complete to a second `base]: { }` inside the rect.
+      if (!regionSegmentSlot(model.getValueInRange({
+        startLineNumber: 1, startColumn: 1,
+        endLineNumber: position.lineNumber, endColumn: position.column,
+      }))) {
+        return { suggestions: [] };
+      }
       return { suggestions: specialBlocks(monaco, model, position, range, needle, brace) };
     }
     const groups = await libraryPaths();

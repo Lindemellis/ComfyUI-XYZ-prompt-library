@@ -106,7 +106,7 @@ so gaps and overlaps cannot exist. The editor's slider moves both sides at once.
 
 ```
 [@region]: {
-    base: { 2girls, yuri, side-by-side }
+    [base]: { 2girls, yuri, side-by-side }
 
     [imask: 0, feather: 12, include_in_base: true]: {
         (illyasviel von einzbern:1.15), blonde hair,
@@ -116,9 +116,27 @@ so gaps and overlaps cannot exist. The editor's slider moves both sides at once.
         (miyu edelfelt:1.15), black hair,
     }
 
-    fill: { detailed background, bokeh }
+    [fill]: { detailed background, bokeh }
 }
 ```
+
+**The header is always `[<kind>, <params>]`, and the kind always comes first.** `base` and
+`fill` are bare words (they carry no value of their own); `mask: [x1, x2, y1, y2]` and
+`imask: i` are the kind and its value in one. Parameters follow, in any order:
+
+```
+[base, mask_weight: 0.5]        [fill, cond_weight: 0.8]
+[imask: 0, feather: 12]         [mask: [0, 0.5, 0, 1], mask_weight: 0.4]
+```
+
+The bare forms `base: { … }` / `fill: { … }` still parse — old documents keep working — but
+everything the detail page writes uses the bracketed shape, so a header no longer changes
+form the moment you touch a slider.
+
+Inside a `[@region]` block, typing `[` offers the four kinds — **base, mask, imask, fill** — and
+completes the whole segment head for you. It only fires where a segment can actually start: not
+inside a `mask: [ … ]` rectangle, and not inside a segment's body (where `[` means a library
+path, as everywhere else).
 
 Two rules that are easy to get wrong, and both are deliberate:
 
@@ -136,8 +154,32 @@ base too); on a `base` group it would say nothing, so the detail page hides the 
 A region asking for it also *creates* the base segment when no `base` group was written.
 
 `region_mode` on the node picks the backend: `couple` (attention couple) or `mask` (latent
-mask, `AND` + `MASK`). `kind` is *inferred* — a `mask:` field means it is a mask region, an
-`imask:` field means it is an imask region. `base` and `fill` are bare words.
+mask, `AND` + `MASK`). When the kind is not stated it is *inferred* — a `mask:` field means a
+mask region, an `imask:` field means an imask region, and nothing means `base`.
+
+### The `plain` output
+
+The node has a second output, **`plain`**: the same document with the region syntax **ignored**.
+The base, every masked region and the fill all land in **one** prompt, in the order they were
+written — no `COUPLE`, no `AND`, no `MASK` / `IMASK` / `FILL`. Everything else survives:
+schedules, weights, shuffle, `random_select`, LoRAs.
+
+```
+prompt:  FILL() detailed background
+         COUPLE 2girls
+         COUPLE IMASK(0, 1) FEATHER(12 12 12 12) blonde hair
+         COUPLE IMASK(1, 1) black hair
+
+plain:   2girls, blonde hair, black hair, detailed background
+```
+
+This is **not** "the base region": a base region is one region among several, which you write
+yourself and can weight and schedule like any other. `plain` has no regions in it at all. Use it
+for whatever wants one ordinary prompt — a negative, a second pass, a refiner, a model with no
+regional support — without keeping a second copy of the text in sync by hand.
+
+Both outputs compile from the same document with the same seed, so a `shuffle` picks the same
+words in both.
 
 ### Library blocks
 
@@ -184,6 +226,27 @@ Three panes, all resizable, all in a floating ComfyUI window.
   panel per group, a range slider for a schedule, a region panel, and a unified switch list for
   every library block. Each control rewrites **exactly the characters it owns**, so your blank
   lines and indentation survive an edit, and `Ctrl+Z` undoes a slider drag like it undoes typing.
+  A group card's **⚙ gear and its fold arrow are independent** — you can read a region's mask
+  settings without unrolling its whole prompt list.
+
+### Switching items off
+
+Every item has a switch: a tag, a LoRA, a nested group, a region segment, a schedule entry.
+Switch one off and it **leaves the prompt but keeps its place** — it disappears from the text
+(no marker, no commented-out line, nothing to trip over) and comes back **exactly where it was**
+when you switch it on again. Nothing around it moves, and no other item is renumbered, so a
+region's `imask` indices stay put.
+
+That works because the text is not the whole story any more: the node also carries a
+**document** — the same tree, plus a stable id and an on/off flag per item — in a hidden widget
+that is saved with your workflow. The text is what the document's *enabled* items render to, and
+it is still the thing that compiles, so a document you never touched is byte-for-byte the text
+you typed.
+
+> **Library blocks are the exception**, on purpose. An item inside a `[path]: { … }` block is
+> enabled by *being in the block*, so its switch still removes it from the block and drops it
+> into the group's disabled list at the bottom (§5.2). That is the behaviour described under
+> [The library](#the-library), and it is unchanged.
 
 **A broken document still works.** The editor parses in recovering mode: an unclosed brace is
 reported (E03, with a squiggle and a glyph in the margin) and *skipped*, and everything around

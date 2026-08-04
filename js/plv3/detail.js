@@ -9,6 +9,18 @@
 // The one hazard a span brings is staleness. Each AST snapshot is stamped with the
 // Monaco version it was parsed from; an edit computed against older text is dropped
 // rather than applied to characters that have since moved.
+//
+// ITEM SWITCHES. The text is no longer the whole truth: it is what the DOCUMENT's
+// enabled items render to. Every item — a region segment, a schedule entry, a nested
+// group, a single tag — has a switch, and switching it off takes it out of the text
+// while the document keeps it, in place. Switching it back on puts it back exactly
+// where it was, and nothing else moves. (A library block's rows are the exception and
+// keep their own switch: an item there is enabled by BEING in the text, so turning one
+// off drops it into the group's disabled strip — see renderLibraryItems.)
+//
+// The AST (parsed from the rendered text) and the document line up child for child,
+// with the document holding the extra, switched-off ones: `indexDocument` walks the
+// two in step to pair them up.
 
 import {
   T, button, div, dualSlider, el, field, fmt, iconButton, input, numberInput,
@@ -199,6 +211,50 @@ function chip(label, control) {
   return c;
 }
 
+/** Pair the AST up with the document.
+ *
+ *  Both describe the same text, so their children line up in order — except that the
+ *  document also holds the switched-off ones, which are in no text and therefore in no
+ *  AST. Walking the document's children and consuming an AST child only for the
+ *  enabled ones keeps the two in step.
+ *
+ *  Returns `byNode` (ast node -> doc node, for its switch) and `parked` (ast group ->
+ *  the off items that belong inside it, with the index they sit at).
+ */
+function indexDocument(docRoot, astRoot) {
+  const byNode = new Map();
+  const parked = new Map();
+  if (!docRoot || !astRoot) return { byNode, parked };
+
+  const walk = (d, a) => {
+    byNode.set(a, d);
+    const astKids = a.children || [];
+    const off = [];
+    let i = 0;
+    for (const dc of d.children || []) {
+      if (dc.enabled === false) {
+        off.push({ doc: dc, at: i });
+        continue;
+      }
+      const ac = astKids[i];
+      i += 1;
+      if (ac) walk(dc, ac);
+    }
+    if (off.length) parked.set(a, off);
+  };
+  walk(docRoot, astRoot);
+  return { byNode, parked };
+}
+
+/** What a switched-off item should be called in the list.
+ *
+ *  Its raw source is all we have — it is not in the text, so there is no span to read
+ *  and no AST node to ask. One line, trimmed, and short enough not to blow the row up. */
+function parkedLabel(raw) {
+  const flat = String(raw || '').replace(/\s+/g, ' ').trim();
+  return flat.length > 64 ? `${flat.slice(0, 63)}…` : (flat || '(empty)');
+}
+
 // --- the pane ---------------------------------------------------------------
 
 export class DetailPane {
@@ -232,6 +288,10 @@ export class DetailPane {
     this.links = links;
     this.emptyText = emptyText;
     this.ast = null;
+    // The structured document that goes with `ast` — the on/off switches live here,
+    // and so do the items that are off (they are in no text, so in no AST).
+    this.doc = null;
+    this.docIndex = { byNode: new Map(), parked: new Map() };
     this.version = 0;
     this.polarity = 'positive';
     this.compiled = null;
@@ -325,7 +385,8 @@ export class DetailPane {
     this._mem = null;
   }
 
-  setAst(payload, node, { version }) {
+  setAst(payload, node, { version, doc = null }) {
+    this.doc = doc;
     // A different node is a different document with its own remembered weights — drop the
     // cache so the next read reloads from that node's store.
     if (node !== this._memNode) { this._memNode = node; this._mem = null; }
@@ -447,22 +508,46 @@ export class DetailPane {
     this.edit([{ span: [start, end], text: '' }]);
   }
 
+  /** The KIND token — always the first thing in a region header.
+   *
+   *  `base` and `fill` carry no value of their own, so they are bare words;
+   *  `mask` and `imask` already are `key: value`. Writing the kind explicitly is
+   *  now safe *because* it comes first and is the whole statement of intent — the
+   *  old code omitted it for `base` (leaving `[mask_weight: 0.5]`, a header that
+   *  only says what it is by inference) precisely to dodge the trap where a
+   *  trailing `kind: base` next to a `mask:` pinned the region to base. */
+  regionKindToken(kind, r = {}) {
+    if (kind === 'mask') {
+      const m = r.mask || [0, 0.5, 0, 1];
+      return `mask: [${m.map(fmt).join(', ')}]`;
+    }
+    if (kind === 'imask') return `imask: ${Math.trunc(r.imask ?? 0)}`;
+    return kind;   // base / fill — a bare word
+  }
+
   setRegionField(group, name, value) {
     const s = group.spans;
     const f = s.region_fields[name];
     if (f) return this.edit([{ span: f.value, text: value }]);
     if (s.region_body) {
-      const empty = s.region_body[0] === s.region_body[1];
-      const at = s.region_body[0];
-      return this.edit([{ span: [at, at], text: empty ? `${name}: ${value}` : `${name}: ${value}, ` }]);
+      const src = this.pane.text();
+      const [bodyStart, bodyEnd] = s.region_body;
+      const body = src.slice(bodyStart, bodyEnd);
+      if (!body.trim()) {
+        return this.edit([{ span: [bodyStart, bodyEnd], text: `${name}: ${value}` }]);
+      }
+      // APPEND. Inserting at the start of the body is what pushed every new field in
+      // front of the kind — you set a weight and the header became
+      // `[mask_weight: 0.5, imask: 0]`, with the kind no longer first.
+      let at = bodyEnd;
+      while (at > bodyStart && /\s/.test(src[at - 1])) at -= 1;
+      const comma = src.slice(bodyStart, at).trimEnd().endsWith(',') ? '' : ',';
+      return this.edit([{ span: [at, at], text: `${comma} ${name}: ${value}` }]);
     }
-    // `region: base` is a bare word with nowhere to put a field — promote it to a block
-    // that can hold one, keeping the kind it already had. `kind` is written only when it
-    // cannot be inferred: an explicit `kind: base` next to a `mask:` would OVERRIDE the
-    // inference and pin the region to base, which is exactly the bug that made the kind
-    // dropdown impossible to change.
+    // A bare `base` / `fill` has nowhere to put a field — promote it to a bracketed
+    // header, keeping the kind in front of the new field.
     const kind = group.settings.region?.kind || 'base';
-    const head = kind === 'base' ? '' : `kind: ${kind}, `;
+    const head = `${this.regionKindToken(kind, group.settings.region || {})}, `;
     if (s.region_decl) {
       const open = s.region_form === 'block' ? '[' : '{';
       const close = s.region_form === 'block' ? ']' : '}';
@@ -488,12 +573,8 @@ export class DetailPane {
     const r = group.settings.region || {};
     const s = group.spans;
 
-    const parts = [];
-    if (kind === 'mask') {
-      const m = r.mask || [0, 0.5, 0, 1];
-      parts.push(`mask: [${m.map(fmt).join(', ')}]`);
-    }
-    if (kind === 'imask') parts.push(`imask: ${Math.trunc(r.imask ?? 0)}`);
+    // The kind, first and always — `[base, mask_weight: 0.5]`, `[imask: 0, feather: 12]`.
+    const parts = [this.regionKindToken(kind, r)];
     // feather is an edge — only meaningful for a bounded region, not full-image base/fill.
     if ((kind === 'mask' || kind === 'imask') && r.feather) {
       parts.push(`feather: ${Math.trunc(r.feather)}`);
@@ -512,13 +593,13 @@ export class DetailPane {
       parts.push('include_in_base: true');
     }
 
-    // `fill` with extra fields still needs to say so — there is nothing to infer it from.
-    if (kind === 'fill' && parts.length) parts.unshift('kind: fill');
-
     const block = s.region_form === 'block';
     const open = block ? '[' : '{';
     const close = block ? ']' : '}';
-    const text = parts.length ? `${open}${parts.join(', ')}${close}` : kind;
+    // One shape for every header: `[<kind>, <params>]`. A kind on its own used to be
+    // written as a naked word (`base:`), so the header changed shape as soon as you
+    // touched a slider; now `[base]` simply grows a field.
+    const text = `${open}${parts.join(', ')}${close}`;
 
     if (s.region_decl) return this.edit([{ span: s.region_decl, text }]);
     this.setField(group, 'region', text);
@@ -631,6 +712,11 @@ export class DetailPane {
       return;
     }
 
+    // Pair the tree up with the document so every row can find its switch, and so the
+    // switched-off items (which are in no text and therefore in no tree) can be drawn
+    // back into the list at the position the document remembers for them.
+    this.docIndex = indexDocument(this.doc?.root, this.ast);
+
     // Render the LAST GOOD tree against the text it was parsed from, not the broken
     // text on screen — slicing spans out of text they do not describe would show
     // gibberish in every box.
@@ -639,8 +725,7 @@ export class DetailPane {
 
     const tree = div(`min-width:0;${this.broken ? 'opacity:.45;pointer-events:none;' : ''}`);
     if (this.nav) this.renderNav(src);
-    for (const child of this.ast.children) this.renderNode(child, tree, 0, src, true);
-    if (!this.ast.children.length) {
+    if (!this.renderChildren(this.ast, tree, src, { root: true })) {
       tree.append(div(`color:${T.muted};font-size:${T.fs.label};padding:6px;`,
         'Empty — type something in the editor.'));
     }
@@ -689,6 +774,104 @@ export class DetailPane {
    *  every group card (the card is the nesting), so it says nothing about where the node
    *  sits in the tree. `root` is the fact that actually matters to a library block: is
    *  this one of the document's own top-level blocks, or is it nested inside another? */
+  // --- item switches ---
+  //
+  // A switch is one text edit: the server flips the flag in the document and hands
+  // back the characters that changed, so it goes down the same span-edit path as
+  // every other control — one undo step, the version stamp still guarding it.
+
+  /** How a switch should look at this node's level.
+   *
+   *  A card holds things and gets the bigger switch, tinted with the card's own kind
+   *  colour (library pink, region mauve, schedule orange) so it reads as "this whole
+   *  block"; a single prompt gets the small neutral one. Without the grading a
+   *  document is a column of identical switches that all look equally consequential. */
+  switchStyle(node) {
+    if (node?.kind !== 'group' || weightedItem(node)) {
+      return { size: 'sm', color: T.good };
+    }
+    return { size: 'md', color: groupIcon(node).color };
+  }
+
+  /** The switch for one AST node, or null when there is no document to switch in
+   *  (an older workflow whose first sync has not come back yet). */
+  itemSwitch(node) {
+    const entry = this.docIndex.byNode.get(node);
+    if (!entry || !entry.id) return null;
+    const sw = toggle(true, () => this.toggleItem(entry.id, false), this.switchStyle(node));
+    sw.title = 'Switch this item off — it leaves the prompt but stays here';
+    sw.style.flexShrink = '0';
+    return sw;
+  }
+
+  /** A switched-off item, drawn where the document says it sits. */
+  renderParked(entry, host, depth) {
+    const row = div(`display:flex;gap:8px;align-items:center;min-width:0;
+      padding:2px 0 2px ${depth * 14}px;opacity:.55;`);
+    // A parked node is not in the tree, so its level comes from the document: a group
+    // that still has children is a card, anything else is a single prompt.
+    const isCard = entry.doc.kind === 'group' && !entry.doc.opaque;
+    const sw = toggle(false, () => this.toggleItem(entry.doc.id, true),
+      { size: isCard ? 'md' : 'sm', color: T.good });
+    sw.title = 'Switch this item back on, in place';
+    sw.style.flexShrink = '0';
+    row.append(sw);
+    row.append(div(`flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;
+      white-space:nowrap;font-size:${T.fs.body};color:${T.muted};
+      font-style:italic;`, parkedLabel(entry.doc.raw)));
+    row.append(div(`font-size:${T.fs.micro};color:${T.muted};flex-shrink:0;`, 'off'));
+    host.append(row);
+  }
+
+  async toggleItem(id, enabled) {
+    if (this.broken) {
+      console.warn('[PLv3] switch refused: the document does not parse');
+      return;
+    }
+    let body;
+    try {
+      const res = await fetch('/xyz/plv3/doc/toggle', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          doc: this.doc, text: this.pane.text(), id, enabled,
+        }),
+      });
+      body = await res.json();
+      if (!res.ok || !body.ok) throw new Error(body.error || `HTTP ${res.status}`);
+    } catch (err) {
+      console.error('[PLv3] could not switch the item', err);
+      toast('Could not switch that item.');
+      return;
+    }
+    // The document first: the text edit below triggers a lint, and the sync that
+    // rides with it must already see the new state or it would reconcile the item
+    // straight back on.
+    this.doc = body.doc;
+    this.pane.setDoc(body.doc);
+    this.edit([{ span: body.span, text: body.insert }]);
+  }
+
+  /** Render a group's children WITH the switched-off ones back in their places.
+   *
+   *  `root` marks the document's own top level, where a block is a top-level block —
+   *  which is what earns it a preset bar (`depth` is an INDENT, not tree depth: it
+   *  restarts at 0 inside every card, so it cannot answer that question). */
+  renderChildren(group, host, src, { depth = 0, root = false } = {}) {
+    const off = this.docIndex.parked.get(group) || [];
+    const at = new Map();
+    for (const entry of off) {
+      if (!at.has(entry.at)) at.set(entry.at, []);
+      at.get(entry.at).push(entry);
+    }
+    const kids = group.children || [];
+    for (let i = 0; i <= kids.length; i += 1) {
+      for (const entry of at.get(i) || []) this.renderParked(entry, host, depth);
+      if (i < kids.length) this.renderNode(kids[i], host, depth, src, root);
+    }
+    return kids.length + off.length;
+  }
+
   renderNode(node, host, depth, src, root = false) {
     // A `[@schedule]` entry is a time range and a thing that lives in it — not a group.
     // `0.65 - 1: open eyes` has no braces at all; the Group around it is the parser's,
@@ -716,6 +899,10 @@ export class DetailPane {
 
     const bar = div(`display:flex;align-items:center;gap:8px;padding:5px 10px;
       background:${T.bg2};border-bottom:1px solid ${T.line};`);
+    // A schedule entry is an item like any other: it can be switched off, and its
+    // slot in the block stays free for it.
+    const sw = this.itemSwitch(entry);
+    if (sw) bar.append(sw);
     bar.append(div(`font-size:${T.fs.micro};color:${T.time};flex-shrink:0;`, '◷'));
     const sl = dualSlider(entry.settings.schedule || [0, 1],
       (iv) => this.scheduleEdit(entry, iv), { color: T.time, step: settings().scheduleStep });
@@ -726,8 +913,7 @@ export class DetailPane {
     const body = div('padding:6px 8px;min-width:0;');
     if (entry.implicit) {
       // The braces are not in the text: render what IS there — the item(s).
-      for (const child of entry.children) this.renderItem(child, body, 0, src);
-      if (!entry.children.length) {
+      if (!this.renderChildren(entry, body, src)) {
         body.append(div(`color:${T.muted};font-size:${T.fs.label};`, 'empty'));
       }
     } else {
@@ -753,6 +939,8 @@ export class DetailPane {
     const text = src.slice(body.span[0], body.span[1]);
 
     const row = div(`display:flex;gap:8px;align-items:center;min-width:0;padding:2px 0 2px ${depth * 14}px;`);
+    const sw = this.itemSwitch(node);
+    if (sw) row.append(sw);
     const box = textbox(text, (v) => this.edit([{ span: body.span, text: cleanItem(v) }]),
       { ac: body.kind !== 'lora' });
     if (body.kind === 'lora') { box.style.color = '#94e2d5'; box.style.fontFamily = T.mono; }
@@ -782,8 +970,14 @@ export class DetailPane {
 
     const folded = this.collapsed.has(this.collapseKey(group));
 
+    // Folded AND settings shut is the only case with nothing under the header.
     const head = div(`display:flex;align-items:center;gap:8px;padding:6px 8px;
-      background:${T.bg2};min-width:0;` + (folded ? '' : `border-bottom:1px solid ${T.line};`));
+      background:${T.bg2};min-width:0;`
+      + (folded && !open ? '' : `border-bottom:1px solid ${T.line};`));
+    // The switch comes first — before the fold arrow — so a column of cards has all
+    // its switches on one line, like the item rows below them.
+    const sw = this.itemSwitch(group);
+    if (sw) head.append(sw);
     head.append(iconButton(folded ? '▸' : '▾', folded ? 'Expand' : 'Collapse',
       () => this.toggleCollapsed(group)));
     head.append(div(`color:${color};flex-shrink:0;`, icon));
@@ -806,26 +1000,22 @@ export class DetailPane {
       head.append(div(`font-size:${T.fs.micro};color:${T.muted};font-family:${T.mono};
         flex-shrink:0;`, active.join(' · ')));
     }
+    // The gear and the chevron are INDEPENDENT: the chevron folds the item list, the
+    // gear shows the settings. Opening settings used to force the card open too, so
+    // you could not look at a region's mask without unrolling its whole prompt list —
+    // and on a folded card the first click only unrolled it, the second showed the
+    // settings.
     const gear = iconButton('⚙', open ? 'Hide settings' : 'Settings', () => {
       if (open) this.expanded.delete(key); else this.expanded.add(key);
-      // A collapsed card cannot show its settings panel — opening one implies opening
-      // the card.
-      this.collapsed.delete(this.collapseKey(group));
-      saveCollapsed(this.collapsed);
       this.render();
     });
     if (open) gear.style.color = T.accent;
     head.append(gear);
     card.append(head);
 
-    if (folded) {
-      host.append(card);
-      return;
-    }
-
     // A `[@schedule]` entry's range is its defining property — it gets a slider right
     // in the header, not buried behind the gear. It is a setting, never a name.
-    if (scheduleBar && group.spans.schedule_form === 'block' && group.settings.schedule) {
+    if (!folded && scheduleBar && group.spans.schedule_form === 'block' && group.settings.schedule) {
       const bar = div(`display:flex;align-items:center;gap:8px;padding:4px 10px;
         background:${T.bg1};border-bottom:1px solid ${T.line};`);
       bar.append(div(`font-size:${T.fs.micro};color:${T.time};flex-shrink:0;`, '◷'));
@@ -837,9 +1027,17 @@ export class DetailPane {
     }
 
     if (open) {
-      const panel = div(`padding:8px 10px;background:${T.bg1};border-bottom:1px solid ${T.line};`);
+      const panel = div(`padding:8px 10px;background:${T.bg1};`
+        + (folded ? '' : `border-bottom:1px solid ${T.line};`));
       this.renderSettings(group, panel, active);
       card.append(panel);
+    }
+
+    // Folded stops the ITEM LIST, and only that — the settings panel above is drawn
+    // either way, so the gear works on a folded card without unrolling it.
+    if (folded) {
+      host.append(card);
+      return;
     }
 
     if (group.header) this.renderLibraryPanel(group, card, src, root);
@@ -851,11 +1049,8 @@ export class DetailPane {
       // enabled ones as plain rows and the disabled ones as a separate strip below
       // gave the enabled ones no way to be turned off at all.
       this.renderLibraryItems(group, kids, src);
-    } else {
-      for (const child of group.children) this.renderNode(child, kids, 0, src);
-      if (!group.children.length) {
-        kids.append(div(`color:${T.muted};font-size:${T.fs.label};`, 'empty'));
-      }
+    } else if (!this.renderChildren(group, kids, src)) {
+      kids.append(div(`color:${T.muted};font-size:${T.fs.label};`, 'empty'));
     }
     card.append(kids);
     host.append(card);
@@ -889,10 +1084,13 @@ export class DetailPane {
         enabledRefs.add(child.header);
         const refItem = refByPath.get(child.header) || null;
         const wrap = div('display:flex;gap:8px;align-items:flex-start;min-width:0;');
+        // One prompt (a ref to another block, but still one row) — the small switch,
+        // same as every other row in the list. It used to be a scale(.8) of the big
+        // one, which is the same idea done with a transform.
         const sw = toggle(true, () =>
-          this.edit([{ span: this.removalSpan(child.span, src), text: '' }]));
-        sw.style.transform = 'scale(.8)';
-        sw.style.marginTop = '10px';
+          this.edit([{ span: this.removalSpan(child.span, src), text: '' }]),
+          { size: 'sm' });
+        sw.style.marginTop = '11px';
         wrap.append(sw);
         const box = div('flex:1;min-width:0;');
         this.renderNode(child, box, 0, src);
@@ -1130,8 +1328,7 @@ export class DetailPane {
         ? `(${entry.text}:${fmt(w)})` : entry.text;
       const [at, laid] = this.insertionPoint(group, src, written);
       this.edit([{ span: [at, at], text: laid }]);
-    });
-    sw.style.transform = 'scale(.8)';
+    }, { size: 'sm' });   // one prompt = the small switch, like every other item row
     row.append(sw);
 
     if (on) {

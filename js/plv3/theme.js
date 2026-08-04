@@ -120,11 +120,39 @@ export function numberInput(value, { step = 1, min = null, placeholder = '' } = 
   return i;
 }
 
-export function toggle(on, onChange) {
-  const track = div(`width:34px;height:18px;border-radius:9px;flex-shrink:0;cursor:pointer;
-    position:relative;transition:background .15s;background:${on ? T.good : T.bg4};`);
-  const knob = div(`position:absolute;top:2px;left:${on ? 18 : 2}px;width:14px;height:14px;
-    border-radius:7px;background:${on ? T.bg0 : T.label};transition:left .15s;`);
+/** Switch sizes. A document is a tree, and a column of identical switches down the
+ *  left edge says nothing about what each one turns off — so they are graded by what
+ *  they switch:
+ *
+ *    md  a CARD — a block, a region segment, a schedule entry: something with
+ *        contents. Tinted with the card's own kind colour.
+ *    sm  a single prompt — one tag, one LoRA, one library row.
+ *
+ *  `lg` is the original size, kept for the settings panel's form switches (shuffle,
+ *  in-base), which are not enable switches at all and should not read as one. */
+export const SWITCH = {
+  lg: { w: 34, h: 18, knob: 14 },
+  md: { w: 26, h: 14, knob: 10 },
+  sm: { w: 20, h: 11, knob: 7 },
+};
+
+/**
+ * @param size  a key of SWITCH — the level this switch sits at
+ * @param color the ON colour. Cards pass their own kind colour (library pink,
+ *              region mauve, schedule orange), so the switch says *what* it turns
+ *              off, not just that it is on.
+ */
+export function toggle(on, onChange, { size = 'lg', color = T.good } = {}) {
+  const s = SWITCH[size] || SWITCH.lg;
+  const pad = (s.h - s.knob) / 2;
+  const right = s.w - s.knob - pad;
+
+  const track = div(`width:${s.w}px;height:${s.h}px;border-radius:${s.h / 2}px;flex-shrink:0;
+    cursor:pointer;position:relative;transition:background .15s;
+    background:${on ? color : T.bg4};`);
+  const knob = div(`position:absolute;top:${pad}px;left:${on ? right : pad}px;
+    width:${s.knob}px;height:${s.knob}px;border-radius:${s.knob / 2}px;
+    background:${on ? T.bg0 : T.label};transition:left .15s;`);
   track.append(knob);
 
   // Flip on click, not when the round trip that re-renders the row eventually lands.
@@ -132,8 +160,8 @@ export function toggle(on, onChange) {
   // of a second reads as "the click did not register".
   track.onclick = () => {
     const next = !on;
-    track.style.background = next ? T.good : T.bg4;
-    knob.style.left = next ? '18px' : '2px';
+    track.style.background = next ? color : T.bg4;
+    knob.style.left = `${next ? right : pad}px`;
     knob.style.background = next ? T.bg0 : T.label;
     onChange(next);
   };
