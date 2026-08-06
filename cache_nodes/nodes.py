@@ -125,8 +125,21 @@ def write_slot(slot: str, image) -> Path:
     return target
 
 
-def read_slot(slot: str):
-    import torch
+#: The `alpha` widget's values. `drop` is Load Image's own convention and stays the
+#: default: an IMAGE with four channels reaching a node that assumes three is a hazard,
+#: which is exactly why the core loader drops it.
+ALPHA_MODES = ["drop", "keep"]
+
+
+def load_slot_image(slot: str, keep_alpha: bool = False):
+    """The slot's PNG, in the mode the `alpha` widget asked for.  No torch.
+
+    The alpha decision lives here on its own because it is the part that goes wrong:
+    `convert("RGB")` **DISCARDS** alpha, it does not composite. A transparent pixel
+    keeps whatever RGB was hiding under it, so a layer whose transparent areas are
+    black arrives black and fully opaque — which is exactly what a transparent inpaint
+    did on its way to Krita before `keep` existed.
+    """
     from PIL import Image
 
     target = slot_path(slot) / IMAGE_NAME
@@ -134,8 +147,14 @@ def read_slot(slot: str):
         raise RuntimeError(
             f"cache slot '{slot}' is empty — run an 'XYZ Cache Slot Write' into it first"
         )
+    image = Image.open(io.BytesIO(target.read_bytes()))
+    return image.convert("RGBA" if keep_alpha else "RGB")
 
-    image = Image.open(io.BytesIO(target.read_bytes())).convert("RGB")
+
+def read_slot(slot: str, keep_alpha: bool = False):
+    import torch
+
+    image = load_slot_image(slot, keep_alpha)
     array = np.asarray(image, dtype=np.float32) / 255.0
     return torch.from_numpy(array).unsqueeze(0), image.size
 
@@ -170,11 +189,18 @@ def open_painted(image_ref: str):
         return None
 
 
-def to_image_tensor(image):
-    """A PIL image → the IMAGE tensor ComfyUI expects (1,H,W,3, 0..1)."""
+def to_image_tensor(image, keep_alpha: bool = False):
+    """A PIL image → the IMAGE tensor ComfyUI expects (1,H,W,3|4, 0..1).
+
+    `keep_alpha` gives four channels — but a PAINTED file's alpha is the Mask Editor's
+    MASK, not transparency (see read_mask), so the caller must not hand one here with
+    keep_alpha set. It emits opaque instead; see the node.
+    """
     import torch
 
-    array = np.asarray(image.convert("RGB"), dtype=np.float32) / 255.0
+    array = np.asarray(
+        image.convert("RGBA" if keep_alpha else "RGB"), dtype=np.float32
+    ) / 255.0
     return torch.from_numpy(array).unsqueeze(0)
 
 
@@ -271,6 +297,21 @@ class XYZCacheSlotRead:
         return {
             "required": {
                 "slot": (slots or [NO_SLOTS],),
+                "alpha": (
+                    ALPHA_MODES,
+                    {
+                        "default": "drop",
+                        "tooltip": "drop: three channels, like Load Image — the "
+                        "alpha comes out on the mask output instead. This is the "
+                        "safe default; a four-channel IMAGE breaks nodes that "
+                        "assume three.\n"
+                        "keep: four channels, transparency intact. For carrying a "
+                        "real transparent layer through a slot — an inpaint on its "
+                        "way to Krita, say. Without it a transparent area arrives "
+                        "opaque, showing whatever RGB was hiding under it (black, "
+                        "usually).",
+                    },
+                ),
             },
             # The Mask Editor round-trip writes the painted 'clipspace-…' reference
             # here; the frontend hides this widget and drives it per slot. It is a
@@ -296,12 +337,15 @@ class XYZCacheSlotRead:
         # at startup; don't let ComfyUI reject it.
         return True
 
-    def execute(self, slot=NO_SLOTS, image="", **_):
+    def execute(self, slot=NO_SLOTS, alpha="drop", image="", **_):
+        import torch
+
         if slot == NO_SLOTS:
             raise RuntimeError(
                 "No cache slot chosen. Write one with 'XYZ Cache Slot Write' first."
             )
-        tensor, (width, height) = read_slot(slot)
+        keep_alpha = alpha == "keep"
+        tensor, (width, height) = read_slot(slot, keep_alpha=keep_alpha)
 
         # Painted beats parked: if the Mask Editor left an edit on this slot, THAT
         # is the picture — image, mask and size all come out of the one file, so
@@ -310,10 +354,27 @@ class XYZCacheSlotRead:
         # a later run falls back to the live slot on its own.
         painted = open_painted(image)
         if painted is not None:
-            tensor = to_image_tensor(painted)
+            # A painted file's alpha is the EDITOR'S MASK, not transparency (read_mask
+            # turns it into one). Emitting it as alpha would make everything you just
+            # painted invisible, so the picture comes out OPAQUE and the mask output
+            # carries that channel, as it always has. Four channels either way, so
+            # whatever is wired downstream does not change shape under you.
+            tensor = to_image_tensor(painted, keep_alpha=False)
+            if keep_alpha:
+                tensor = torch.cat(
+                    [tensor, torch.ones_like(tensor[..., :1])], dim=-1
+                )
+                print(
+                    f"[XYZ Cache] slot '{slot}' has a Mask Editor edit live, so "
+                    "alpha=keep emits an OPAQUE image: that file's alpha is the "
+                    "mask, not transparency. It is on the mask output."
+                )
             height, width = tensor.shape[1], tensor.shape[2]
 
         mask = read_mask(painted, width, height)
         source = "painted" if painted is not None else "slot"
-        print(f"[XYZ Cache] read slot '{slot}' ({source}) -> {width}x{height}")
+        print(
+            f"[XYZ Cache] read slot '{slot}' ({source}) -> {width}x{height}, "
+            f"{tensor.shape[-1]} channels"
+        )
         return (tensor, mask, width, height)

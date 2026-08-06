@@ -280,3 +280,70 @@ def test_create_refuses_a_name_that_escapes(monkeypatch, tmp_path):
     monkeypatch.setattr(cache, "cache_dir", lambda: tmp_path)
     with pytest.raises(ValueError):
         cache.create_slot("../escape")
+
+
+# ------------------------------------------------- cache slots: the alpha switch
+#
+# The bug this pins: `convert("RGB")` DISCARDS alpha, it does not composite. A
+# transparent pixel keeps whatever RGB was hiding under it — so a transparent inpaint
+# layer, whose transparent areas are black, came out of a slot black AND OPAQUE.
+# `alpha: keep` is the way through. `drop` stays the default, as Load Image does it.
+
+
+def _write_rgba_png(tmp_path, monkeypatch, slot="lay"):
+    """A slot holding a half-transparent PNG, written the way write_slot writes one."""
+    from PIL import Image
+
+    monkeypatch.setattr(cache, "cache_dir", lambda: tmp_path)
+    array = np.zeros((4, 4, 4), dtype=np.uint8)
+    array[..., :3] = 0            # black under the transparency, as our layers are
+    array[1:3, 1:3] = [10, 200, 30, 255]   # the only opaque part
+    directory = tmp_path / slot
+    directory.mkdir(parents=True)
+    Image.fromarray(array, "RGBA").save(directory / cache.IMAGE_NAME)
+    return slot
+
+
+def test_drop_is_the_default_and_loses_the_alpha(tmp_path, monkeypatch):
+    slot = _write_rgba_png(tmp_path, monkeypatch)
+    image = cache.load_slot_image(slot, keep_alpha=False)
+    assert image.mode == "RGB"
+    # ...and this is the symptom, in one assertion: the transparent corner is now a
+    # black pixel that will be drawn.
+    assert image.getpixel((0, 0)) == (0, 0, 0)
+
+
+def test_keep_carries_the_transparency_through(tmp_path, monkeypatch):
+    slot = _write_rgba_png(tmp_path, monkeypatch)
+    image = cache.load_slot_image(slot, keep_alpha=True)
+    assert image.mode == "RGBA"
+    assert image.getpixel((0, 0))[3] == 0, "the transparent corner came back opaque"
+    assert image.getpixel((1, 1)) == (10, 200, 30, 255)
+
+
+def test_keep_on_a_slot_with_no_alpha_still_gives_four_opaque_channels(tmp_path, monkeypatch):
+    """The channel count must not depend on what happens to be in the slot."""
+    from PIL import Image
+
+    monkeypatch.setattr(cache, "cache_dir", lambda: tmp_path)
+    (tmp_path / "flat").mkdir(parents=True)
+    Image.fromarray(np.full((4, 4, 3), 128, np.uint8), "RGB").save(
+        tmp_path / "flat" / cache.IMAGE_NAME
+    )
+    image = cache.load_slot_image("flat", keep_alpha=True)
+    assert image.mode == "RGBA"
+    assert image.getpixel((0, 0)) == (128, 128, 128, 255)
+
+
+def test_an_empty_slot_says_so_in_both_modes(tmp_path, monkeypatch):
+    monkeypatch.setattr(cache, "cache_dir", lambda: tmp_path)
+    (tmp_path / "bare").mkdir(parents=True)
+    for keep in (False, True):
+        with pytest.raises(RuntimeError, match="is empty"):
+            cache.load_slot_image("bare", keep_alpha=keep)
+
+
+def test_the_node_offers_the_switch_and_defaults_to_drop():
+    spec = cache.XYZCacheSlotRead.INPUT_TYPES()["required"]["alpha"]
+    assert list(spec[0]) == ["drop", "keep"]
+    assert spec[1]["default"] == "drop"
