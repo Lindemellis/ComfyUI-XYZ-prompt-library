@@ -84,6 +84,7 @@ def test_rebuild_prompt_vocab_full_op() -> None:
                     model=None,
                     seed=None,
                     cfg=None,
+                    steps=None,
                     sampler=None,
                     scheduler=None,
                     workflow_present=0,

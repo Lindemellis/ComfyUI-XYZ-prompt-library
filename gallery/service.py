@@ -17,7 +17,7 @@ import time
 import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Mapping, Optional, Set, Tuple
+from typing import Any, Dict, List, Mapping, Optional, Sequence, Set, Tuple
 
 from . import audit as _audit
 from . import db as _db
@@ -965,6 +965,112 @@ def resync_image(image_id: int, *, db_path: Path) -> _repo.ImageRecord:
     if out is None:
         raise RuntimeError(f"image {image_id} vanished after resync")
     return out
+
+
+def backfill_missing_steps(*, db_path: Path) -> Dict[str, Any]:
+    """Re-read the metadata of every image that has no ``steps``.
+
+    ``steps`` arrived in schema v7, so anything indexed before it is NULL — and the
+    value is in the PNG, not in anything the database already holds. This marks those
+    rows ``pending`` and lets the metadata sync worker do the reading: it already has
+    the retry policy, the backoff and the broadcasts, and it picks the rows up on its
+    own poll, so nothing here has to walk the disk or block the request.
+
+    Manual on purpose (user's call, 2026-08-06): a migration must not spend minutes of
+    disk re-reading a library while ComfyUI is trying to start.
+    """
+    missing = _repo.count_missing_steps(db_path=db_path)
+    if missing == 0:
+        return {"queued": 0, "missing": 0}
+    wq = _write_queue_handle()
+    fut = wq.enqueue_write(_repo.LOW, _repo.ResyncMissingStepsOp())
+    queued = int(fut.result(timeout=60.0))
+    logger.info("backfill: marked %s image(s) for a metadata re-read", queued)
+    return {"queued": queued, "missing": missing}
+
+
+#: What "send to Krita" will convert on the way. Krita's bridge takes PNG bytes and
+#: decodes them with an explicit PNG hint, so anything else has to be re-encoded here.
+_KRITA_NATIVE_SUFFIX = ".png"
+
+
+def _png_bytes_for_krita(path: Path) -> bytes:
+    """The file as PNG bytes. A JPEG/WebP in the gallery is re-encoded, losslessly as
+    far as the pixels are concerned — the bridge decodes with a PNG format hint and
+    would simply refuse the original."""
+    if path.suffix.lower() == _KRITA_NATIVE_SUFFIX:
+        return path.read_bytes()
+    import io as _io
+
+    from PIL import Image as _Image
+
+    with _Image.open(path) as img:
+        img.load()
+        if img.mode not in ("RGB", "RGBA", "L"):
+            img = img.convert("RGBA")
+        buf = _io.BytesIO()
+        img.save(buf, format="PNG")
+        return buf.getvalue()
+
+
+def send_images_to_krita(
+    image_ids: Sequence[int],
+    *,
+    mode: str = "new_layer",
+    fit: str = "fit",
+    db_path: Path,
+) -> Dict[str, Any]:
+    """Push gallery images into Krita, one layer each, in the order given.
+
+    The layer is named after the file, so a Krita document with six of these in it
+    still says which is which.
+
+    Every image goes through the SAME send helper the node uses, which means the
+    new_layer -> new_document fallback applies per image: with nothing open in Krita,
+    the first image creates the document and the rest land on top of it. That is the
+    behaviour you want for a batch, and it falls out rather than being special-cased.
+
+    A failure on one image does not abort the rest — the result says which ones went
+    and which did not, because "I selected twelve and something went wrong" needs to
+    name the ones that did not make it.
+    """
+    from krita_nodes import send as _krita_send
+
+    roots = _folders.list_roots(db_path=db_path)
+    root_paths = [r["path"] for r in roots]
+
+    sent: List[Dict[str, Any]] = []
+    failed: List[Dict[str, Any]] = []
+    for image_id in image_ids:
+        iid = int(image_id)
+        try:
+            rec = _repo.get_image(iid, db_path=db_path)
+            if rec is None:
+                raise KeyError(f"image {iid} not found")
+            _paths.assert_inside_root(rec.path, root_paths)
+            disk = Path(rec.path)
+            if not disk.is_file():
+                raise FileNotFoundError(f"missing on disk: {rec.path}")
+            result = _krita_send.send_png(
+                _png_bytes_for_krita(disk),
+                mode=str(mode),
+                layer_name=disk.stem or f"image {iid}",
+                fit=str(fit),
+                launch=True,
+                max_wait=180.0,
+            )
+            sent.append({
+                "id": iid,
+                "name": disk.name,
+                "mode": result.get("mode"),
+                "layer": result.get("layer"),
+                "document": result.get("document"),
+            })
+        except Exception as exc:  # noqa: BLE001 - one bad image must not sink the batch
+            logger.warning("send_to_krita failed for image %s: %s", iid, exc)
+            failed.append({"id": iid, "error": str(exc)})
+
+    return {"sent": sent, "failed": failed, "total": len(list(image_ids))}
 
 
 def broadcast_image_upserted(image_id: int) -> None:

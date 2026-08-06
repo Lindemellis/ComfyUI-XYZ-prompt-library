@@ -166,6 +166,7 @@ class UpsertImageOp:
                  model: Optional[str],
                  seed: Optional[int],
                  cfg: Optional[float],
+                 steps: Optional[int],
                  sampler: Optional[str],
                  scheduler: Optional[str],
                  workflow_present: int,
@@ -193,6 +194,7 @@ class UpsertImageOp:
         self.model = model
         self.seed = seed
         self.cfg = cfg
+        self.steps = steps
         self.sampler = sampler
         self.scheduler = scheduler
         self.workflow_present = int(workflow_present)
@@ -222,6 +224,7 @@ class UpsertImageOp:
             "model": self.model,
             "seed": self.seed,
             "cfg": self.cfg,
+            "steps": self.steps,
             "sampler": self.sampler,
             "scheduler": self.scheduler,
             "workflow_present": self.workflow_present,
@@ -294,12 +297,12 @@ _UPSERT_IMAGE_SQL = """
 INSERT INTO image (
     path, folder_id, relative_path, filename, filename_lc, ext,
     width, height, file_size, mtime_ns, created_at,
-    positive_prompt, negative_prompt, model, seed, cfg, sampler, scheduler,
+    positive_prompt, negative_prompt, model, seed, cfg, steps, sampler, scheduler,
     workflow_present, favorite, tags_csv, indexed_at
 ) VALUES (
     :path, :folder_id, :relative_path, :filename, :filename_lc, :ext,
     :width, :height, :file_size, :mtime_ns, :created_at,
-    :positive_prompt, :negative_prompt, :model, :seed, :cfg, :sampler, :scheduler,
+    :positive_prompt, :negative_prompt, :model, :seed, :cfg, :steps, :sampler, :scheduler,
     :workflow_present, :favorite, :tags_csv, :indexed_at
 )
 ON CONFLICT(path) DO UPDATE SET
@@ -318,6 +321,7 @@ ON CONFLICT(path) DO UPDATE SET
     model            = excluded.model,
     seed             = excluded.seed,
     cfg              = excluded.cfg,
+    steps            = excluded.steps,
     sampler          = excluded.sampler,
     scheduler        = excluded.scheduler,
     workflow_present = excluded.workflow_present,
@@ -664,6 +668,48 @@ class ResyncMetadataOp:
         if row is None:
             raise KeyError(f"image id={self.image_id} not found")
         return int(row[0])
+
+
+class ResyncMissingStepsOp:
+    """Mark every image whose ``steps`` is NULL for a metadata re-read.
+
+    ``steps`` only arrived in schema v7, so every row indexed before it has NULL —
+    and the value lives in the PNG, not in anything the database already holds.
+    Rather than re-read the whole library, hand exactly those rows to the metadata
+    sync worker the same way ``/resync`` hands it one: same retry policy, same
+    backoff, same broadcasts.
+
+    ONE transaction, not one per image: a library of 20k pictures would otherwise be
+    20k round trips through the write queue, and the queue is single-writer.
+    """
+
+    def __init__(self, *, limit: int = 0):
+        self.limit = int(limit)
+
+    def apply(self, conn: sqlite3.Connection) -> int:
+        sql = (
+            "UPDATE image SET "
+            "metadata_sync_status = 'pending', "
+            "metadata_sync_retry_count = 0, "
+            "metadata_sync_next_retry_at = NULL, "
+            "metadata_sync_last_error = NULL "
+            "WHERE steps IS NULL"
+        )
+        if self.limit > 0:
+            sql += " AND id IN (SELECT id FROM image WHERE steps IS NULL LIMIT ?)"
+            cur = conn.execute(sql, (self.limit,))
+        else:
+            cur = conn.execute(sql)
+        return int(cur.rowcount or 0)
+
+
+def count_missing_steps(*, db_path: _PathLike) -> int:
+    conn = _db.connect_read(db_path)
+    try:
+        (n,) = conn.execute("SELECT COUNT(*) FROM image WHERE steps IS NULL").fetchone()
+        return int(n)
+    finally:
+        conn.close()
 
 
 class UpdateImagePathOp:
@@ -1576,6 +1622,7 @@ class ImageRecord:
     model: Optional[str]
     seed: Optional[int]
     cfg: Optional[float]
+    steps: Optional[int]
     sampler: Optional[str]
     scheduler: Optional[str]
     has_workflow: bool
@@ -1632,7 +1679,7 @@ _IMAGE_SELECT = (
     "image.relative_path, image.filename, image.filename_lc, image.ext, "
     "image.width, image.height, image.file_size, image.mtime_ns, "
     "image.created_at, image.positive_prompt, image.negative_prompt, "
-    "image.model, image.seed, image.cfg, image.sampler, image.scheduler, "
+    "image.model, image.seed, image.cfg, image.steps, image.sampler, image.scheduler, "
     "image.workflow_present, image.favorite, image.tags_csv, "
     "image.metadata_sync_status, image.version, "
     "folder.kind AS folder_kind, folder.display_name AS folder_display_name, "
@@ -2033,6 +2080,7 @@ def _row_to_image_record(row: sqlite3.Row) -> ImageRecord:
         model=row["model"],
         seed=row["seed"],
         cfg=row["cfg"],
+        steps=row["steps"],
         sampler=row["sampler"],
         scheduler=row["scheduler"],
         has_workflow=bool(row["workflow_present"]),

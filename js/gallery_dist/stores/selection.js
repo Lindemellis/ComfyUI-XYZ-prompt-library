@@ -114,6 +114,18 @@ export function buildWireSelection() {
   };
 }
 
+/** The explicitly ticked ids, ascending.
+ *
+ *  Empty in ``all_except`` mode ON PURPOSE: that mode means "everything matching the
+ *  filter", which can be thousands of rows and is only ever sent to the server as a
+ *  filter, never as a list. An action that needs actual ids (sending images to Krita
+ *  as layers, say) must not silently turn into eight thousand of them.
+ */
+export function selectedExplicitIds() {
+  if (selectionState.mode !== 'explicit') return [];
+  return Object.keys(selectionState.explicit).map(Number).sort((a, b) => a - b);
+}
+
 export function selectedExplicitCount() {
   return Object.keys(selectionState.explicit).length;
 }

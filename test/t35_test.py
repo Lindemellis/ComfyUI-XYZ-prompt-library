@@ -51,6 +51,26 @@ def test_build_png_download_bytes_no_workflow_and_clean() -> None:
         assert "xyz_gallery.tags" not in t_cl
         assert "parameters" not in t_cl
 
+        # The fourth combination the old three-button picker could not express:
+        # keep the editor graph, drop the prompt and settings.
+        b_ng = metadata.build_png_download_bytes(p, "no_gen")
+        t_ng = dict(Image.open(io.BytesIO(b_ng)).text or {})
+        assert "workflow" in t_ng
+        assert "prompt" not in t_ng
+        assert "parameters" not in t_ng
+        # Only "keep neither" means a bare raster, so the gallery's own chunks stay.
+        assert "xyz_gallery.tags" in t_ng
+
+
+def test_download_variants_are_two_booleans() -> None:
+    """A variant IS (keep workflow, keep generation data); all four exist and the
+    names are the only place that mapping is written down."""
+    from gallery import folders
+
+    assert folders.normalize_download_variant("no_gen") == "no_gen"
+    for name in ("full", "no_workflow", "no_gen", "clean"):
+        assert folders.normalize_download_variant(name) == name
+
 
 def test_vocab_lookup_contains_tags() -> None:
     from gallery import db

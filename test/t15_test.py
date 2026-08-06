@@ -145,7 +145,9 @@ def test_schema_v3_and_vocab_op() -> None:
         finally:
             conn.close()
         (uv,) = sqlite3.connect(str(db_path)).execute("PRAGMA user_version").fetchone()
-        assert uv == 6, uv
+        # Track SCHEMA_VERSION, not a literal: every new migration would
+        # otherwise fail this test for no reason.
+        assert uv == db.SCHEMA_VERSION, uv
 
         wq = repo.WriteQueue(db_path)
         wq.start()
@@ -186,6 +188,7 @@ def test_schema_v3_and_vocab_op() -> None:
                 model=None,
                 seed=None,
                 cfg=None,
+                steps=None,
                 sampler=None,
                 scheduler=None,
                 workflow_present=0,
@@ -244,6 +247,7 @@ def test_schema_v3_and_vocab_op() -> None:
                 model=None,
                 seed=None,
                 cfg=None,
+                steps=None,
                 sampler=None,
                 scheduler=None,
                 workflow_present=0,

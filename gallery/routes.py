@@ -189,6 +189,7 @@ def _serialize_image(rec: _repo.ImageRecord) -> dict:
             "model": rec.model,
             "seed": rec.seed,
             "cfg": rec.cfg,
+            "steps": rec.steps,
             "sampler": rec.sampler,
             "scheduler": rec.scheduler,
             "has_workflow": rec.has_workflow,
@@ -1088,7 +1089,7 @@ async def _get_raw_download(request: web.Request) -> web.StreamResponse:
         return _error(
             400,
             "invalid_query",
-            "download variants no_workflow/clean apply to PNG files only",
+            "stripping workflow or generation data applies to PNG files only",
         )
     try:
         body = await _run(_metadata.build_png_download_bytes, disk_path, variant)
@@ -1355,6 +1356,70 @@ async def _patch_image(request: web.Request) -> web.Response:
         logger.exception("update_image failed")
         return _error(500, "internal", str(exc))
     return web.json_response(_serialize_image(rec))
+
+
+async def _post_send_to_krita(request: web.Request) -> web.Response:
+    """``POST /xyz/gallery/images/send_to_krita`` — {ids, mode, fit}.
+
+    Synchronous on purpose: Krita may have to be started first (~20s), and the caller
+    wants to know which images actually landed. It runs off the event loop like every
+    other blocking call here.
+    """
+    try:
+        body = await request.json()
+    except json.JSONDecodeError as exc:
+        return _error(400, "invalid_body", f"invalid JSON: {exc}")
+    if not isinstance(body, dict):
+        return _error(400, "invalid_body", "body must be a JSON object")
+
+    raw_ids = body.get("ids")
+    if not isinstance(raw_ids, list) or not raw_ids:
+        return _error(400, "invalid_body", "ids must be a non-empty array")
+    try:
+        ids = [int(x) for x in raw_ids]
+    except (TypeError, ValueError):
+        return _error(400, "invalid_body", "ids must be integers")
+
+    mode = str(body.get("mode") or "new_layer")
+    if mode not in ("new_layer", "new_document"):
+        return _error(400, "invalid_body", "mode must be new_layer or new_document")
+    fit = str(body.get("fit") or "fit")
+    if fit not in ("keep", "fit", "grow_canvas"):
+        return _error(400, "invalid_body", "fit must be keep, fit or grow_canvas")
+
+    try:
+        out = await _run(
+            _service.send_images_to_krita,
+            ids, mode=mode, fit=fit, db_path=DB_PATH,
+        )
+    except Exception as exc:
+        logger.exception("send_images_to_krita failed")
+        return _error(500, "internal", str(exc))
+    return web.json_response(out)
+
+
+async def _post_backfill_steps(request: web.Request) -> web.Response:
+    """Queue a metadata re-read for every image with no step count.
+
+    Returns immediately with the counts; the sync worker does the reading on its own
+    poll, so a big library does not hold the request open.
+    """
+    try:
+        out = await _run(_service.backfill_missing_steps, db_path=DB_PATH)
+    except Exception:
+        logger.exception("backfill_missing_steps failed")
+        return web.json_response({"error": "backfill failed"}, status=500)
+    return web.json_response(out)
+
+
+async def _get_backfill_steps(request: web.Request) -> web.Response:
+    """How many images still have no step count — what the button's label says."""
+    try:
+        missing = await _run(_repo.count_missing_steps, db_path=DB_PATH)
+    except Exception:
+        logger.exception("count_missing_steps failed")
+        return web.json_response({"error": "count failed"}, status=500)
+    return web.json_response({"missing": int(missing)})
 
 
 async def _post_resync(request: web.Request) -> web.Response:
@@ -1732,6 +1797,9 @@ def register(server) -> None:
     routes.get(r"/xyz/gallery/image/{id:\d+}/workflow.json")(_get_workflow)
     routes.patch(r"/xyz/gallery/image/{id:\d+}")(_patch_image)
     routes.post(r"/xyz/gallery/image/{id:\d+}/resync")(_post_resync)
+    routes.post("/xyz/gallery/images/send_to_krita")(_post_send_to_krita)
+    routes.get("/xyz/gallery/admin/backfill_steps")(_get_backfill_steps)
+    routes.post("/xyz/gallery/admin/backfill_steps")(_post_backfill_steps)
     routes.delete(r"/xyz/gallery/image/{id:\d+}")(_delete_image)
     routes.get(r"/xyz/gallery/thumb/{id:\d+}")(_get_thumb)
     routes.get(r"/xyz/gallery/raw/{id:\d+}")(_get_raw_inline)

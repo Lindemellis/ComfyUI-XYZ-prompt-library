@@ -41,6 +41,7 @@ import {
 } from 'vue';
 import * as api from '../api.js';
 import { executeImageDownload } from '../stores/downloadHelper.js';
+import { openKritaSend } from '../stores/kritaSend.js';
 import { apiQueryObject, filterState } from '../stores/filters.js';
 import { BASE_URL } from '../api.js';
 import { Autocomplete } from '../components/Autocomplete.js';
@@ -780,6 +781,11 @@ export const DetailView = defineComponent({
       if (!delBusy.value) delModal.value = false;
     }
 
+    function onSendToKrita() {
+      if (!record.value) return;
+      openKritaSend([record.value.id]);
+    }
+
     async function onDownloadImage() {
       if (!record.value) return;
       dlImageBusy.value = true;
@@ -824,7 +830,7 @@ export const DetailView = defineComponent({
       scale, tx, ty, scalePct,
       asideWidthPx, onAsideSplitDown,
       canvasRef, imgStyle, copiedKey,
-      hasWorkflow, workflowUrl, dlImageBusy, onDownloadImage,
+      hasWorkflow, workflowUrl, dlImageBusy, onDownloadImage, onSendToKrita,
       vocabAutocompleteMatch,
       developerMode,
       syncStatusBadge,
@@ -1039,6 +1045,8 @@ export const DetailView = defineComponent({
                   </button>
                 </dt>
                 <dd><code v-if="meta.seed != null">{{ meta.seed }}</code><span v-else class="muted">—</span></dd>
+                <dt>Steps</dt>
+                <dd><code v-if="meta.steps != null">{{ meta.steps }}</code><span v-else class="muted">—</span></dd>
                 <dt>CFG</dt>
                 <dd><code v-if="meta.cfg != null">{{ meta.cfg }}</code><span v-else class="muted">—</span></dd>
                 <dt>Sampler</dt>
@@ -1093,6 +1101,11 @@ export const DetailView = defineComponent({
                         @click="onDownloadImage">
                   {{ dlImageBusy ? 'Preparing…' : 'Download image' }}
                 </button>
+                <button type="button"
+                        class="dv-btn"
+                        :disabled="!record"
+                        title="Open it in Krita as a layer or a new document"
+                        @click="onSendToKrita">Send to Krita…</button>
                 <a class="dv-btn"
                    :href="workflowUrl"
                    :aria-disabled="!hasWorkflow"

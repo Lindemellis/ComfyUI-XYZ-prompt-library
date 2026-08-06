@@ -13,6 +13,7 @@ import { MainView } from './views/MainView.js';
 import { DetailView } from './views/DetailView.js';
 import { SettingsView } from './views/SettingsView.js';
 import { DownloadPickModal } from './components/DownloadPickModal.js';
+import { KritaSendModal } from './components/KritaSendModal.js';
 import { IconButton } from './components/IconButton.js';
 import { startGalleryConnection } from './stores/connection.js';
 import {
@@ -59,6 +60,7 @@ const App = {
   name: 'App',
   components: {
     MainView, DetailView, SettingsView, NotFoundView, DownloadPickModal, ProgressModal,
+    KritaSendModal,
   },
   setup() {
     const settingsHref = computed(() => {
@@ -125,6 +127,7 @@ const App = {
       </div>
       <ProgressModal />
       <DownloadPickModal />
+      <KritaSendModal />
     </div>
   `,
 };

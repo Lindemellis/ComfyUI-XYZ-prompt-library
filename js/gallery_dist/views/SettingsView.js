@@ -4,6 +4,7 @@ import {
 } from 'vue';
 import * as api from '../api.js';
 import { Autocomplete } from '../components/Autocomplete.js';
+import { describeVariant, fromVariant, toVariant } from '../stores/downloadVariant.js';
 import { ConfirmModal } from '../components/ConfirmModal.js';
 import { IconButton } from '../components/IconButton.js';
 import {
@@ -61,6 +62,19 @@ export const SettingsView = defineComponent({
         dates: true,
       },
     });
+
+    // The stored preference is one variant string; the UI is the two questions it
+    // answers. Proxying rather than storing two booleans keeps the wire format, the
+    // `?variant=` links and the old saved value all working untouched.
+    const dlKeepWorkflow = computed({
+      get: () => fromVariant(form.downloadVariant).workflow,
+      set: (v) => { form.downloadVariant = toVariant(!!v, dlKeepGen.value); },
+    });
+    const dlKeepGen = computed({
+      get: () => fromVariant(form.downloadVariant).gen,
+      set: (v) => { form.downloadVariant = toVariant(dlKeepWorkflow.value, !!v); },
+    });
+    const dlSummary = computed(() => describeVariant(form.downloadVariant));
 
     const vocabMatchLocal = ref(
       vocabAutocompleteMatch.value === 'contains' ? 'contains' : 'prefix',
@@ -242,6 +256,7 @@ export const SettingsView = defineComponent({
       void load();
       void loadRoots();
       void loadTagRows();
+      void loadBackfillCount();
     });
 
     watch([tagSortKey, tagSortDir], () => {
@@ -376,6 +391,40 @@ export const SettingsView = defineComponent({
       }
     }
 
+    // Metadata backfill. `steps` only started being recorded in schema v7, so images
+    // indexed before it have none — and the value is in the PNG, not in the database.
+    // Re-reading the library is minutes of disk, so it is a button, never automatic.
+    const backfillBusy = ref(false);
+    const backfillMsg = ref('');
+    const backfillMissing = ref(null);
+
+    async function loadBackfillCount() {
+      try {
+        const r = await api.get('/admin/backfill_steps');
+        backfillMissing.value = (r && typeof r.missing === 'number') ? r.missing : null;
+      } catch {
+        backfillMissing.value = null;
+      }
+    }
+
+    async function runBackfill() {
+      backfillBusy.value = true;
+      backfillMsg.value = '';
+      try {
+        const r = await api.post('/admin/backfill_steps', {});
+        const n = (r && typeof r.queued === 'number') ? r.queued : 0;
+        backfillMsg.value = n === 0
+          ? 'Nothing to re-read — every image already has its metadata.'
+          : `Queued ${n} image(s). The sync worker reads them in the background; `
+            + 'reopen an image to see the result.';
+        await loadBackfillCount();
+      } catch (e) {
+        backfillMsg.value = (e && e.message) ? String(e.message) : String(e);
+      } finally {
+        backfillBusy.value = false;
+      }
+    }
+
     async function addCustomRoot() {
       rootsBusy.value = true;
       rootsErr.value = '';
@@ -445,6 +494,14 @@ export const SettingsView = defineComponent({
       tagGoToPageFromInput,
       tagBusy,
       tagMsg,
+      dlKeepWorkflow,
+      dlKeepGen,
+      dlSummary,
+      backfillBusy,
+      backfillMsg,
+      backfillMissing,
+      runBackfill,
+      loadBackfillCount,
       tagSortKey,
       tagSortDir,
       toggleSortDir,
@@ -530,24 +587,18 @@ export const SettingsView = defineComponent({
               <span>Ask every time (bulk, thumbnail menu, detail) which metadata to include</span>
             </label>
             <p v-if="form.downloadPromptEachTime" class="muted gs-hint">
-              The three options below are disabled while this is on; each download opens a picker.
+              The dialog starts with whatever you ticked last; these two are that memory.
             </p>
-            <p v-else class="muted gs-hint">Default variant for direct downloads (always sent as <code>?variant=</code>).</p>
-            <label class="gs-row" :class="{ 'gs-row--disabled': form.downloadPromptEachTime }">
-              <input type="radio" name="dlv" value="full" v-model="form.downloadVariant"
-                     :disabled="form.downloadPromptEachTime" />
-              <span>Full metadata</span>
+            <p v-else class="muted gs-hint">What every download carries, with no dialog.</p>
+            <label class="gs-row">
+              <input type="checkbox" v-model="dlKeepWorkflow" />
+              <span>Workflow — the editor graph, so the image can be dragged back into ComfyUI</span>
             </label>
-            <label class="gs-row" :class="{ 'gs-row--disabled': form.downloadPromptEachTime }">
-              <input type="radio" name="dlv" value="no_workflow" v-model="form.downloadVariant"
-                     :disabled="form.downloadPromptEachTime" />
-              <span>No workflow chunk</span>
+            <label class="gs-row">
+              <input type="checkbox" v-model="dlKeepGen" />
+              <span>Generation data — prompt, seed, steps, sampler</span>
             </label>
-            <label class="gs-row" :class="{ 'gs-row--disabled': form.downloadPromptEachTime }">
-              <input type="radio" name="dlv" value="clean" v-model="form.downloadVariant"
-                     :disabled="form.downloadPromptEachTime" />
-              <span>Clean (no workflow / prompt / parameters / xyz_gallery.*)</span>
-            </label>
+            <p class="muted gs-hint">{{ dlSummary }}</p>
             <label class="gs-row gs-row--select">
               <span>Download filename prefix (optional)</span>
               <input type="text" class="gs-input" v-model="form.downloadBasenamePrefix"
@@ -644,6 +695,24 @@ export const SettingsView = defineComponent({
                       @click="tagLastPage">Last</button>
             </div>
             <p v-if="tagMsg" class="gs-tagmsg">{{ tagMsg }}</p>
+          </section>
+          <section id="gs-backfill" class="gs-sec">
+            <h2>Image metadata</h2>
+            <p class="muted gs-hint">
+              Step count was added later, so images indexed before it show no Steps.
+              This re-reads their PNG metadata in the background. It never touches the
+              files, and it is safe to run again.
+            </p>
+            <div class="gs-row">
+              <button type="button" class="gs-btn" :disabled="backfillBusy"
+                      @click="runBackfill">
+                {{ backfillBusy ? 'Queueing…' : 'Re-read missing metadata' }}
+              </button>
+              <span v-if="backfillMissing != null" class="muted">
+                {{ backfillMissing }} image(s) have no step count
+              </span>
+            </div>
+            <p v-if="backfillMsg" class="gs-tagmsg">{{ backfillMsg }}</p>
           </section>
           <section id="gs-roots" class="gs-sec">
             <h2>Custom image roots</h2>

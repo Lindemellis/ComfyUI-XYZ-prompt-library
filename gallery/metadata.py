@@ -77,6 +77,7 @@ class ComfyMeta:
     model: Optional[str] = None
     seed: Optional[int] = None
     cfg: Optional[float] = None
+    steps: Optional[int] = None
     sampler: Optional[str] = None
     scheduler: Optional[str] = None
     has_workflow: bool = False
@@ -126,6 +127,7 @@ def read_comfy_metadata(path) -> ComfyMeta:
         model=_str_or_none(derived.get("model")),
         seed=_int_or_none(derived.get("seed"), errors),
         cfg=_float_or_none(derived.get("cfg"), errors),
+        steps=_int_or_none(derived.get("steps"), errors),
         sampler=_str_or_none(derived.get("sampler")),
         scheduler=_str_or_none(derived.get("scheduler")),
         has_workflow=has_workflow,
@@ -193,6 +195,7 @@ def _derive_from_workflow(workflow: Mapping[str, Any]) -> dict[str, Any]:
             ("seed", "seed"),
             ("noise_seed", "seed"),
             ("cfg", "cfg"),
+            ("steps", "steps"),
             ("sampler_name", "sampler"),
             ("scheduler", "scheduler"),
         ):
@@ -318,6 +321,8 @@ def _derive_from_parameters(text: str) -> dict[str, Any]:
                 out["seed"] = value
             elif key in ("cfg", "cfg scale"):
                 out["cfg"] = value
+            elif key == "steps":
+                out["steps"] = value
             elif key == "sampler":
                 out["sampler"] = value
             elif key == "scheduler":
@@ -361,11 +366,16 @@ def _float_or_none(value: Any, errors: list[str]) -> Optional[float]:
 def build_png_download_bytes(path: Any, variant: str) -> bytes:
     """Re-encode a PNG with text chunks filtered by export ``variant`` (T35).
 
-    ``variant``:
-      * ``no_workflow`` — drop the ComfyUI UI graph ``workflow`` chunk only.
-      * ``clean`` — drop ``workflow``, API ``prompt``, A1111-style ``parameters``,
-        and all ``xyz_gallery.*`` chunks (raster without embedded Comfy / webui
-        generation metadata).
+    A variant is really TWO booleans — keep the workflow graph, keep the generation
+    data — and these are their combinations (the UI shows them as two checkboxes):
+
+      * ``no_workflow`` — drop the ComfyUI UI graph ``workflow``; keep generation data.
+      * ``no_gen`` — drop the API ``prompt`` and A1111 ``parameters``; keep ``workflow``.
+      * ``clean`` — drop all three, and the ``xyz_gallery.*`` chunks with them: asking
+        for neither means asking for a bare raster, and our own tags have no business
+        riding along on one.
+
+    ``full`` is not handled here — the route serves the file untouched for it.
 
     Pixel data and all other ancillary chunks are preserved as Pillow allows.
     Raises:
@@ -373,7 +383,7 @@ def build_png_download_bytes(path: Any, variant: str) -> bytes:
         :func:`write_xyz_chunks` for non-PNG or missing files.
     """
     v = str(variant or "").strip()
-    if v not in ("no_workflow", "clean"):
+    if v not in ("no_workflow", "no_gen", "clean"):
         raise ValueError(f"unsupported export variant: {variant!r}")
 
     p = Path(path)
@@ -388,6 +398,8 @@ def build_png_download_bytes(path: Any, variant: str) -> bytes:
         for key, value in text.items():
             sk = str(key)
             if v == "no_workflow" and sk == _KEY_WORKFLOW:
+                continue
+            if v == "no_gen" and sk in (_KEY_PROMPT, _KEY_PARAMETERS):
                 continue
             if v == "clean":
                 if sk in (_KEY_WORKFLOW, _KEY_PROMPT, _KEY_PARAMETERS):

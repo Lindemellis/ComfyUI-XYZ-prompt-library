@@ -1,6 +1,7 @@
 // T36 gallery UI prefs (server-backed via /preferences) + v1.2 layout / vocab match.
+import { DOWNLOAD_VARIANTS } from './downloadVariant.js';
 import { ref, reactive } from 'vue';
-import { setDownloadBasenamePrefix, setDownloadVariant } from '../api.js';
+import { patchGalleryPreferences, setDownloadBasenamePrefix, setDownloadVariant } from '../api.js';
 
 /** MainView splitters — same keys as T32+ ``MainView.js``. */
 export const LS_SIDEBAR_W = 'xyz_gallery.sidebar_width_px';
@@ -58,8 +59,20 @@ export const downloadPromptEachTime = ref(false);
 
 function _normalizeDownloadVariant(v) {
   const s = (v && String(v).trim()) || 'full';
-  if (s === 'no_workflow' || s === 'clean' || s === 'full') return s;
-  return 'full';
+  return DOWNLOAD_VARIANTS.includes(s) ? s : 'full';
+}
+
+/** The remembered answer to the download modal's two checkboxes. */
+export const downloadVariant = ref('full');
+
+/** Remember the checkboxes — locally at once, and on the server so it survives a
+ *  reload. Fire and forget: a preference that failed to save must not stop a
+ *  download the user already asked for. */
+export function rememberDownloadVariant(variant) {
+  const v = _normalizeDownloadVariant(variant);
+  downloadVariant.value = v;
+  setDownloadVariant(v);
+  patchGalleryPreferences({ download_variant: v }).catch(() => {});
 }
 
 /** Apply ``GET /preferences`` payload to reactive store + download filename hook. */
@@ -75,7 +88,8 @@ export function applyServerPreferences(p) {
     downloadPromptEachTime.value = p.download_prompt_each_time;
   }
   if (p.download_variant != null) {
-    setDownloadVariant(_normalizeDownloadVariant(p.download_variant));
+    downloadVariant.value = _normalizeDownloadVariant(p.download_variant);
+    setDownloadVariant(downloadVariant.value);
   }
   if (p.download_basename_prefix != null) {
     downloadBasenamePrefix.value = String(p.download_basename_prefix || '');

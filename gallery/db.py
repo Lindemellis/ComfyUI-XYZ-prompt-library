@@ -288,9 +288,30 @@ def _migrate_v6(conn: sqlite3.Connection) -> None:
     conn.executescript(_V6_DDL)
 
 
+# -- Schema v7 — the sampler's step count, alongside cfg / sampler / scheduler --
+
+
+def _migrate_v7(conn: sqlite3.Connection) -> None:
+    """Add ``image.steps``.
+
+    Guarded, because a database that has already been through this must not fail
+    the whole migration on a duplicate column.
+
+    Rows indexed before this stay NULL: the value lives in the PNG's metadata, not
+    in anything we already have, so filling it in means re-reading every file. That
+    is what the settings page's "re-read metadata" button is for — a backfill that
+    walks the library is not something a schema migration should do behind your back
+    while ComfyUI is trying to start.
+    """
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(image)")}
+    if "steps" not in columns:
+        conn.execute("ALTER TABLE image ADD COLUMN steps INTEGER")
+
+
 # -- Migration framework ----------------------------------------------------
 
-# Forward-only ledger. ``6`` = word_token / image_word_token (§11 F04 word).
+# Forward-only ledger. ``6`` = word_token / image_word_token (§11 F04 word);
+# ``7`` = image.steps.
 # FTS5 / T28 will append later steps (see module docstring).
 MIGRATIONS: Dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migrate_v1,
@@ -299,6 +320,7 @@ MIGRATIONS: Dict[int, Callable[[sqlite3.Connection], None]] = {
     4: _migrate_v4,
     5: _migrate_v5,
     6: _migrate_v6,
+    7: _migrate_v7,
 }
 
 SCHEMA_VERSION: int = max(MIGRATIONS)

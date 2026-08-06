@@ -90,7 +90,7 @@ def test_migration_upgrade_and_backfill() -> None:
         conn = sqlite3.connect(str(db_path))
         try:
             (uv,) = conn.execute("PRAGMA user_version").fetchone()
-            assert uv == 6, uv
+            assert uv == db.SCHEMA_VERSION, uv
             rows = conn.execute(
                 "SELECT metadata_sync_status, metadata_sync_retry_count, "
                 "metadata_sync_next_retry_at, metadata_sync_last_error, version "

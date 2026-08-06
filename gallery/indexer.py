@@ -248,6 +248,7 @@ def _build_upsert_op(
         model=_vocab.normalize_stored_model(meta.model),
         seed=meta.seed,
         cfg=meta.cfg,
+        steps=meta.steps,
         sampler=meta.sampler,
         scheduler=meta.scheduler,
         workflow_present=1 if meta.has_workflow else 0,

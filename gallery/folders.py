@@ -82,7 +82,12 @@ _DEFAULT_CONFIG: Dict[str, Any] = {
     },
 }
 
-_DOWNLOAD_VARIANTS = frozenset({"full", "no_workflow", "clean"})
+_DOWNLOAD_VARIANTS = frozenset({"full", "no_workflow", "no_gen", "clean"})
+#: The variant IS two booleans — keep the workflow graph, keep the generation
+#: data — and the four names are their four combinations. The UI shows the two
+#: checkboxes; this stays the stored/wire form so an old preference and an old
+#: `?variant=` link both keep working.
+#:    full = both   no_workflow = gen only   no_gen = workflow only   clean = neither
 _THEME_ALLOWED = frozenset({"dark", "light"})
 
 

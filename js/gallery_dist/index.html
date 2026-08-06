@@ -667,10 +667,22 @@
     .cm-btn-danger { background: #722; color: var(--xyz-on-accent); border-color: #944; }
     /* Download variant picker (above settings overlay z-index) */
     .dp-pick-overlay { z-index: 3000; }
-    .dp-choice-grid {
-      display: flex; flex-wrap: wrap; gap: 8px; margin-top: 4px;
+    .dp-check {
+      display: flex; align-items: flex-start; gap: 8px; margin-top: 8px;
+      font-size: 13px; cursor: pointer; line-height: 1.45;
     }
-    .dp-choice { flex: 1 1 140px; text-align: center; }
+    .dp-check input { margin-top: 2px; flex: 0 0 auto; cursor: pointer; }
+    .dp-summary { margin-top: 12px; font-size: 12px; }
+    .ks-row {
+      display: flex; align-items: center; gap: 10px; margin-top: 10px; font-size: 13px;
+    }
+    .ks-label { flex: 0 0 44px; color: var(--muted); }
+    .ks-row .gs-input { flex: 1 1 auto; min-width: 0; }
+    .ks-failed { margin-top: 12px; font-size: 12px; color: var(--danger, #e77); }
+    .ks-failed ul { margin: 4px 0 0; padding-left: 18px; }
+    .cm-btn-primary {
+      background: var(--accent); color: var(--xyz-on-accent); border-color: var(--accent);
+    }
     .dv-del-err { margin: 8px 12px 0; font-size: 13px; }
     /* T23: checkbox top-left *inside* thumb; sync nudges right when both show */
     .tc-bulk { position: absolute; left: 2px; top: 2px; z-index: 2; padding: 0;

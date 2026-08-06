@@ -24,6 +24,7 @@
 //     reconciliation.
 import { defineComponent, ref, computed, watch, onMounted, onBeforeUnmount, nextTick } from 'vue';
 import * as api from '../api.js';
+import { openKritaSend } from '../stores/kritaSend.js';
 import { executeImageDownload } from '../stores/downloadHelper.js';
 import { subscribeGalleryEvent, subscribeReconcile, EV } from '../stores/connection.js';
 import { progressMainFrozen, setIndexJobUiSyncHandler } from '../stores/galleryProgress.js';
@@ -41,7 +42,8 @@ import {
   layoutState, setCardsPerRow,
   setViewMode,
 } from '../stores/filters.js';
-import { toggleCardInSelection, resetSelection } from '../stores/selection.js';
+import {
+  selectedExplicitIds, toggleCardInSelection, resetSelection } from '../stores/selection.js';
 import { vocabCacheClear } from '../stores/vocab.js';
 import {
   LS_SIDEBAR_W,
@@ -1041,6 +1043,16 @@ export const MainView = defineComponent({
     }
 
     const ctxDownloadBusy = ref(false);
+    function onCtxSendToKrita() {
+      const id = contextMenu.value.id;
+      closeContextMenu();
+      if (typeof id !== 'number') return;
+      // Selected several and right-clicked one of them? Send the selection — that is
+      // what every other bulk action in this menu does.
+      const chosen = selectedExplicitIds();
+      openKritaSend(chosen && chosen.length > 1 && chosen.includes(id) ? chosen : [id]);
+    }
+
     async function onCtxDownload() {
       const id = contextMenu.value.id;
       closeContextMenu();
@@ -1065,6 +1077,7 @@ export const MainView = defineComponent({
       promptInput, tagInput, nameInput,
       hasDateAfter, hasDateBefore, promptFilterPlaceholder, promptFetchKind,
       vocabAutocompleteMatch,
+      onCtxSendToKrita,
       contextMenu, movePickerOpen, movePickerSel, movePickerSelectionHint,
       deleteCtxOpen, deleteCtxBusy, deleteCtxErr, deleteCtxLines,
       onCtxDelete, closeDeleteCtx, onDeleteCtxConfirmed,
@@ -1356,6 +1369,7 @@ export const MainView = defineComponent({
           <button type="button" :disabled="ctxDownloadBusy" @click="onCtxDownload">
             {{ ctxDownloadBusy ? 'Downloading…' : 'Download image' }}
           </button>
+          <button type="button" @click="onCtxSendToKrita">Send to Krita…</button>
           <button type="button" @click="onCtxMove">Move…</button>
           <button type="button" @click="onCtxDelete">Delete…</button>
         </div>
