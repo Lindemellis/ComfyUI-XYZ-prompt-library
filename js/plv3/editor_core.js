@@ -16,6 +16,7 @@ import { LANG_ID, registerLanguage, replaceInTagsOnly } from './language.js';
 import { loadMonaco } from './monaco.js';
 import { settings } from './settings.js';
 import { attachTagAC } from './tagac_monaco.js';
+import { T, tint } from './theme.js';
 import { showForm, toast } from './ui.js';
 
 // The library-path completion fires a Monaco *command* to swap the `[path]` it wrote
@@ -112,7 +113,7 @@ function injectCss() {
   _cssInjected = true;
   const style = document.createElement('style');
   style.textContent = `
-    .plv3-line-error  { background: rgba(243,139,168,.10); }
+    .plv3-line-error  { background: ${tint(T.bad, 0.10)}; }
   `;
   document.head.appendChild(style);
 }
@@ -268,7 +269,15 @@ export class PromptEditor {
     this.editor.onDidChangeModelContent(() => this.scheduleLint());
     // Folding is view state (per editor), so it dies with the editor on a page refresh.
     // Persist it (see bindViewState) whenever it changes.
-    this.editor.onDidChangeHiddenAreas?.(() => this._scheduleViewSave());
+    this.editor.onDidChangeHiddenAreas?.(() => {
+      this._scheduleViewSave();
+      // ...and re-measure. Folding changes the content height, and this editor is often
+      // folded — or has its folding restored — while its window is display:none or has
+      // just been resized. When that happens the hidden lines' vertical space stays
+      // reserved: the line numbers skip the collapsed range, but a blank band is left
+      // where it was. layout() recomputes the whole view and repairs it.
+      this._relayoutSoon();
+    });
 
     // Spec §8.1: the built-in replace would happily rewrite `.set` or a library path.
     // This one only touches prompt text.
@@ -296,6 +305,48 @@ export class PromptEditor {
       keybindings: [monaco.KeyMod.CtrlCmd | monaco.KeyCode.DownArrow],
       run: () => this.adjustWeight(-1),
     });
+
+    // Right-click a selection -> it becomes a library group, and the selection is
+    // replaced by a reference to it. Without this the only way into the library is to
+    // create a group in the other window and retype what you already wrote.
+    this.editor.addAction({
+      id: 'plv3.selectionToGroup',
+      label: 'PLv3: Save selection as a library group…',
+      contextMenuGroupId: 'modification',
+      contextMenuOrder: 2,
+      run: () => this.selectionToGroup(),
+    });
+  }
+
+  /** The selection -> a new library group -> a `[path]: { … }` block in its place.
+   *
+   *  Replacing the text is the point: a document never points back at the library except
+   *  through a block header, so a selection left as it was would be a copy that starts
+   *  drifting from the group the moment either is edited. */
+  async selectionToGroup() {
+    const model = this.model();
+    const sel = this.editor?.getSelection();
+    if (!model || !sel || sel.isEmpty()) {
+      toast('Select the part of the prompt you want to save first.', 'error');
+      return;
+    }
+    // Imported here, not at the top: library.js imports this module, and a static cycle
+    // between the two would leave one of them half-initialised at load time.
+    const { libraryWindow } = await import('./library.js');
+    const block = await libraryWindow.saveSelectionAsGroup(model.getValueInRange(sel));
+    if (!block) return;
+
+    // The selection may have moved while the dialog was open (the detail page rewrites
+    // spans). Re-read it, and bail rather than overwrite whatever is there now.
+    const now = this.editor.getSelection();
+    if (!now || !now.equalsRange(sel)) {
+      toast(`Created the group, but the selection moved — the text was left alone.`, 'warn');
+      return;
+    }
+    this.editor.executeEdits('plv3-to-group', [{ range: sel, text: block }]);
+    this.editor.pushUndoStop();
+    this.onEdited();
+    this.scheduleLint();
   }
 
   // --- weight nudging (Ctrl+↑/↓) ---------------------------------------------
@@ -309,11 +360,15 @@ export class PromptEditor {
 
     const text = model.getValue();
     const off = model.getOffsetAt(this.editor.getPosition());
+    // A sentence-ending `.` ends an item too, so it bounds the tag the same way a comma
+    // does — otherwise Ctrl+↑ on `tag3.` would grab `tag2. tag3.` and weight both.
+    // `0.5` and `a.b` are NOT boundaries: the period must have blank after it.
+    const stopAt = (i) => text[i] === '.' && (i + 1 >= text.length || /\s/.test(text[i + 1]));
     const isBoundary = (c) => c === ',' || c === '\n' || c === '{' || c === '}';
     let s = off;
     let e = off;
-    while (s > 0 && !isBoundary(text[s - 1])) s -= 1;
-    while (e < text.length && !isBoundary(text[e])) e += 1;
+    while (s > 0 && !isBoundary(text[s - 1]) && !stopAt(s - 1)) s -= 1;
+    while (e < text.length && !isBoundary(text[e]) && !stopAt(e)) e += 1;
     if (e <= s) return null;
     return this.trimRange(model,
       this.monaco.Range.fromPositions(model.getPositionAt(s), model.getPositionAt(e)));
@@ -384,6 +439,15 @@ export class PromptEditor {
    *  not reliably recover from that 0x0 first measure. Re-measure when we become visible. */
   relayout() { this.editor?.layout(); }
 
+  /** relayout on the next frame, coalescing a burst into one.
+   *
+   *  Next frame rather than now: the callers are Monaco's own view events, and calling
+   *  layout() from inside one re-enters the view code mid-update. */
+  _relayoutSoon() {
+    cancelAnimationFrame(this._relayoutRaf);
+    this._relayoutRaf = requestAnimationFrame(() => this.editor?.layout());
+  }
+
   // --- folding persistence ---------------------------------------------------
   //
   // Monaco's collapsed regions are VIEW state, not model state: they live on the editor
@@ -424,8 +488,15 @@ export class PromptEditor {
     } catch { return; }
     // Folding is computed asynchronously by the folding provider after the model is set,
     // so a same-tick restore would find no regions to collapse. Restore next frame.
+    const key = this._viewKey;
     requestAnimationFrame(() => {
-      try { this.editor?.restoreViewState(state); } catch { /* editor gone */ }
+      // The frame may have carried us to another node (two quick tab switches). Restoring
+      // node A's scroll and folding onto node B is not a repair, it is a second bug.
+      if (this._viewKey !== key) return;
+      try { this.editor?.restoreViewState(state); } catch { return; /* editor gone */ }
+      // Collapsing regions here changes the content height, and this often runs while the
+      // window is still hidden — the same stale-layout blank band as above.
+      this._relayoutSoon();
     });
   }
 

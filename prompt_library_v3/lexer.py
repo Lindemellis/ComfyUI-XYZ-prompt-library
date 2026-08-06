@@ -19,6 +19,15 @@ inside one item would only have been useful to keep `a, b` as a single unit for
 shuffle / random_select / dropout / format / weight — and a subgroup `{a, b}`
 already does exactly that, without making the item count depend on a backslash.
 
+A sentence-ending `.` separates items too (spec update 2026-08-05), so a prose
+prompt breaks into sentences the same way a tag list breaks into tags.  The two
+separators differ in one way that matters: **the period stays with its item** and
+the comma does not.  `tag1, tag2. tag3.` is three items — `tag1`, `tag2.`,
+`tag3.` — because a full stop is part of what the user wrote and a comma is only
+punctuation between things.  A `.` is a separator only when whitespace or the end
+of the text follows it, which is what leaves `[a.b]`, `.set`, `0.3` and
+`<lora:x:0.8>` alone.
+
 `:` needs no escaping in practice: a colon only means "weight" when it is the
 last `: number` before a `)`, so `(artist:wlop:1.1)` is the tag "artist:wlop" at
 weight 1.1.  Every other colon is literal text.  `\\:` is still accepted to force
@@ -40,6 +49,7 @@ RBRACKET = "RBRACKET"
 LPAREN = "LPAREN"
 RPAREN = "RPAREN"
 COMMA = "COMMA"
+STOP = "STOP"      # a `.` that ends an item — see `tokenize`
 COLON = "COLON"
 SET = "SET"        # the literal `.set` immediately preceding a `{`
 LORA = "LORA"      # <lora:name:1.0> — one opaque item
@@ -131,6 +141,21 @@ def tokenize(src: str) -> list[Tok]:
                 i += 4
                 continue
 
+        # A sentence-ending `.` separates items, like a comma — except that the period
+        # BELONGS TO the item it ends (`tag2. tag3.` is `tag2.` and `tag3.`, not `tag2`
+        # and `tag3`). A comma is only punctuation between items; a full stop is part of
+        # the prose, and dropping it would rewrite what the user wrote.
+        #
+        # "Followed by whitespace or the end of the text" is the whole rule, and it is
+        # what keeps the other four meanings of `.` intact: `[characters.illya]`,
+        # `.set{…}`, `0.3` and `<lora:x:0.8>` all have a non-blank character after the
+        # dot. (`.set` is matched above this, so it never reaches here at all.)
+        if is_stop(src, i):
+            flush(i)
+            toks.append(Tok(STOP, ".", i))
+            i += 1
+            continue
+
         # LoRA item.
         if c == "<":
             m = _LORA_RE.match(src, i)
@@ -164,6 +189,44 @@ def tokenize(src: str) -> list[Tok]:
     flush(n)
     toks.append(Tok(EOF, "", n))
     return toks
+
+
+def is_stop(src: str, i: int) -> bool:
+    """Is `src[i]` a sentence-ending `.` — a separator rather than a character?
+
+    THE rule, in one place: a full stop separates only when whitespace or the end of
+    the text follows it.  `tokenize` asks this, and so does anything that has to split
+    stored text the same way the parser would (the migration, the library).
+    """
+    return src[i] == "." and (i + 1 >= len(src) or src[i + 1] in " \t\r\n")
+
+
+def split_sentences(text: str) -> list[str]:
+    """Split one blob of prompt text into items at its sentence-ending periods.
+
+    Each period STAYS with the item it ends, and only periods at bracket depth zero
+    split — a `{a. b}` subgroup is one item, whatever is inside it.  Commas are left
+    alone: this exists to break up text that was stored as a single item before the
+    full stop became a separator, and splitting on commas as well would take apart
+    things the user deliberately kept together.
+    """
+    out: list[str] = []
+    depth = 0
+    start = 0
+    for i, ch in enumerate(text):
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth = max(0, depth - 1)
+        elif depth == 0 and is_stop(text, i):
+            piece = text[start : i + 1].strip()
+            if piece:
+                out.append(piece)
+            start = i + 1
+    tail = text[start:].strip()
+    if tail:
+        out.append(tail)
+    return out
 
 
 def unescape_out(raw: str) -> str:

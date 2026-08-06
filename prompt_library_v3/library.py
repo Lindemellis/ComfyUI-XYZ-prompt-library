@@ -65,6 +65,27 @@ def _num(v) -> str:
     return f"{float(v):g}"
 
 
+def _ends_sentence(text: str) -> bool:
+    """An item that already ends in a full stop carries its own separator (spec update
+    2026-08-05): the period splits items and stays with the one it ends."""
+    return text.rstrip().endswith(".")
+
+
+def join_items(parts: list[str]) -> str:
+    """Write a list of items back out as prompt text.
+
+    `, ` between them — except after one that ends in a full stop, which would give
+    `a cat., on a mat.` The period IS the separator there, so a space is all that is
+    needed, and re-parsing the result gives back exactly these items.
+    """
+    out: list[str] = []
+    for i, p in enumerate(parts):
+        if i:
+            out.append(" " if _ends_sentence(parts[i - 1]) else ", ")
+        out.append(p)
+    return "".join(out)
+
+
 def render_settings(settings: dict) -> str:
     parts = []
     for key, value in (settings or {}).items():
@@ -126,7 +147,7 @@ def expand(group_id: int, preset_id: int | None = None, body: dict | None = None
         # breaks the run, and the items after it start a fresh one — so the text still
         # shows, at a glance, which prompts sit either side of a group.
         if run:
-            chunks.append(inner + ", ".join(run) + ",")
+            chunks.append(inner + join_items(run) + ("" if _ends_sentence(run[-1]) else ","))
             run.clear()
 
     for item in items:
@@ -185,6 +206,11 @@ def _apply_whitelist(items: list[dict], whitelist: list) -> list[dict]:
 
 def _source(src: str, node) -> str:
     return src[node.pos : node.end]
+
+
+def _is_blank(src: str, node) -> bool:
+    """A child that is only whitespace or separators — not something the user wrote."""
+    return isinstance(node, Text) and not _source(src, node).strip(" \t\r\n,")
 
 
 def block_entries(src: str, group: Group) -> list[dict]:
@@ -304,6 +330,86 @@ def _sync_refs(src: str, block: Group, group_id: int) -> tuple[list[int], list[s
         except Exception as exc:  # a cycle (§5.5 layer 1) — refuse the ref, keep the text
             errors.append(f"{entry['header']}: {exc}")
     return added, errors
+
+
+# --- a selection -> a new group ---------------------------------------------
+
+
+def create_group_from_text(name: str, text: str, folder_id: int | None = None,
+                           parent_group_id: int | None = None) -> dict:
+    """Turn a chunk of a document into a NEW library group.
+
+    The chunk is parsed as a document and its top-level entries become the group's
+    items — prompts, loras, and a nested `[path]: { … }` block as a ref — read out by
+    exactly the same `block_entries` the blur-sync uses, so a selection lands in the
+    library the way the same text would have landed had it been written inside a block.
+
+    What this CANNOT represent faithfully: a group is a flat list of items, and a
+    region or schedule block is a tree.  One of those in the selection is stored as a
+    single item whose text happens to be the whole construct — it round-trips and it
+    compiles, but it is one row rather than a list you can switch parts of on and off.
+    Saving the *document* (the `documents` table) is what keeps that structure whole.
+    """
+    root, _diags = parse(text, recover=True)
+
+    # Selecting exactly one group — `{a, b}.set{schedule: {0, 0.5}}` — means "save THAT",
+    # so descend into it and adopt its settings. Otherwise the settings would be dropped
+    # on the floor and the group would come back as a bare list, which is the one thing
+    # `groups.settings_json` exists to prevent. (Nothing else in the UI writes that
+    # column, so this is the only way a group gets a region or a schedule of its own.)
+    settings: dict = {}
+    inner = [c for c in root.children if not _is_blank(text, c)]
+    if len(inner) == 1 and isinstance(inner[0], Group) and not inner[0].header:
+        settings = _settings_of(inner[0])
+        if settings:
+            root = inner[0]
+
+    entries = block_entries(text, root)
+    if not entries:
+        raise ValueError("nothing to save — that selection has no items in it")
+
+    group_id = repo.write(repo.CreateGroupOp(
+        name=name, folder_id=folder_id, parent_group_id=parent_group_id,
+        settings=settings))
+
+    seen: set[str] = set()
+    refs: set[int] = set()
+    for entry in entries:
+        if entry["kind"] == "ref":
+            target = repo.find_by_path(entry["header"])
+            if target is not None and target not in refs:
+                try:
+                    repo.write(repo.AddItemOp(
+                        group_id=group_id, kind="ref", ref_group_id=target))
+                    refs.add(target)
+                    continue
+                except repo.CycleError:
+                    pass  # a loop (§5.5 layer 1) — fall through and keep the text
+            elif target in refs:
+                continue
+            # W09, or a ref refused: keep the block as verbatim text rather than
+            # dropping it. Losing part of a selection the user asked to save is worse
+            # than storing it as a plain item.
+            body = _source(text, entry["block"]).strip()
+            if body and body not in seen:
+                seen.add(body)
+                repo.write(repo.AddItemOp(group_id=group_id, text=body))
+            continue
+
+        item_text = entry["text"]
+        # The same prompt twice in one selection is still ONE item — `UNIQUE(group_id,
+        # text)` says so, and inserting it twice would fail the whole save.
+        if item_text in seen:
+            continue
+        seen.add(item_text)
+        repo.write(repo.AddItemOp(
+            group_id=group_id,
+            kind="lora" if item_text.startswith("<lora:") else "prompt",
+            text=item_text,
+            weight=entry["weight"],
+        ))
+
+    return {"id": group_id, "path": repo.group_path(group_id)}
 
 
 # --- presets ----------------------------------------------------------------

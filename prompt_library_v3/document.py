@@ -313,7 +313,15 @@ def _render_node(node: DocNode, top: bool = False) -> str:
         # would rewrite the user's layout on every render. Parentheses and loras do
         # NOT: `a (b:1.2)` is a single item made of two atoms.
         sep = child.sep
-        if (
+        if body.rstrip().endswith("."):
+            # An item that ends in a full stop carries its own separator (spec update
+            # 2026-08-05), so it must NOT be given a comma as well — that is how
+            # `a cat. on a mat.` became `a cat., on a mat.` Whitespace is the one thing
+            # it does need: the period only separates when blank follows it, so with an
+            # empty separator `a cat.` and `on a mat.` would fuse into `a cat.on a mat.`
+            if child is not last and not sep:
+                sep = " "
+        elif (
             child is not last
             and not _top_level_comma(sep)
             and not body.rstrip().endswith("}")

@@ -20,6 +20,7 @@ dragged into the main thread and blow up.
 """
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from aiohttp import web
@@ -213,6 +214,9 @@ async def _get_tree(request):
         # The `[` autocomplete offers a group's presets alongside the group itself, so
         # the tree carries them. Names only — the body is expanded server-side.
         "presets": repo.list_preset_names(),
+        # Saved whole documents. Names and sizes only: the text of every prompt ever
+        # saved has no business riding along with the tree.
+        "documents": repo.list_documents(),
     })
 
 
@@ -459,6 +463,79 @@ async def _delete_preset(request):
     return _json({"ok": True})
 
 
+async def _post_group_from_text(request):
+    """A chunk of a document -> a NEW library group, and the block that replaces it.
+
+    `text` is returned expanded, because the caller's next move is to put the block in
+    the editor where the selection was: a copy that merely resembles the group would
+    start drifting from it immediately, and nothing in a document points back at the
+    library except a `[path]` header.
+    """
+    body = await request.json()
+    name = (body.get("name") or "").strip()
+    if not name:
+        return _json({"error": "a group needs a name"}, status=400)
+    try:
+        created = library.create_group_from_text(
+            name=name,
+            text=body.get("text") or "",
+            folder_id=body.get("folder_id"),
+            parent_group_id=body.get("parent_group_id"),
+        )
+    except ValueError as exc:
+        return _json({"error": str(exc)}, status=400)
+    except repo.CycleError as exc:
+        return _json({"error": str(exc), "code": E02}, status=409)
+    try:
+        expanded = library.expand(int(created["id"]))
+    except PLv3Error as exc:
+        return _json({"error": exc.diag.message, "code": exc.diag.code}, status=409)
+    return _json({**created, "text": expanded})
+
+
+# --- saved documents --------------------------------------------------------
+
+
+async def _post_document(request):
+    """Save a whole document: the text AND the doc JSON that carries the items you
+    switched off.  Same name in the same folder replaces it (the client confirms)."""
+    body = await request.json()
+    name = (body.get("name") or "").strip()
+    if not name:
+        return _json({"error": "a document needs a name"}, status=400)
+    doc = body.get("doc")
+    doc_json = doc if isinstance(doc, str) else ("" if doc is None else json.dumps(doc))
+    did = repo.write(repo.SaveDocumentOp(
+        name=name,
+        text=body.get("text") or "",
+        doc_json=doc_json,
+        folder_id=body.get("folder_id"),
+    ))
+    return _json({"id": did})
+
+
+async def _get_document(request):
+    row = repo.get_document(int(request.match_info["id"]))
+    if row is None:
+        return _json({"error": "no such document"}, status=404)
+    return _json(row)
+
+
+async def _patch_document(request):
+    did = int(request.match_info["id"])
+    body = await request.json()
+    if body.get("name"):
+        repo.write(repo.RenameDocumentOp(document_id=did, name=body["name"]))
+    if "folder_id" in body:
+        repo.write(repo.MoveDocumentOp(document_id=did, folder_id=body["folder_id"]))
+    return _json({"ok": True})
+
+
+async def _delete_document(request):
+    repo.write(repo.DeleteDocumentOp(document_id=int(request.match_info["id"])))
+    return _json({"ok": True})
+
+
 _MONACO_DIR = Path(__file__).parent.parent / "web" / "monaco"
 
 
@@ -493,6 +570,13 @@ def register(server) -> None:
     r.post("/xyz/plv3/library/sync")(_post_sync)
     r.post("/xyz/plv3/library/presets")(_post_preset)
     r.delete(r"/xyz/plv3/library/presets/{id:\d+}")(_delete_preset)
+    r.post("/xyz/plv3/library/groups/from_text")(_post_group_from_text)
+
+    # Whole-document snapshots
+    r.post("/xyz/plv3/library/documents")(_post_document)
+    r.get(r"/xyz/plv3/library/documents/{id:\d+}")(_get_document)
+    r.patch(r"/xyz/plv3/library/documents/{id:\d+}")(_patch_document)
+    r.delete(r"/xyz/plv3/library/documents/{id:\d+}")(_delete_document)
 
     if _MONACO_DIR.is_dir():
         server.app.router.add_static(

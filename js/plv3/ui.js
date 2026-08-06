@@ -4,16 +4,22 @@
 // separate OS window: it steals focus from the canvas, cannot be themed, and on
 // top of a floating window it looks like the app broke. Same rule as PLv2.
 
+import { T } from './theme.js';
+
+// These used to be nine hardcoded hex values, and they had drifted from theme.js — the
+// menu's background was a different grey from every panel behind it, and the accent was a
+// vivid violet that appeared nowhere else in the product. They are names for theme
+// colours now, so the dialogs and menus cannot fall out of step with the windows again.
 const C = {
-  bg: '#1e1e2e',
-  panel: '#252526',
-  line: '#313244',
-  edge: '#45475a',
-  text: '#cdd6f4',
-  dim: '#a6adc8',
-  hover: '#313244',
-  accent: '#7c3aed',
-  danger: '#f38ba8',
+  bg: T.bg2,
+  panel: T.bg2,
+  line: T.line,
+  edge: T.edge,
+  text: T.text,
+  dim: T.label,
+  hover: T.bg3,
+  accent: T.accent,
+  danger: T.bad,
 };
 
 const Z = 100000;
@@ -102,7 +108,7 @@ function renderMenu(items, depth) {
     } else {
       opt.append(div('flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;', item.label));
     }
-    if (hasSub) opt.append(div('color:#6c7086;flex-shrink:0;', '▸'));
+    if (hasSub) opt.append(div(`color:${C.dim};flex-shrink:0;`, '▸'));
 
     opt.addEventListener('mouseenter', async () => {
       opt.style.background = C.hover;
@@ -182,7 +188,7 @@ function buttons(box, finish, { okLabel = 'OK', danger = false, onOk }) {
     padding:4px 12px;border-radius:3px;cursor:pointer;`, 'Cancel');
   cancel.onclick = () => finish(null);
   const ok = el('button', `background:${danger ? C.danger : C.accent};border:none;
-    color:${danger ? '#11111b' : '#fff'};font-size:11px;font-weight:600;padding:4px 12px;
+    color:${T.bg0};font-size:11px;font-weight:600;padding:4px 12px;
     border-radius:3px;cursor:pointer;`, okLabel);
   ok.onclick = () => onOk(finish);
   row.append(cancel, ok);
@@ -219,10 +225,21 @@ export function showForm(message, fields, { okLabel = 'OK' } = {}) {
     for (const f of fields) {
       const row = div('display:flex;flex-direction:column;gap:3px;');
       row.append(div(`font-size:11px;color:${C.dim};`, f.label));
-      const input = el('input', `background:${C.bg};border:1px solid ${C.edge};border-radius:4px;
-        color:${C.text};padding:5px 8px;font-size:12px;width:100%;box-sizing:border-box;`);
+      const style = `background:${C.bg};border:1px solid ${C.edge};border-radius:4px;
+        color:${C.text};padding:5px 8px;font-size:12px;width:100%;box-sizing:border-box;`;
+      // `options` turns the field into a picker. A destination folder is a choice from a
+      // known list, and typing a path into a text box would only invent a way to get it
+      // wrong.
+      const input = f.options ? el('select', style) : el('input', style);
+      if (f.options) {
+        for (const o of f.options) {
+          const opt = el('option', '', o.label);
+          opt.value = String(o.value ?? '');
+          input.append(opt);
+        }
+      }
       input.value = f.value ?? '';
-      if (f.placeholder) input.placeholder = f.placeholder;
+      if (f.placeholder && !f.options) input.placeholder = f.placeholder;
       row.append(input);
       box.append(row);
       inputs[f.key] = input;

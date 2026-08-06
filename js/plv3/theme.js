@@ -7,30 +7,39 @@
 // 11px is reserved for genuine micro-metadata (counts, badges). A label is a real
 // part of the interface — it gets readable contrast, not a whisper.
 
+// THE palette. Not "a" palette — `ui.js` and `monaco.js` used to keep their own copies
+// and had already drifted apart from this one, so the header's claim above was a lie.
+// They both import from here now; change a colour here and it changes everywhere.
+//
+// Cool grey-blue. The hues are chosen to stay distinguishable from each other in small
+// doses (a 14px icon, a one-word badge), which is the only size most of them appear at.
 export const T = {
   // surfaces, from deepest to highest
-  bg0: '#11111b',   // inputs, wells — recessed
-  bg1: '#181825',   // window body
-  bg2: '#1e1e2e',   // panels, cards
-  bg3: '#262637',   // hover
-  bg4: '#313244',   // selected, pressed
+  bg0: '#0d1117',   // inputs, wells — recessed
+  bg1: '#131a22',   // window body
+  bg2: '#161b22',   // panels, cards
+  bg3: '#1f262e',   // hover
+  bg4: '#2d333b',   // selected, pressed
 
-  line: '#2a2a3c',  // hairlines between areas
-  edge: '#3d3d52',  // control borders
+  line: '#21262d',  // hairlines between areas
+  edge: '#373e47',  // control borders
 
-  text: '#cdd6f4',  // primary content
-  label: '#9399b2', // labels — readable, not a whisper
-  muted: '#6c7086', // genuinely secondary metadata
+  text: '#c9d1d9',  // primary content
+  label: '#8b949e', // labels — readable, not a whisper
+  muted: '#6e7681', // genuinely secondary metadata
 
-  accent: '#89b4fa',
-  accentDim: '#5b7ec4',
-  good: '#a6e3a1',
-  warn: '#f9e2af',
-  bad: '#f38ba8',
-  lib: '#f5c2e7',   // library groups
-  region: '#cba6f7',
-  time: '#fab387',  // schedule / numbers
-  rand: '#94e2d5',  // the settings that make a group non-deterministic
+  accent: '#58a6ff',
+  accentDim: '#1f6feb',
+  good: '#3fb950',
+  warn: '#d29922',
+  bad: '#f85149',
+  lib: '#ff9e64',   // library groups and paths
+  region: '#39c5cf',
+  // Schedules and numbers. Yellow like `warn`, but lighter — `warn` only ever appears as
+  // a badge, so lightness is enough to keep them apart.
+  time: '#e3b341',
+  rand: '#7ee787',  // the settings that make a group non-deterministic
+  lora: '#a5d6ff',  // `<lora:…>`; it used to borrow `rand`, which meant something else
 
   fs: { micro: '11px', label: '12px', body: '13px', head: '13px' },
   radius: '5px',
@@ -40,6 +49,16 @@ export const T = {
   mono: 'ui-monospace, "Cascadia Code", Consolas, monospace',
   shadow: '0 10px 40px rgba(0,0,0,.55)',
 };
+
+/** A theme colour at low opacity — the wash behind a chip or a badge.
+ *
+ *  These used to be written out as literal `rgba(249,226,175,.12)`, which is a palette
+ *  colour that no longer exists spelled in a notation nobody would think to grep for.
+ *  Derive them instead, so a badge can never keep the old scheme's yellow. */
+export function tint(hex, alpha) {
+  const n = parseInt(hex.replace('#', ''), 16);
+  return `rgba(${(n >> 16) & 255},${(n >> 8) & 255},${n & 255},${alpha})`;
+}
 
 export function el(tag, style = '', text = '') {
   const e = document.createElement(tag);
@@ -313,8 +332,9 @@ export function tabs(items, active, onSelect) {
 }
 
 /** A tree row: indent guides, an optional chevron, an icon, a label, a tail. */
-export function treeRow({ depth = 0, chevron = null, icon = null, iconColor = T.label,
-                          label = '', tail = null, selected = false, dim = false }) {
+export function treeRow({ depth = 0, chevron = null, onChevron = null, icon = null,
+                          iconColor = T.label, label = '', tail = null, selected = false,
+                          dim = false }) {
   const row = div(`display:flex;align-items:center;gap:6px;height:${T.row};padding-right:6px;
     border-radius:${T.radiusSm};cursor:pointer;user-select:none;min-width:0;
     background:${selected ? T.bg4 : 'transparent'};`);
@@ -330,6 +350,14 @@ export function treeRow({ depth = 0, chevron = null, icon = null, iconColor = T.
     font-size:10px;transition:transform .12s;`);
   if (chevron === 'open') chev.textContent = '▾';
   else if (chevron === 'closed') chev.textContent = '▸';
+  // A row whose click does something else (select) can still fold: give the chevron its
+  // own handler and stop the click there.
+  if (onChevron) {
+    chev.style.cursor = 'pointer';
+    chev.onclick = (e) => { e.stopPropagation(); onChevron(e); };
+    chev.onmouseenter = () => (chev.style.color = T.text);
+    chev.onmouseleave = () => (chev.style.color = T.muted);
+  }
   row.append(chev);
 
   if (icon !== null) {

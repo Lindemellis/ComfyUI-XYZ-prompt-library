@@ -61,6 +61,38 @@ masterpiece, best quality, (blonde hair:1.2), <lora:add_detail:0.6>
 A LoRA's weight lives **inside** the brackets — `(<lora:x:0.6>:1.2)` does nothing, and the
 editor's slider knows that.
 
+**A full stop separates items too**, so a prose prompt breaks into sentences the same way a
+tag list breaks into tags. The two separators differ in one way, and it is the point of
+having both:
+
+| | |
+|---|---|
+| `,` | punctuation *between* items — **dropped** |
+| `.` | part of the item it *ends* — **kept** |
+
+```
+tag1, tag2. tag3. tag4, tag5
+```
+
+is five items: `tag1`, `tag2.`, `tag3.`, `tag4`, `tag5`. Each one gets its own row and its
+own switch in the detail page, and each is stored in the library as written — with its
+full stop.
+
+A `.` separates **only when whitespace or the end of the text follows it**. That one rule
+is what leaves the other four meanings of a dot alone:
+
+```
+[characters.illya]: { … }     a library path
+{ … }.set{weight: 1.2}        a settings block
+.set{dropout: 0.35}           a decimal
+<lora:add_detail:0.6>         a LoRA's weight
+```
+
+Write `a.b` and you get one item; write `a. b` and you get two.
+
+Joining works the same way in reverse: an item that already ends in a full stop is followed
+by a space, never a comma — `a cat. on a mat.`, not `a cat., on a mat.`
+
 ### Groups
 
 A group is `{ … }`, and `.set{ … }` gives it settings:
@@ -300,6 +332,43 @@ contents (the block's text is replaced by it); only edits made *afterwards* flow
 
 Links live in a preset's body, so they exist only in the library window. A document is plain
 text and has nowhere to keep one.
+
+### Saving a selection as a group
+
+Select part of a prompt in the editor, right-click → **PLv3: Save selection as a library group…**,
+give it a name and a folder. The selection is **replaced by a reference to the new group**
+(`[path]: { … }`) — because a copy that merely resembles the group would start drifting from it
+the moment either one is edited, and a block header is the only thing in a document that points
+back at the library. `Ctrl+Z` undoes the replacement.
+
+If what you selected is exactly one group with settings — `{ closed eyes, smile }.set{schedule:
+{0, 0.5}}` — the new group **keeps those settings**, region and schedule included. Select a bare
+list of tags and you get a bare group.
+
+What it cannot do faithfully: a group is a flat list of items, and a `[@region]` or `[@schedule]`
+block is a tree. One of those inside the selection is stored as a **single item whose text is the
+whole construct** — it round-trips and it compiles, but it is one row, not a list you can switch
+parts of on and off. That is what saved documents are for.
+
+### Saved documents
+
+A group is a list of items. A **document** is the whole thing: several top-level constructs,
+`[@region]` and `[@schedule]` blocks, the free text between them — a shape the group model
+genuinely cannot hold. So a whole prompt is saved as its own kind of entry, shown in the library
+tree as `▦ name` alongside the groups.
+
+- **💾 Save** in the editor window's title bar stores the node's document under a name and a
+  folder. Saving the same name in the same folder **replaces** it (it asks first).
+- Both halves are stored: the text *and* the document JSON — so the items you **switched off**,
+  which are by design nowhere in the text, come back with it. The detail page tells you how many
+  there are.
+- Clicking a saved document shows it read-only, with **⇥ load into the active node**. Loading
+  **replaces** what is in the open node (`Ctrl+Z` in the editor undoes it). It is read-only on
+  purpose: editing a snapshot in place would mean deciding whether the change belongs to the
+  snapshot or to the node it came from, and there is no good answer — load it, edit it, save it
+  again.
+- A saved document is a snapshot, not a live reference. Deleting it leaves every group it
+  mentions exactly where it was; changing a group does not change a document already saved.
 
 ---
 

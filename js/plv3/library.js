@@ -24,9 +24,10 @@ import { DetailPane, notifyLibraryChanged } from './detail.js';
 import { PromptEditor } from './editor_core.js';
 import { settings } from './settings.js';
 import {
-  T, button, div, el, iconButton, input, makeWindow, sectionLabel, splitter, treeRow,
+  T, button, div, el, iconButton, input, makeWindow, sectionLabel, splitter, tint,
+  treeRow,
 } from './theme.js';
-import { showConfirm, showContextMenu, showPrompt, toast } from './ui.js';
+import { showConfirm, showContextMenu, showForm, showPrompt, toast } from './ui.js';
 
 export const api = {
   async call(method, path, body) {
@@ -54,14 +55,27 @@ export const api = {
   sync(text) { return this.call('POST', '/sync', { text }); },
   savePreset(b) { return this.call('POST', '/presets', b); },
   deletePreset(id) { return this.call('DELETE', `/presets/${id}`); },
+  groupFromText(b) { return this.call('POST', '/groups/from_text', b); },
+  saveDocument(b) { return this.call('POST', '/documents', b); },
+  getDocument(id) { return this.call('GET', `/documents/${id}`); },
+  updateDocument(id, b) { return this.call('PATCH', `/documents/${id}`, b); },
+  deleteDocument(id) { return this.call('DELETE', `/documents/${id}`); },
 };
+
+// Which rows the user folded away. Persisted: a tree that forgets its shape every time the
+// window closes is a tree nobody bothers to fold.
+const COLLAPSE_KEY = 'xyz.plv3.libtree.collapsed';
 
 class LibraryWindow {
   constructor() {
     this.win = null;
     this.selected = null;  // group id
     this.preset = null;    // the selected preset, or null = "the group itself"
+    this.selectedDoc = null;  // a saved document's id — the third kind of row
+    this.docRow = null;    // ...and its contents, once fetched
     this.onInsert = null;  // set by window.js
+    this.onLoadDocument = null;  // set by window.js — only it knows the active node
+    this.collapsed = loadCollapsed();  // 'f<id>' / 'g<id>' of every folded row
     // Tags our own library edits so we don't refresh twice on an event we just emitted.
     this._libSrc = Symbol('plv3-libwin');
   }
@@ -229,16 +243,68 @@ class LibraryWindow {
     this.data = await api.tree();
     this.renderTree();
     if (this.selected) await this.select(this.selected, this.preset?.id);
+    else if (this.selectedDoc) await this.selectDoc(this.selectedDoc);
+  }
+
+  // --- folding ---
+  /** Fold/unfold one row. The key is 'f<id>' for a folder, 'g<id>' for a group. */
+  toggleCollapse(key) {
+    if (this.collapsed.has(key)) this.collapsed.delete(key);
+    else this.collapsed.add(key);
+    saveCollapsed(this.collapsed);
+    this.renderTree();
+  }
+
+  /** Every row that CAN fold: a folder, or a group that has subgroups. Anything else
+   *  would put keys in the set for rows that never show a chevron. */
+  collapsibleKeys() {
+    const { folders = [], groups = [] } = this.data || {};
+    const parents = new Set(groups.filter((g) => g.parent_group_id != null)
+      .map((g) => g.parent_group_id));
+    return [...folders.map((f) => `f${f.id}`), ...[...parents].map((id) => `g${id}`)];
+  }
+
+  collapseAll() {
+    this.collapsed = new Set(this.collapsibleKeys());
+    saveCollapsed(this.collapsed);
+    this.renderTree();
+  }
+
+  expandAll() {
+    this.collapsed.clear();
+    saveCollapsed(this.collapsed);
+    this.renderTree();
   }
 
   // --- folder tree (spec §8.4.1) ---
-  // Every operation is in the right-click menu, as in PLv2's library window: a
-  // permanent toolbar needs a selection to act on, and "select, then reach for a
-  // button up there" fits a tree far worse than "right-click the thing".
+  // Everything that acts on a row is in its right-click menu, as in PLv2's library
+  // window: "right-click the thing" beats "select it, then reach for a button up there".
+  // The toolbar carries only what has no row to right-click — creating at the root, and
+  // folding the whole tree.
   renderTree() {
     const t = this.treeEl;
     t.replaceChildren();
-    t.append(sectionLabel('library'));
+
+    const head = div('display:flex;align-items:center;gap:2px;');
+    const lbl = sectionLabel('library');
+    lbl.style.flex = '1';
+    head.append(
+      lbl,
+      iconButton('⊟', 'Collapse all', () => this.collapseAll()),
+      iconButton('⊞', 'Expand all', () => this.expandAll()),
+    );
+    t.append(head);
+
+    const bar = div('display:flex;gap:4px;padding:0 2px 6px;');
+    const addFolder = button('+ folder', { variant: 'quiet', size: 'sm' });
+    addFolder.title = 'New folder at the root';
+    addFolder.onclick = () => this.createFolder(null);
+    const addGroup = button('+ group', { variant: 'quiet', size: 'sm' });
+    addGroup.title = 'New group at the root';
+    addGroup.onclick = () => this.createGroup({ folder_id: null });
+    bar.append(addFolder, addGroup);
+    t.append(bar);
+
     t.oncontextmenu = (e) => {
       if (e.target !== t) return;
       e.preventDefault();
@@ -249,13 +315,39 @@ class LibraryWindow {
     };
 
     const { folders, groups } = this.data;
+    const documents = this.data.documents || [];
     const subFolders = (id) => folders.filter((f) => f.parent_id === id);
     const groupsIn = (id) => groups.filter((g) => g.folder_id === id && g.parent_group_id === null);
+    const docsIn = (id) => documents.filter((d) => (d.folder_id ?? null) === id);
+
+    // A whole saved prompt: structure, regions, schedules and the items switched off.
+    // It is NOT a group — a group is a list of items — so it gets its own row type
+    // rather than pretending to be one.
+    const renderDoc = (doc, depth) => {
+      const row = treeRow({
+        depth,
+        icon: '▦',
+        iconColor: T.good,
+        label: doc.name,
+        selected: doc.id === this.selectedDoc,
+        tail: div(`font-size:${T.fs.micro};color:${T.muted};font-family:${T.mono};`,
+          charCount(doc.size)),
+      });
+      row.onclick = () => this.selectDoc(doc.id);
+      row.oncontextmenu = (e) => { e.preventDefault(); e.stopPropagation(); this.docMenu(e, doc); };
+      t.append(row);
+    };
 
     const renderGroup = (g, depth) => {
       const subs = groups.filter((x) => x.parent_group_id === g.id);
+      const key = `g${g.id}`;
+      const open = !this.collapsed.has(key);
       const row = treeRow({
         depth,
+        // A group's row SELECTS it, so only the chevron folds — and it is only there
+        // when there is something under it to fold.
+        chevron: subs.length ? (open ? 'open' : 'closed') : null,
+        onChevron: subs.length ? () => this.toggleCollapse(key) : null,
         icon: g.parent_group_id ? '↳' : '▤',
         iconColor: g.parent_group_id ? T.muted : T.lib,
         label: g.name,
@@ -267,26 +359,41 @@ class LibraryWindow {
       row.onclick = () => this.select(g.id);
       row.oncontextmenu = (e) => { e.preventDefault(); e.stopPropagation(); this.groupMenu(e, g); };
       t.append(row);
-      for (const sub of subs) renderGroup(sub, depth + 1);
+      if (open) for (const sub of subs) renderGroup(sub, depth + 1);
     };
 
     const renderFolder = (f, depth) => {
+      const key = `f${f.id}`;
+      const open = !this.collapsed.has(key);
+      const kids = groupsIn(f.id);
+      const subs = subFolders(f.id);
+      const docs = docsIn(f.id);
       const row = treeRow({
         depth,
-        chevron: 'open',
-        icon: '▸',
+        // The chevron is the fold state — so the icon must NOT be a second triangle.
+        // A folder is an empty container; a group (▤) is one with contents.
+        chevron: open ? 'open' : 'closed',
+        icon: '□',
         iconColor: T.accent,
         label: f.name,
+        tail: kids.length + subs.length + docs.length
+          ? div(`font-size:${T.fs.micro};color:${T.muted};font-family:${T.mono};`,
+            String(kids.length + subs.length + docs.length))
+          : null,
       });
-      row.style.cursor = 'default';
+      // A folder has nothing to select, so the whole row folds it.
+      row.onclick = () => this.toggleCollapse(key);
       row.oncontextmenu = (e) => { e.preventDefault(); e.stopPropagation(); this.folderMenu(e, f); };
       t.append(row);
-      for (const g of groupsIn(f.id)) renderGroup(g, depth + 1);
-      for (const sub of subFolders(f.id)) renderFolder(sub, depth + 1);
+      if (!open) return;
+      for (const g of kids) renderGroup(g, depth + 1);
+      for (const doc of docs) renderDoc(doc, depth + 1);
+      for (const sub of subs) renderFolder(sub, depth + 1);
     };
 
     for (const f of subFolders(null)) renderFolder(f, 0);
     for (const g of groupsIn(null)) renderGroup(g, 0);
+    for (const doc of docsIn(null)) renderDoc(doc, 0);
     t.append(div('height:60px;')); // right-clickable empty space = the root
   }
 
@@ -323,6 +430,17 @@ class LibraryWindow {
       },
       { separator: true },
       { label: 'Delete', danger: true, action: () => this.deleteGroup(g) },
+    ]);
+  }
+
+  docMenu(e, doc) {
+    showContextMenu(e.clientX, e.clientY, [
+      { label: 'Load into the active node', action: () => this.selectDoc(doc.id).then(() => this.loadDocument()) },
+      { separator: true },
+      { label: 'Rename…', action: () => this.renameDocument(doc) },
+      { label: 'Move to…', submenu: () => this.folderTargets((x) => this.moveDocument(doc, x)) },
+      { separator: true },
+      { label: 'Delete', danger: true, action: () => this.deleteDocument(doc) },
     ]);
   }
 
@@ -366,12 +484,23 @@ class LibraryWindow {
   // --- tree operations ---
   async createFolder(parentId) {
     const name = await showPrompt('New folder name:');
-    if (name) await this.guard(() => api.createFolder(name, parentId));
+    if (!name) return;
+    this.reveal(parentId != null ? `f${parentId}` : null);
+    await this.guard(() => api.createFolder(name, parentId));
   }
 
   async createGroup(where) {
     const name = await showPrompt(where.parent_group_id ? 'New subgroup name:' : 'New group name:');
-    if (name) await this.guard(() => api.createGroup({ name, ...where }));
+    if (!name) return;
+    if (where.parent_group_id != null) this.reveal(`g${where.parent_group_id}`);
+    else if (where.folder_id != null) this.reveal(`f${where.folder_id}`);
+    await this.guard(() => api.createGroup({ name, ...where }));
+  }
+
+  /** Unfold a row, so something just created inside it is actually on screen. */
+  reveal(key) {
+    if (!key || !this.collapsed.delete(key)) return;
+    saveCollapsed(this.collapsed);
   }
 
   async renameFolder(f) {
@@ -409,6 +538,36 @@ class LibraryWindow {
     await this.guard(() => api.deleteGroup(g.id));
   }
 
+  async renameDocument(doc) {
+    const name = await showPrompt(`Rename the document “${doc.name}” to:`, doc.name);
+    if (!name || name === doc.name) return;
+    await this.guard(() => api.updateDocument(doc.id, { name }));
+  }
+
+  async moveDocument(doc, folderId) {
+    await this.guard(() => api.updateDocument(doc.id, { folder_id: folderId }));
+  }
+
+  async deleteDocument(doc) {
+    const ok = await showConfirm(
+      `Delete the saved document “${doc.name}”?\n\nThe groups it references stay where ` +
+      `they are — a document never owns them.`,
+      { okLabel: 'Delete', danger: true });
+    if (!ok) return;
+    if (this.selectedDoc === doc.id) { this.selectedDoc = null; this.docRow = null; }
+    await this.guard(() => api.deleteDocument(doc.id));
+  }
+
+  /** Hand the selected document to whoever knows which node is open. */
+  loadDocument() {
+    if (!this.docRow) return;
+    if (!this.onLoadDocument) {
+      toast('Open the PLv3 editor window first — a document is loaded into a node.', 'error');
+      return;
+    }
+    this.onLoadDocument(this.docRow);
+  }
+
   async insert(groupId, presetId) {
     const { text } = await api.expand({ group_id: groupId, preset_id: presetId });
     this.onInsert?.(text);
@@ -428,6 +587,8 @@ class LibraryWindow {
     // write the text of the preset the user just left into the one they just opened.
     await this.commitEditor();
 
+    this.selectedDoc = null;
+    this.docRow = null;
     this.selected = groupId;
     this.current = await api.group(groupId);
     this.preset = presetId
@@ -439,9 +600,37 @@ class LibraryWindow {
     await this.renderEditor();
   }
 
+  /** A saved document is not a group: no items, no presets, no two-way editor. It is a
+   *  snapshot you load into a node — so it gets a read-only page, and the columns that
+   *  only make sense for a group stand down. */
+  async selectDoc(id) {
+    await this.commitEditor();
+    this.selected = null;
+    this.preset = null;
+    this.current = null;
+    this.selectedDoc = id;
+    try {
+      this.docRow = await api.getDocument(id);
+    } catch (err) {
+      this.selectedDoc = null;
+      this.docRow = null;
+      toast(err.message, 'error');
+    }
+    this.renderTree();
+    this.renderPresets();
+    this.renderDetail();
+    await this.renderEditor();
+  }
+
   renderPresets() {
     const p = this.presetEl;
     p.replaceChildren();
+    if (!this.current) {
+      p.append(sectionLabel('views'));
+      p.append(div(`font-size:${T.fs.micro};color:${T.muted};padding:2px 8px;line-height:1.5;`,
+        this.selectedDoc ? 'a saved document has no presets — it IS one snapshot' : 'pick a group'));
+      return;
+    }
     p.append(sectionLabel('views'));
     const { group, presets } = this.current;
 
@@ -571,15 +760,16 @@ class LibraryWindow {
 
   // --- detail ---
   renderDetail() {
-    if (!this.current) return;
-
     // A preset IS a block of text, so it gets the document detail page — the same
     // component, the same unified enable/disable list, the same settings controls.
-    const isPreset = !!this.preset;
+    const isDoc = !!this.selectedDoc;
+    const isPreset = !isDoc && !!this.preset;
     this.detailEl.style.display = isPreset ? 'none' : 'block';
     this.presetDetailEl.style.display = isPreset ? 'flex' : 'none';
     this.editorWrap.style.display = isPreset ? 'flex' : 'none';
     if (isPreset) return;
+    if (isDoc) { this.renderDocumentDetail(); return; }
+    if (!this.current) { this.detailEl.replaceChildren(); return; }
 
     const d = this.detailEl;
     d.replaceChildren();
@@ -594,6 +784,143 @@ class LibraryWindow {
     d.append(head);
 
     this.renderGroupItems(d);
+  }
+
+  /** A saved document: read-only, and deliberately so.
+   *
+   *  Editing it here would mean answering "does this change belong to the snapshot or to
+   *  the node it came from?", and there is no good answer. Load it into a node, edit it
+   *  there, save it again — the same round trip a preset makes. */
+  renderDocumentDetail() {
+    const d = this.detailEl;
+    d.replaceChildren();
+    const row = this.docRow;
+    if (!row) return;
+
+    const head = div('display:flex;align-items:center;gap:10px;margin-bottom:4px;min-width:0;');
+    head.append(div(`flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;
+      font-size:14px;font-weight:600;color:${T.text};`, `▦ ${row.name}`));
+    const load = button('⇥ load into the active node', { variant: 'primary', size: 'sm' });
+    load.title = 'Replace the open node’s document with this one';
+    load.onclick = () => this.loadDocument();
+    head.append(load);
+    d.append(head);
+
+    const parked = countParked(row.doc_json);
+    d.append(div(`font-size:${T.fs.micro};color:${T.muted};margin-bottom:10px;`, [
+      `${row.text.length} characters`,
+      row.updated_at ? `saved ${new Date(row.updated_at * 1000).toLocaleString()}` : null,
+      // The whole reason the doc JSON is stored next to the text: these items are
+      // nowhere in the text, and a text-only snapshot would have lost them.
+      parked ? `${parked} item${parked === 1 ? '' : 's'} switched off` : null,
+    ].filter(Boolean).join(' · ')));
+
+    d.append(sectionLabel('the document, as it was saved'));
+    const pre = el('pre', `background:${T.bg0};border:1px solid ${T.edge};
+      border-radius:${T.radiusSm};color:${T.text};font-family:${T.mono};
+      font-size:${T.fs.label};line-height:1.5;padding:8px 10px;margin:0;
+      white-space:pre-wrap;word-break:break-word;`);
+    pre.textContent = row.text;
+    d.append(pre);
+  }
+
+  // --- saving into the library ------------------------------------------------
+
+  /** "Where does it go, and what is it called?" — one dialog, both kinds of save.
+   *
+   *  A dropdown rather than a context menu of folders: a menu that is dismissed resolves
+   *  nothing, and an await on it would hang for the rest of the session. */
+  async askDestination(message, { initial = '', okLabel = 'Save' } = {}) {
+    const options = [
+      { value: '', label: '(root)' },
+      ...this.data.folders.map((f) => ({ value: f.id, label: this.folderPath(f) })),
+    ];
+    const out = await showForm(message, [
+      { key: 'name', label: 'Name', value: initial, placeholder: 'what to call it' },
+      { key: 'folder', label: 'Folder', options },
+    ], { okLabel });
+    if (!out) return null;
+    const name = (out.name || '').trim();
+    if (!name) return null;
+    return { name, folder_id: out.folder === '' ? null : Number(out.folder) };
+  }
+
+  /** Save a whole document — text AND the doc JSON, so the items switched off come too. */
+  async saveDocument({ text, doc, suggested = '' }) {
+    if (!String(text || '').trim()) {
+      toast('Nothing to save — that document is empty.', 'error');
+      return;
+    }
+    try {
+      this.data = await api.tree();
+    } catch (err) {
+      toast(err.message, 'error');
+      return;
+    }
+    const dest = await this.askDestination(
+      'Save the whole prompt — groups, regions, schedules, the text between them, and the '
+      + 'items you switched off.',
+      { initial: suggested, okLabel: 'Save' });
+    if (!dest) return;
+
+    // The backend replaces by (folder, name). Say so before it happens, not after.
+    const clash = (this.data.documents || []).find(
+      (x) => x.name === dest.name && (x.folder_id ?? null) === dest.folder_id);
+    if (clash) {
+      const ok = await showConfirm(
+        `A document called “${dest.name}” is already saved there.\n\nSaving replaces it.`,
+        { okLabel: 'Replace', danger: true });
+      if (!ok) return;
+    }
+    try {
+      await api.saveDocument({ ...dest, text, doc: doc || '' });
+    } catch (err) {
+      toast(err.message, 'error');
+      return;
+    }
+    toast(`Saved the document “${dest.name}”.`);
+    if (this.isVisible()) await this.refresh();
+  }
+
+  /** Save a chunk of a document as a NEW library group.  Returns the `[path]: { … }`
+   *  block that should replace it in the text, or null if nothing was created. */
+  async saveSelectionAsGroup(text) {
+    if (!String(text || '').trim()) {
+      toast('Select some prompt text first.', 'error');
+      return null;
+    }
+    try {
+      this.data = await api.tree();
+    } catch (err) {
+      toast(err.message, 'error');
+      return null;
+    }
+    const dest = await this.askDestination(
+      'Save the selection as a new library group. The selected text is replaced by a '
+      + 'reference to it, so the document and the library stay the same thing.',
+      { okLabel: 'Create' });
+    if (!dest) return null;
+
+    // Groups do NOT upsert by name — and at the root SQLite would not even reject the
+    // duplicate (NULL folder_id defeats the UNIQUE). So the check has to happen here.
+    const clash = this.data.groups.find(
+      (g) => g.name === dest.name && (g.folder_id ?? null) === dest.folder_id
+        && g.parent_group_id === null);
+    if (clash) {
+      toast(`A group called “${dest.name}” already lives there.`, 'error');
+      return null;
+    }
+    let res;
+    try {
+      res = await api.groupFromText({ ...dest, text });
+    } catch (err) {
+      toast(err.message, 'error');
+      return null;
+    }
+    toast(`Created [${res.path}] — the selection now references it.`);
+    if (this.isVisible()) await this.refresh();
+    this.notifyChanged(res.path);
+    return res.text;
   }
 
   /** The group itself: WHAT IT CONTAINS.  No enable state exists here (§5.2). */
@@ -728,10 +1055,10 @@ class LibraryWindow {
   renderEditorHead(state) {
     if (!this.preset) return;
     const chip = {
-      saved: [`saved`, T.good, 'rgba(166,227,161,.10)'],
-      saving: ['saving…', T.warn, 'rgba(249,226,175,.12)'],
-      error: ['not saved', T.bad, 'rgba(243,139,168,.12)'],
-    }[state] || ['saved', T.good, 'rgba(166,227,161,.10)'];
+      saved: ['saved', T.good, tint(T.good, .10)],
+      saving: ['saving…', T.warn, tint(T.warn, .12)],
+      error: ['not saved', T.bad, tint(T.bad, .12)],
+    }[state] || ['saved', T.good, tint(T.good, .10)];
 
     const ins = button('↵ insert into editor', { variant: 'quiet', size: 'sm' });
     ins.onclick = () => this.insert(this.current.group.id, this.preset.id);
@@ -791,6 +1118,41 @@ class LibraryWindow {
   }
 }
 
+// The folded rows survive the window being closed — and a corrupt/absent entry is just
+// "nothing is folded", never a tree that fails to draw.
+function loadCollapsed() {
+  try {
+    const raw = JSON.parse(localStorage.getItem(COLLAPSE_KEY) || '[]');
+    return new Set(Array.isArray(raw) ? raw : []);
+  } catch { return new Set(); }
+}
+
+// A saved document's size, for the tree row. Characters, not bytes — it is a prompt.
+function charCount(size) {
+  const n = Number(size) || 0;
+  return n < 1000 ? String(n) : `${(n / 1000).toFixed(1)}k`;
+}
+
+// How many items the snapshot has switched OFF. They are nowhere in the text — that is
+// the whole point of storing the doc JSON — so this is the only way to see they exist.
+function countParked(docJson) {
+  if (!docJson) return 0;
+  let root;
+  try { root = JSON.parse(docJson)?.root; } catch { return 0; }
+  let n = 0;
+  const walk = (node) => {
+    if (!node || typeof node !== 'object') return;
+    if (node.enabled === false) n += 1;
+    for (const child of node.children || []) walk(child);
+  };
+  walk(root);
+  return n;
+}
+
+function saveCollapsed(set) {
+  try { localStorage.setItem(COLLAPSE_KEY, JSON.stringify([...set])); } catch { /* private mode */ }
+}
+
 // Danbooru autocomplete on a library detail-page text box (same bridge as the editor):
 // tags-only PLv3 text, click a token for its related tags.
 function attachAC(el) {
@@ -802,10 +1164,27 @@ function cleanItem(v) {
   return String(v).replace(/^[\s,]+/, '').replace(/[\s,]+$/, '');
 }
 
-// Split typed text into items on every comma, each trimmed, blanks dropped — `a, b, c`
-// becomes three items. A comma is always an item separator; there is no escape exception.
+// Split typed text into items, exactly the way the lexer does (lexer.is_stop):
+//
+//   `,`  always separates, and is dropped — it is punctuation between items.
+//   `.`  separates only when whitespace or the end follows, and it STAYS with the item
+//        it ends — it is part of what the user wrote.
+//
+// So `tag1, tag2. tag3.` is `tag1`, `tag2.`, `tag3.`, and `0.5` or `a.b` is one item.
 function splitItems(v) {
-  return String(v).split(',').map((s) => s.trim()).filter(Boolean);
+  const src = String(v);
+  const out = [];
+  let start = 0;
+  for (let i = 0; i < src.length; i += 1) {
+    const stop = src[i] === '.' && (i + 1 >= src.length || /\s/.test(src[i + 1]));
+    if (src[i] !== ',' && !stop) continue;
+    const piece = src.slice(start, stop ? i + 1 : i).trim();
+    if (piece) out.push(piece);
+    start = i + 1;
+  }
+  const tail = src.slice(start).trim();
+  if (tail) out.push(tail);
+  return out;
 }
 
 function numberBox(value, onCommit) {

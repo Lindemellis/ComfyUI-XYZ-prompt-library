@@ -8,6 +8,8 @@
 // Monaco's loader also installs a global AMD `require`, so it is loaded exactly
 // once and handed back through a singleton promise.
 
+import { T } from './theme.js';
+
 const BASE = '/xyz/plv3/monaco/';
 const VS = BASE + 'vs';
 
@@ -51,28 +53,32 @@ export function loadMonaco() {
       }
     });
 
+    // Every colour comes from theme.js. This used to be a hand-written copy of the same
+    // palette, which meant the editor kept the old colours whenever the windows changed.
+    // Monaco wants its token colours WITHOUT the leading '#'; the chrome colours WITH it.
+    const hex = (c) => c.replace('#', '');
     monaco.editor.defineTheme('plv3-dark', {
       base: 'vs-dark',
       inherit: true,
       rules: [
-        { token: 'tag.plv3', foreground: 'cdd6f4' },                  // plain prompt text
-        { token: 'keyword.block.plv3', foreground: 'f38ba8', fontStyle: 'bold' }, // [@schedule] / [@region]
-        { token: 'keyword.set.plv3', foreground: 'cba6f7', fontStyle: 'bold' },   // .set
-        { token: 'keyword.plv3', foreground: 'cba6f7' },              // base / fill / true / false
-        { token: 'attribute.name.plv3', foreground: '89b4fa' },       // .set{} field names
-        { token: 'path.plv3', foreground: 'f9e2af' },                 // library group path
-        { token: 'number.plv3', foreground: 'fab387' },
-        { token: 'number.weight.plv3', foreground: 'fab387', fontStyle: 'bold' },
-        { token: 'string.plv3', foreground: 'a6e3a1' },
-        { token: 'escape.plv3', foreground: 'f5c2e7' },
-        { token: 'lora.plv3', foreground: '94e2d5', fontStyle: 'italic' },
-        { token: 'delimiter.plv3', foreground: '6c7086' },
+        { token: 'tag.plv3', foreground: hex(T.text) },               // plain prompt text
+        { token: 'keyword.block.plv3', foreground: hex(T.bad), fontStyle: 'bold' }, // [@schedule] / [@region]
+        { token: 'keyword.set.plv3', foreground: hex(T.region), fontStyle: 'bold' },   // .set
+        { token: 'keyword.plv3', foreground: hex(T.region) },         // base / fill / true / false
+        { token: 'attribute.name.plv3', foreground: hex(T.accent) },  // .set{} field names
+        { token: 'path.plv3', foreground: hex(T.lib) },               // library group path
+        { token: 'number.plv3', foreground: hex(T.time) },
+        { token: 'number.weight.plv3', foreground: hex(T.time), fontStyle: 'bold' },
+        { token: 'string.plv3', foreground: hex(T.good) },
+        { token: 'escape.plv3', foreground: hex(T.warn) },
+        { token: 'lora.plv3', foreground: hex(T.lora), fontStyle: 'italic' },
+        { token: 'delimiter.plv3', foreground: hex(T.muted) },
       ],
       colors: {
-        'editor.background': '#181825',
-        'editorGutter.background': '#181825',
-        'editorLineNumber.foreground': '#45475a',
-        'editor.lineHighlightBackground': '#1e1e2e',
+        'editor.background': T.bg1,
+        'editorGutter.background': T.bg1,
+        'editorLineNumber.foreground': T.edge,
+        'editor.lineHighlightBackground': T.bg2,
       },
     });
 

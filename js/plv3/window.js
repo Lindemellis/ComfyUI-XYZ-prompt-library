@@ -9,11 +9,16 @@ import { EditorPane } from './editor.js';
 import { libraryWindow } from './library.js';
 import { PreviewPanel } from './preview.js';
 import { T, button, div, iconButton, makeWindow, splitter, tabs, treeRow } from './theme.js';
+import { showConfirm, toast } from './ui.js';
 
 export const PLV3_TYPES = new Set([
   'XYZ Prompt Library V3',
   'XYZ Prompt Library V3 Monaco',
 ]);
+
+function widget(node, name) {
+  return node?.widgets?.find((w) => w.name === name);
+}
 
 /** The Monaco node carries its own embedded editor; the plain one uses a textarea. */
 export function isMonacoNode(node) {
@@ -71,11 +76,23 @@ class PLv3Window {
 
     const libBtn = button('📚 Library', { variant: 'ghost', size: 'sm' });
     libBtn.onclick = () => {
-      libraryWindow.onInsert = (text) => this.pane.insertAtCursor(text);
+      this.bindLibrary();
       libraryWindow.toggle().catch((err) => console.error('[PLv3] library', err));
     };
+    // Saving the WHOLE document — structure, regions, schedules and the items switched
+    // off. The library's groups and presets can only hold a flat list of items, so this
+    // is the only thing that keeps a prompt's shape.
+    const saveBtn = button('💾 Save', { variant: 'ghost', size: 'sm' });
+    saveBtn.title = 'Save this document to the library';
+    // .catch, not a bare call: an async click handler that throws becomes an unhandled
+    // rejection in the console and NOTHING on screen — "I clicked Save and nothing
+    // happened" is the one failure mode a save button must never have.
+    saveBtn.onclick = () => this.saveActiveDocument().catch((err) => {
+      console.error('[PLv3] save document', err);
+      toast(`Could not save — ${err.message}`, 'error');
+    });
     const close = iconButton('✕', 'Close', () => this.hide());
-    this.win.bar.append(libBtn, close);
+    this.win.bar.append(saveBtn, libBtn, close);
 
     // --- 1) node list ---
     this.listEl = div(`width:200px;flex-shrink:0;overflow-y:auto;background:${T.bg2};
@@ -133,9 +150,66 @@ class PLv3Window {
       },
     });
     this.detail.clear();
+    this.bindLibrary();   // the hooks must exist before the library window is ever opened
     await this.pane.init();
 
     this.win.el.addEventListener('plv3:resized', () => this.pane.relayout());
+  }
+
+  // --- the library's two hooks: only this window knows which node is open ---
+  bindLibrary() {
+    libraryWindow.onInsert = (text) => this.pane.insertAtCursor(text);
+    libraryWindow.onLoadDocument = (row) => this.loadDocument(row);
+  }
+
+  /** Save the open node's document into the library. */
+  async saveActiveDocument() {
+    const node = this.pane?.activeNode();
+    if (!node) {
+      toast('Open a node first — a document is saved from the node it belongs to.', 'error');
+      return;
+    }
+    // The editor is the truth while the window is open, and its text reaches the widget
+    // only on blur. Push it first, or clicking Save straight after typing saves the text
+    // as it was one edit ago.
+    this.pane.syncActiveToNode();
+    await libraryWindow.saveDocument({
+      text: widget(node, 'text')?.value ?? '',
+      doc: widget(node, 'doc')?.value ?? '',
+      suggested: node.title || `Node ${node.id}`,
+    });
+  }
+
+  /** Put a saved document into the open node, replacing what is there. */
+  async loadDocument(row) {
+    const node = this.pane?.activeNode();
+    if (!node) {
+      toast('Open a node first — a document is loaded into a node.', 'error');
+      return;
+    }
+    const ok = await showConfirm(
+      `Replace the contents of “${node.title || `Node ${node.id}`}” with the document `
+      + `“${row.name}”?\n\nWhat is in the node now is overwritten. Ctrl+Z in the editor `
+      + `undoes it.`,
+      { okLabel: 'Replace', danger: true });
+    if (!ok) return;
+
+    // The doc FIRST: the text change triggers a lint, which posts the doc alongside it,
+    // and a stale doc there would be reconciled against the new text — parking items the
+    // snapshot never had and losing the ones it did.
+    const dw = widget(node, 'doc');
+    if (dw) dw.value = row.doc_json || '';
+    const tw = widget(node, 'text');
+    if (tw) {
+      tw.value = row.text;
+      tw.callback?.call(node, row.text);
+    }
+    node.graph?.setDirtyCanvas(true, true);
+    // ...and into the open Monaco model. The widget callback usually gets here by itself
+    // (plv3.js re-dispatches it), but that wrapper is not guaranteed to be installed.
+    this.pane.pushFromNode(node.id, row.text);
+    this.pane.scheduleLint();
+    toast(`Loaded “${row.name}”.`);
   }
 
   // --- node list ---

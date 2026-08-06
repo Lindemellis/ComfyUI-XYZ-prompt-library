@@ -24,7 +24,7 @@
 
 import {
   T, button, div, dualSlider, el, field, fmt, iconButton, input, numberInput,
-  sectionLabel, slider, splitter, toggle, treeRow,
+  sectionLabel, slider, splitter, tint, toggle, treeRow,
 } from './theme.js';
 import { loraRange, settings, weightRange } from './settings.js';
 import { showConfirm, showContextMenu, showPrompt, toast } from './ui.js';
@@ -318,7 +318,15 @@ export class DetailPane {
    *  enough within one editing session — but it is NOT persisted: restoring it after a
    *  reload would fold whatever group had drifted into that slot. */
   collapseKey(group) {
-    return group.header ? `lib:${group.header}` : `doc:${group.path.join('.')}`;
+    if (group.header) return `lib:${group.header}`;
+    // NOT the tree path. A path is a POSITION — `(3, 0)` is "child 3's child 0" — so
+    // switching any item off ABOVE this group renumbers it, its key silently changes,
+    // and every card the user had folded shut springs open. The document gives the same
+    // node the same id before and after a toggle, and that is the identity a fold
+    // belongs to. The path stays as the fallback for a document that has none yet (an
+    // old workflow, or the text mid-parse).
+    const docId = this.docIndex.byNode.get(group)?.id;
+    return docId ? `doc:${docId}` : `pos:${group.path.join('.')}`;
   }
 
   toggleCollapsed(group) {
@@ -943,7 +951,7 @@ export class DetailPane {
     if (sw) row.append(sw);
     const box = textbox(text, (v) => this.edit([{ span: body.span, text: cleanItem(v) }]),
       { ac: body.kind !== 'lora' });
-    if (body.kind === 'lora') { box.style.color = '#94e2d5'; box.style.fontFamily = T.mono; }
+    if (body.kind === 'lora') { box.style.color = T.lora; box.style.fontFamily = T.mono; }
 
     const w = div('width:132px;flex-shrink:0;');
     // A LoRA's weight is not a prompt weight: it lives inside `<…>` and may go negative
@@ -1334,7 +1342,7 @@ export class DetailPane {
     if (on) {
       const box = textbox(entry.text, (v) =>
         this.edit([{ span: entry.body.span, text: cleanItem(v) }]), { ac: !isLora });
-      if (isLora) { box.style.color = '#94e2d5'; box.style.fontFamily = T.mono; }
+      if (isLora) { box.style.color = T.lora; box.style.fontFamily = T.mono; }
       row.append(box);
       const weight = this.enabledWeight(entry.node, src);
       const w = div('width:132px;flex-shrink:0;');
@@ -1366,7 +1374,7 @@ export class DetailPane {
       this.invalidateLibrary([group.header]);
       notifyLibraryChanged([group.header], this._libSrc);
     }, { ac: !isLora });
-    if (isLora) { box.style.color = '#94e2d5'; box.style.fontFamily = T.mono; }
+    if (isLora) { box.style.color = T.lora; box.style.fontFamily = T.mono; }
     row.append(box);
 
     // A disabled item has no text to hold a weight, so the slider writes the memory — and
@@ -1683,7 +1691,7 @@ export class DetailPane {
 
     if (current) {
       bar.append(div(`font-size:${T.fs.micro};padding:2px 6px;border-radius:${T.radiusSm};
-        color:${dirty ? T.warn : T.good};background:${dirty ? 'rgba(249,226,175,.12)' : 'rgba(166,227,161,.10)'};
+        color:${dirty ? T.warn : T.good};background:${dirty ? tint(T.warn, .12) : tint(T.good, .10)};
         flex-shrink:0;`, dirty ? 'modified' : 'unchanged'));
 
       // The whole point: you loaded a preset, you changed the block, and putting the
@@ -1743,7 +1751,7 @@ export class DetailPane {
         overflow:hidden;text-overflow:ellipsis;white-space:nowrap;`,
       `editing ${group.header} / ${linked.name}`));
       // Not decoration: the user is about to change a thing other presets rely on.
-      bar.append(div(`font-size:${T.fs.micro};color:${T.warn};background:rgba(249,226,175,.12);
+      bar.append(div(`font-size:${T.fs.micro};color:${T.warn};background:${tint(T.warn, .12)};
         padding:2px 6px;border-radius:${T.radiusSm};flex-shrink:0;`, 'shared'));
 
       const unlink = button('unlink', { variant: 'quiet', size: 'sm' });

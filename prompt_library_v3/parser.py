@@ -342,7 +342,9 @@ class Parser:
             t = self.peek()
             if t.kind == lx.EOF or t.kind == end:
                 break
-            if t.kind == lx.COMMA:
+            if t.kind in (lx.COMMA, lx.STOP):
+                # A STOP here belongs to no item — the item that owned it already took
+                # it (see parse_item). This is a stray one, e.g. after a `}`.
                 self.advance()
                 continue
             before = self.i
@@ -389,6 +391,15 @@ class Parser:
             if t.kind == lx.LPAREN:
                 atoms.append(self.parse_paren())
                 continue
+
+            if t.kind == lx.STOP:
+                # The full stop ENDS this item and stays inside it: `tag2. tag3.` is
+                # `tag2.` then `tag3.`. Coalescing merges it into the text before it, so
+                # the item's span covers the period too and a detail-page control that
+                # rewrites the item does not leave it stranded.
+                self.advance()
+                atoms.append(Text(".", t.pos, t.pos + 1))
+                break
 
             if t.kind == lx.LORA:
                 self.advance()
@@ -690,7 +701,7 @@ class Parser:
 
         entries: list[Group] = []
         while not self.at(lx.RBRACE) and not self.at(lx.EOF):
-            if self.at(lx.COMMA):
+            if self.at(lx.COMMA) or self.at(lx.STOP):
                 self.advance()
                 continue
             if self.at(lx.TEXT) and not lx.ident(self.peek().raw):
@@ -753,7 +764,7 @@ class Parser:
 
         entries: list[Group] = []
         while not self.at(lx.RBRACE) and not self.at(lx.EOF):
-            if self.at(lx.COMMA):
+            if self.at(lx.COMMA) or self.at(lx.STOP):
                 self.advance()
                 continue
             if self.at(lx.TEXT) and not lx.ident(self.peek().raw):
@@ -906,6 +917,12 @@ class Parser:
             return lx.ident(t.raw), {
                 "span": (t.pos + lead, t.pos + len(t.raw) - trail)
             }
+        if t.kind == lx.STOP:
+            # `.` separates items in PROMPT text; a config block is not prompt text, so
+            # here it is just a character. Nothing should produce one, but a stray must
+            # not abort the parse of the whole document.
+            self.advance()
+            return ".", {"span": (t.pos, t.pos + 1)}
         raise self.error(f"bad config value {t.raw!r}", t.pos)
 
     def settings_from(self, raw: dict, pos: int, spans: Spans | None = None) -> Settings:

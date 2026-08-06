@@ -441,6 +441,78 @@ class DeletePresetOp:
         conn.execute("DELETE FROM presets WHERE id = ?", (self.preset_id,))
 
 
+# --- documents: a whole prompt, stored verbatim -----------------------------
+
+
+@dataclass
+class SaveDocumentOp:
+    """Store a whole document.  Same name in the same folder REPLACES it.
+
+    Both halves are kept: `text` is what compiles, `doc_json` is the document the text
+    was rendered from — and an item switched off lives only in the latter.  Saving the
+    text alone would drop every disabled item, silently, at the moment of saving.
+    """
+
+    name: str
+    text: str
+    doc_json: str = ""
+    folder_id: int | None = None
+
+    def apply(self, conn) -> int:
+        # `folder_id IS ?`, not `= ?`: the root folder is NULL, and NULL = NULL is not
+        # true in SQL.  See db._v3 for why the uniqueness lives here and not in an index.
+        row = conn.execute(
+            "SELECT id FROM documents WHERE folder_id IS ? AND name = ?",
+            (self.folder_id, self.name),
+        ).fetchone()
+        now = int(time.time())
+        if row:
+            conn.execute(
+                "UPDATE documents SET text = ?, doc_json = ?, updated_at = ? WHERE id = ?",
+                (self.text, self.doc_json, now, int(row["id"])),
+            )
+            return int(row["id"])
+        idx = _next_sort(conn, "documents", "folder_id IS ?", (self.folder_id,))
+        cur = conn.execute(
+            "INSERT INTO documents(folder_id, name, sort_index, text, doc_json, updated_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (self.folder_id, self.name, idx, self.text, self.doc_json, now),
+        )
+        return int(cur.lastrowid)
+
+
+@dataclass
+class RenameDocumentOp:
+    document_id: int
+    name: str
+
+    def apply(self, conn) -> None:
+        conn.execute(
+            "UPDATE documents SET name = ? WHERE id = ?", (self.name, self.document_id)
+        )
+
+
+@dataclass
+class MoveDocumentOp:
+    document_id: int
+    folder_id: int | None
+
+    def apply(self, conn) -> None:
+        idx = _next_sort(conn, "documents", "folder_id IS ?", (self.folder_id,))
+        conn.execute(
+            "UPDATE documents SET folder_id = ?, sort_index = ? WHERE id = ?",
+            (self.folder_id, idx, self.document_id),
+        )
+
+
+@dataclass
+class DeleteDocumentOp:
+    document_id: int
+
+    def apply(self, conn) -> None:
+        conn.execute("DELETE FROM documents WHERE id = ?", (self.document_id,))
+
+
 # ---------------------------------------------------------------------------
 # Cycle detection (spec §5.5, layer 1: the library never contains a loop)
 # ---------------------------------------------------------------------------
@@ -577,6 +649,31 @@ def get_preset(preset_id: int) -> dict | None:
         if r is None:
             return None
         return {**dict(r), "body": json.loads(r["body_json"] or "{}")}
+
+
+def list_documents() -> list[dict]:
+    """Every saved document — WITHOUT its text.
+
+    The library tree draws a row per document and nothing more; shipping every stored
+    prompt with the tree would make the window's first fetch grow with the archive.
+    `size` is there so the row can say how big the thing is before you open it.
+    """
+    with _read() as conn:
+        return [
+            dict(r)
+            for r in conn.execute(
+                "SELECT id, folder_id, name, sort_index, updated_at, "
+                "length(text) AS size FROM documents ORDER BY sort_index, name"
+            )
+        ]
+
+
+def get_document(document_id: int) -> dict | None:
+    with _read() as conn:
+        r = conn.execute(
+            "SELECT * FROM documents WHERE id = ?", (document_id,)
+        ).fetchone()
+        return dict(r) if r is not None else None
 
 
 def group_path(group_id: int) -> str | None:

@@ -123,6 +123,16 @@ def _randomise(parts: list[Part], group: Group, ctx: RenderCtx) -> list[Part]:
 # --- rendering --------------------------------------------------------------
 
 
+def _ends_sentence(text: str) -> bool:
+    """Does this part already end with its own punctuation?
+
+    An item that ends in a full stop was written as prose, and prose does not want a
+    comma welded onto it: `a cat., on a mat.` is not what anyone typed. The period is
+    the separator there (spec update 2026-08-05), so the joiner adds only a space.
+    """
+    return text.rstrip().endswith(".")
+
+
 def _join(parts: list[Part]) -> str:
     out: list[str] = []
     for i, p in enumerate(parts):
@@ -130,7 +140,8 @@ def _join(parts: list[Part]) -> str:
             # A terminated part already carries its comma inside the bracket, so it
             # gets a plain space: a separator there would become a stray comma the
             # moment its time window closes. Whitespace is nothing to the encoder.
-            out.append(" " if parts[i - 1].terminated else ", ")
+            prev = parts[i - 1]
+            out.append(" " if (prev.terminated or _ends_sentence(prev.text)) else ", ")
         out.append(p.text)
     return "".join(out)
 
