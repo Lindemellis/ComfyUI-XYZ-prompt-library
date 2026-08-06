@@ -12,7 +12,7 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
-from . import ops
+from . import geometry, ops
 from .bridge import MainThread
 from .logger import get_logger
 
@@ -116,14 +116,15 @@ class _Handler(BaseHTTPRequestHandler):
                 result = self.main.call(lambda: ops.new_document(png, name), timeout=120)
                 return self._json(result)
 
-            scale = (query.get("scale_document") or ["false"])[0].lower() in (
-                "1",
-                "true",
-                "yes",
-            )
+            # An unknown value falls back to the default rather than erroring: the
+            # plugin outlives the node that talks to it, and a workflow saved against
+            # a newer node must not brick an older Krita install.
+            fit = (query.get("fit") or [geometry.DEFAULT_FIT])[0].strip().lower()
+            if fit not in geometry.FIT_MODES:
+                fit = geometry.DEFAULT_FIT
             # Scaling a whole document is slow; give it room.
             result = self.main.call(
-                lambda: ops.add_layer(png, name, scale), timeout=180
+                lambda: ops.add_layer(png, name, fit), timeout=180
             )
             self._json(result)
 

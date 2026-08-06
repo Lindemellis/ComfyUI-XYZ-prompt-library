@@ -84,15 +84,10 @@ def fetch_mask(layer: str, timeout: float = 60.0) -> bytes:
 def add_layer(
     png: bytes,
     name: str = "ComfyUI",
-    scale_document: bool = False,
+    fit: str = "fit",
     timeout: float = 180.0,
 ) -> dict:
-    return _post(
-        "/layer",
-        png,
-        {"name": name, "scale_document": "true" if scale_document else "false"},
-        timeout,
-    )
+    return _post("/layer", png, {"name": name, "fit": fit}, timeout)
 
 
 def new_document(png: bytes, name: str = "ComfyUI", timeout: float = 120.0) -> dict:

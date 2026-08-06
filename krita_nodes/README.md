@@ -188,16 +188,31 @@ and you care about its layers or its path.
 
 So:
 
-| The image is… | What happens |
-|---|---|
-| smaller than the canvas | Scaled **up** to the canvas. Krita is the canvas of record; it does not shrink. |
-| bigger, `scale_document` **off** | Scaled **down** to the canvas. |
-| bigger, `scale_document` **on** | The whole **document** grows to the image — every layer with it — and the image drops in 1:1. |
+`fit` is your answer, and there are three:
 
-`scale_document` is how you upscale: generate at 2×, push it back with the switch on, and carry on
-painting and inpainting at the new size. Your sketch layers go soft in the process, which is fine —
-by the time you are upscaling, the sketch has done its job. **The canvas only ever grows.** To get
-back to a generation resolution, use Fetch Image's `by_height`.
+| `fit` | What happens |
+|---|---|
+| **keep** | The image keeps its own pixel size, centred. The canvas is not touched — a bigger image simply overhangs it, because a Krita paint layer is allowed to hold pixels outside the canvas. |
+| **fit** *(default)* | The image is scaled to the canvas **with its aspect ratio kept**, centred. Whatever is left over stays transparent. Up if it is smaller, down if it is bigger. |
+| **grow_canvas** | An image **bigger** than the canvas grows the canvas to it, scaling the existing content up by **one factor** so nothing deforms, and the image drops in 1:1. An image that is not bigger behaves like **keep** — there is nothing to grow for. |
+
+**grow_canvas is how you upscale**: generate at 2×, push it back, and carry on painting and
+inpainting at the new size. Your sketch layers go soft in the process, which is fine — by the time
+you are upscaling, the sketch has done its job. To get back to a generation resolution afterwards,
+use Fetch Image's `by_height`.
+
+Two rules hold in all three modes:
+
+- **The canvas only ever grows.** Nothing here can make your document smaller, in either dimension.
+  That is why `grow_canvas` takes the *larger* of the image and the canvas on each axis: an image
+  that is wider but shorter than your canvas would otherwise cut the bottom off it.
+- **Whatever does not fill the canvas is centred** — a smaller image, or the letterbox left by
+  keeping an aspect ratio.
+
+When `grow_canvas` enlarges your existing content, it uses the factor that makes it fit the new
+canvas **whole**, so nothing is pushed off the edge. With a 512×512 canvas and a 1024×768 image
+that is ×1.5: your content becomes 768×768, centred in the new 1024×768 canvas, with the image
+filling it exactly.
 
 ---
 

@@ -18,6 +18,8 @@ from krita import Krita
 from PyQt5.QtCore import QBuffer, QByteArray, QIODevice, Qt
 from PyQt5.QtGui import QImage
 
+from . import geometry
+
 #: Node.type() values that can act as a picture.
 IMAGE_TYPES = frozenset(
     {
@@ -280,16 +282,21 @@ def _decode_png(png: bytes) -> QImage:
     return image.convertToFormat(QImage.Format_ARGB32)
 
 
-def _write_pixels(node, image: QImage, width: int, height: int) -> None:
+def _write_pixels(node, image: QImage, width: int, height: int,
+                  x: int = 0, y: int = 0) -> None:
     """ARGB32's buffer is BGRA, which is the byte order setPixelData wants for an
-    8-bit RGBA layer — the same identity we rely on when reading, in reverse."""
+    8-bit RGBA layer — the same identity we rely on when reading, in reverse.
+
+    `x, y` places the block on the canvas, and may be NEGATIVE: an image kept at its
+    own size on a smaller canvas is centred, so it overhangs on every side. A paint
+    layer is allowed to hold pixels outside the canvas bounds."""
     expected = width * height * 4
     data = QByteArray(image.constBits().asstring(image.sizeInBytes()))
     if data.size() != expected:
         raise OpsError(
             f"internal: {data.size()} bytes of pixel data for a {width}x{height} layer"
         )
-    node.setPixelData(data, 0, 0, width, height)
+    node.setPixelData(data, int(x), int(y), width, height)
 
 
 def open_file(path: str) -> dict:
@@ -376,54 +383,60 @@ def _unique_layer_name(doc, base: str) -> str:
     return f"{base} {n}"
 
 
-def add_layer(png: bytes, name: str = "ComfyUI", scale_document: bool = False) -> dict:
+def add_layer(png: bytes, name: str = "ComfyUI", fit: str = geometry.DEFAULT_FIT) -> dict:
     """Push an image back into Krita as a new paint layer, on top.
 
-    Sizes rarely match, so (design decisions 12 and 26):
+    Sizes rarely match. `fit` is the user's answer to that (see geometry.plan_layer,
+    which decides all of it; nothing is decided here):
 
-    * image smaller than the canvas -> scale the image up to the canvas. Krita is
-      the canvas of record; it does not shrink.
-    * image bigger, `scale_document` -> scale the whole DOCUMENT up to the image,
-      every layer with it, and drop the image in 1:1. The sketch layers go soft,
-      which is fine — by the time you are upscaling, the sketch is done with.
-    * image bigger, not `scale_document` -> scale the image down to the canvas.
+        keep         the image keeps its own pixel size, centred. The canvas is not
+                     touched, and a bigger image simply overhangs it — a Krita layer
+                     is allowed to hold pixels outside the canvas.
+        fit          the image is scaled to the canvas WITH ITS ASPECT RATIO KEPT,
+                     and centred. Whatever is left over stays transparent.
+        grow_canvas  an image bigger than the canvas grows the canvas to it and
+                     scales the existing content up by one factor (so it does not
+                     deform); the image then goes in at 1:1. An image that is not
+                     bigger falls back to `keep` — there is nothing to grow for.
     """
     with _Batchmode():
         doc = _document()
         image = _decode_png(png)
 
-        grew = False
-        if (image.width(), image.height()) != (doc.width(), doc.height()):
-            bigger = image.width() > doc.width() or image.height() > doc.height()
-            if bigger and scale_document:
-                # xRes()/yRes() come back as floats but scaleImage's signature is
-                # (int, int, int, int, str) — passing them straight through is a
-                # TypeError.
-                doc.scaleImage(
-                    image.width(),
-                    image.height(),
-                    int(round(doc.xRes())),
-                    int(round(doc.yRes())),
-                    "Bicubic",
-                )
-                doc.waitForDone()
-                grew = True
-            else:
-                # Exact canvas size, not KeepAspectRatio: setPixelData needs the
-                # bytes to fill the rectangle we hand it, exactly.
-                image = image.scaled(
-                    doc.width(),
-                    doc.height(),
-                    Qt.IgnoreAspectRatio,
-                    Qt.SmoothTransformation,
-                )
+        plan = geometry.plan_layer(
+            image.width(), image.height(), doc.width(), doc.height(), fit
+        )
 
-        width, height = doc.width(), doc.height()
+        if plan["doc_scale"]:
+            # xRes()/yRes() come back as floats but scaleImage's signature is
+            # (int, int, int, int, str) — passing them straight through is a
+            # TypeError that only fires on this path.
+            doc.scaleImage(
+                plan["doc_scale"][0],
+                plan["doc_scale"][1],
+                int(round(doc.xRes())),
+                int(round(doc.yRes())),
+                "Bicubic",
+            )
+            doc.waitForDone()
+        if plan["canvas_resize"]:
+            # Grow the canvas WITHOUT scaling anything: resizeImage moves the frame,
+            # scaleImage moves the pixels, and the two together are what "grow the
+            # canvas and keep the content's proportions" means.
+            doc.resizeImage(*plan["canvas_resize"])
+            doc.waitForDone()
+
+        width, height = plan["image_size"]
+        if (image.width(), image.height()) != (width, height):
+            # Exact size, not KeepAspectRatio: setPixelData needs the bytes to fill
+            # the rectangle we hand it, exactly. The ratio was already honoured by
+            # plan_layer when it chose this size.
+            image = image.scaled(width, height, Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
 
         node = doc.createNode(_unique_layer_name(doc, name), "paintlayer")
         # None => on top of the stack.
         doc.rootNode().addChildNode(node, None)
-        _write_pixels(node, image, width, height)
+        _write_pixels(node, image, width, height, *plan["offset"])
 
         doc.refreshProjection()
         doc.waitForDone()
@@ -431,6 +444,9 @@ def add_layer(png: bytes, name: str = "ComfyUI", scale_document: bool = False) -
         return {
             "ok": True,
             "layer": node.name(),
-            "document_scaled": grew,
+            "fit": fit,
+            "document_scaled": bool(plan["doc_scale"] or plan["canvas_resize"]),
             "size": [width, height],
+            "canvas": list(plan["canvas_size"]),
+            "offset": list(plan["offset"]),
         }

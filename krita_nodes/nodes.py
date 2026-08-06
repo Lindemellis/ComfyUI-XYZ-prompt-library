@@ -19,6 +19,7 @@ import time
 import numpy as np
 
 from . import client, launcher
+from . import send as _send
 
 try:
     from ..node import ByPassTypeTuple
@@ -732,15 +733,19 @@ class XYZKritaOpenFile(_KritaBase):
 
 
 SEND_MODES = ["new_layer", "new_document"]
+#: Mirrors krita_plugin/xyz_comfy/geometry.FIT_MODES. The PLUGIN decides the geometry;
+#: this list only has to offer the same names. An unknown one falls back there, so a
+#: node newer than the installed plugin degrades instead of failing.
+FIT_MODES = ["keep", "fit", "grow_canvas"]
 
 
 class XYZKritaSendToKrita(_KritaBase):
     NAME = "XYZ Krita Send To Krita"
     DESCRIPTION = (
         "Pushes an image into Krita.\n"
-        "new_layer: on top of the document already open. Sizes rarely match — an "
-        "image smaller than the canvas is scaled up to it; a bigger one either grows "
-        "the whole document (scale_document) or is scaled down.\n"
+        "new_layer: on top of the document already open. Sizes rarely match, and "
+        "`fit` is what to do about it — keep the image as it is, scale it to the "
+        "canvas without deforming it, or grow the canvas to the image.\n"
         "new_document: opens a brand-new Krita document at the image's size. This is "
         "the front of the workflow, when Krita has nothing open yet.\n"
         "launch_krita on: Krita is started if it is not already running (a freshly "
@@ -765,13 +770,21 @@ class XYZKritaSendToKrita(_KritaBase):
                     },
                 ),
                 "layer_name": ("STRING", {"default": "ComfyUI"}),
-                "scale_document": (
-                    "BOOLEAN",
+                "fit": (
+                    FIT_MODES,
                     {
-                        "default": False,
-                        "tooltip": "new_layer only. If the image is bigger than the "
-                        "canvas, scale the whole Krita document (every layer) up to "
-                        "it. The canvas only ever grows.",
+                        "default": "fit",
+                        "tooltip": "new_layer only — what to do when the image and "
+                        "the canvas are different sizes.\n"
+                        "keep: the image keeps its own pixel size, centred. The "
+                        "canvas is not touched; a bigger image overhangs it.\n"
+                        "fit: the image is scaled to the canvas WITH ITS ASPECT "
+                        "RATIO KEPT, centred. What is left over stays transparent.\n"
+                        "grow_canvas: an image bigger than the canvas grows the "
+                        "canvas to it and scales the existing content up by one "
+                        "factor (so nothing deforms); the image goes in 1:1. An "
+                        "image that is not bigger behaves like keep.\n"
+                        "The canvas only ever grows, in every mode.",
                     },
                 ),
                 "launch_krita": (
@@ -795,7 +808,7 @@ class XYZKritaSendToKrita(_KritaBase):
         image=None,
         mode="new_layer",
         layer_name="ComfyUI",
-        scale_document=False,
+        fit="fit",
         launch_krita=True,
         max_wait=180.0,
         **_,
@@ -816,37 +829,29 @@ class XYZKritaSendToKrita(_KritaBase):
             print("[XYZ Krita] Krita is not running — starting it")
             launcher.launch(timeout=max(60.0, max_wait))
 
-        png = _encode(image)
-
-        # new_layer needs a document to add to. When Krita has nothing open — the
-        # usual case when this node is the first thing to touch Krita, or when the
-        # launch above started it fresh — fall back to creating one, so the node is
-        # never a dead end. (A KritaUnreachable from ping propagates: that means the
-        # plugin genuinely can't be reached, which is a different, clearer error.)
-        if mode == "new_layer":
-            if client.ping(timeout=min(max_wait, 15.0)).get("document") is None:
+        # The sequence — launch wait, and the new_layer -> new_document fallback for a
+        # Krita with nothing open — lives in send.py, because the gallery's "send to
+        # Krita" needs exactly the same one and two copies would drift.
+        result = _send.send_png(
+            _encode(image),
+            mode=mode,
+            layer_name=layer_name,
+            fit=str(fit),
+            launch=True,          # the "not running and launch off" case returned above
+            max_wait=max_wait,
+        )
+        size = result.get("size", [0, 0])
+        if result.get("mode") == "new_document":
+            if result.get("requested_mode") == "new_layer":
                 print(
-                    "[XYZ Krita] new_layer: Krita has no open document — creating a "
+                    "[XYZ Krita] new_layer: Krita has no open document — created a "
                     "new one instead"
                 )
-                mode = "new_document"
-
-        if mode == "new_document":
-            result = client.new_document(png, name=layer_name, timeout=max_wait)
-            size = result.get("size", [0, 0])
             print(
                 f"[XYZ Krita] opened a new document '{result.get('document')}' "
                 f"({size[0]}x{size[1]})"
             )
             return {}
-
-        result = client.add_layer(
-            png,
-            name=layer_name,
-            scale_document=bool(scale_document),
-            timeout=max_wait,
-        )
-        size = result.get("size", [0, 0])
         if result.get("document_scaled"):
             print(f"[XYZ Krita] the Krita document was scaled up to {size[0]}x{size[1]}")
         print(f"[XYZ Krita] added layer '{result.get('layer')}' ({size[0]}x{size[1]})")
