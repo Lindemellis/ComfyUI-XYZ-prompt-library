@@ -9,6 +9,7 @@ from .krita_nodes import (
     XYZKritaSendToKrita,
 )
 from .cache_nodes import XYZCacheSlotRead, XYZCacheSlotWrite
+from .inpaint_nodes import XYZInpaintStitchToRGBA
 
 
 
@@ -25,6 +26,7 @@ NODE_CLASS_MAPPINGS = {
     "XYZ Krita Send To Krita": XYZKritaSendToKrita,
     "XYZ Krita Open File": XYZKritaOpenFile,
     "XYZ Cache Slot Write": XYZCacheSlotWrite,
+    "XYZ Inpaint Stitch To RGBA": XYZInpaintStitchToRGBA,
     "XYZ Cache Slot Read": XYZCacheSlotRead,
 }
 
