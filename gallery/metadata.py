@@ -57,6 +57,25 @@ _SAMPLER_NODE_HINTS: Tuple[str, ...] = ("KSampler", "Sampler")
 _CHECKPOINT_NODE_HINTS: Tuple[str, ...] = ("Checkpoint", "Loader", "Model")
 _TEXT_ENCODE_HINTS: Tuple[str, ...] = ("CLIPTextEncode", "TextEncode")
 
+#: ComfyUI's scheduler list (``comfy.samplers.SCHEDULER_HANDLERS``).  A1111's
+#: ``parameters`` convention packs the scheduler *into* the ``Sampler:`` field
+#: and emits no ``Scheduler:`` key of its own (``Sampler: Euler simple``);
+#: writers also prettify the name (``sgm_uniform`` → ``SGM Uniform``).
+#: Matching the normalised tail against this list is what splits them back
+#: apart without eating a sampler whose own name carries underscores
+#: (``dpmpp_2m_sde_gpu``).
+_SCHEDULER_NAMES: Tuple[str, ...] = (
+    "simple",
+    "sgm_uniform",
+    "karras",
+    "exponential",
+    "ddim_uniform",
+    "beta",
+    "normal",
+    "linear_quadratic",
+    "kl_optimal",
+)
+
 
 @dataclass(frozen=True)
 class ComfyMeta:
@@ -329,7 +348,48 @@ def _derive_from_parameters(text: str) -> dict[str, Any]:
                 out["scheduler"] = value
             elif key == "model":
                 out["model"] = value
+
+    sampler = out.get("sampler")
+    if sampler and not out.get("scheduler"):
+        head, sched = split_sampler_scheduler(str(sampler))
+        if sched is not None:
+            out["sampler"] = head
+            out["scheduler"] = sched
     return out
+
+
+def _normalise_scheduler(text: str) -> str:
+    return re.sub(r"[\s-]+", "_", text.strip().lower())
+
+
+def split_sampler_scheduler(value: str) -> tuple[str, Optional[str]]:
+    """Peel a trailing scheduler name off an A1111 ``Sampler:`` value.
+
+    Returns ``(sampler, scheduler)``; ``scheduler`` is ``None`` when the value
+    carries no recognisable one, in which case ``sampler`` comes back
+    untouched.  The whole value is never consumed — a bare ``simple`` is a
+    sampler name as far as we know, not a scheduler with nothing in front.
+
+    The scheduler is returned **as written** (``SGM Uniform``, not
+    ``sgm_uniform``): the writers' prettified spelling is lossy — Danbooru-
+    Gallery's ``SaveImagePlus`` maps ``normal`` → ``Simple`` — so mapping back
+    to ComfyUI's internal name would invent a value the file never stated.
+
+    Also used to backfill rows indexed before this split existed, which is why
+    it is public and takes the stored string rather than the chunk.
+    """
+    text = str(value).strip()
+    if not text:
+        return text, None
+    words = text.split()
+    # Longest tail first: ``SGM Uniform`` is two words, ``simple`` is one.
+    for take in (2, 1):
+        if take >= len(words):
+            continue
+        tail = " ".join(words[-take:])
+        if _normalise_scheduler(tail) in _SCHEDULER_NAMES:
+            return " ".join(words[:-take]), tail
+    return text, None
 
 
 def _str_or_none(value: Any) -> Optional[str]:

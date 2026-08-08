@@ -10,7 +10,11 @@ import pytest
 from PIL import Image
 from PIL.PngImagePlugin import PngInfo
 
-from gallery.metadata import _derive_from_parameters, read_comfy_metadata
+from gallery.metadata import (
+    _derive_from_parameters,
+    read_comfy_metadata,
+    split_sampler_scheduler,
+)
 
 KV = (
     "Steps: 8, Sampler: Euler simple, CFG scale: 1.0, "
@@ -27,7 +31,9 @@ def test_empty_negative_does_not_swallow_the_kv_line():
     assert out["negative_prompt"] == ""
     assert out["seed"] == "595611427178957"
     assert out["cfg"] == "1.0"
-    assert out["sampler"] == "Euler simple"
+    # A1111 packs the scheduler into ``Sampler:``; we split it back out.
+    assert out["sampler"] == "Euler"
+    assert out["scheduler"] == "simple"
     assert out["model"] == "krea2TurboOfficialComfy_krea2TurboNvfp4"
 
 
@@ -77,5 +83,56 @@ def test_end_to_end_empty_negative_png(tmp_path: Path):
     assert m.negative_prompt is None  # "" is normalised away → UI shows "—"
     assert m.seed == 595611427178957
     assert m.cfg == pytest.approx(1.0)
-    assert m.sampler == "Euler simple"
+    assert m.sampler == "Euler"
+    assert m.scheduler == "simple"
     assert m.model == "krea2TurboOfficialComfy_krea2TurboNvfp4"
+
+
+# --- the packed ``Sampler:`` field -----------------------------------------
+#
+# Danbooru-Gallery's SaveImagePlus writes ``Sampler: <sampler> <scheduler>``
+# and no ``Scheduler:`` key at all (its own comment says "Sampler（合并
+# Scheduler）"), which is A1111's convention.  Everything below is a real
+# value observed in this install's library.
+
+
+@pytest.mark.parametrize(
+    "packed,sampler,scheduler",
+    [
+        ("Euler simple", "Euler", "simple"),
+        ("Euler Simple", "Euler", "Simple"),
+        ("Euler a Simple", "Euler a", "Simple"),
+        ("Euler SGM Uniform", "Euler", "SGM Uniform"),
+        ("res_multistep SGM Uniform", "res_multistep", "SGM Uniform"),
+        ("er_sde Simple", "er_sde", "Simple"),
+        # The sampler's own name carries underscores — the tail match must not
+        # take a bite out of it.
+        ("dpmpp_2m_sde_gpu simple", "dpmpp_2m_sde_gpu", "simple"),
+        ("DPM++ 2M Karras", "DPM++ 2M", "Karras"),
+    ],
+)
+def test_split_sampler_scheduler(packed, sampler, scheduler):
+    assert split_sampler_scheduler(packed) == (sampler, scheduler)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        "euler",            # ComfyUI's own SaveImage: sampler alone
+        "Euler a",          # "a" is not a scheduler
+        "dpmpp_2m_sde_gpu",
+        "simple",           # never eat the whole value — this is a sampler name
+        "",
+    ],
+)
+def test_split_leaves_a_bare_sampler_alone(value):
+    assert split_sampler_scheduler(value) == (value, None)
+
+
+def test_explicit_scheduler_key_wins_over_splitting():
+    # A writer that emits both must not have its Sampler: field cut up.
+    out = _derive_from_parameters(
+        "a cat\nSteps: 20, Sampler: Euler a, Scheduler: karras, Seed: 1"
+    )
+    assert out["sampler"] == "Euler a"
+    assert out["scheduler"] == "karras"
