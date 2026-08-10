@@ -40,6 +40,7 @@ from . import db as _db
 from . import metadata as _metadata
 from . import paths as _paths
 from . import repo as _repo
+from . import video as _video
 from . import vocab as _vocab
 
 logger = logging.getLogger("xyz.gallery.indexer")
@@ -60,8 +61,14 @@ __all__ = [
 _PathLike = Union[str, Path]
 
 # Image file extensions recognised by the indexer. Narrow on purpose:
-# adding RAW / video / etc. is a future task, not T07.
+# adding RAW / etc. is a future task, not T07.
 _IMAGE_EXTS: frozenset = frozenset({".png", ".jpg", ".jpeg", ".webp"})
+
+# Video containers (schema v8). Kept as a separate set from ``_IMAGE_EXTS``
+# because ``media_kind`` is derived from which set an extension falls in —
+# ``_MEDIA_EXTS`` is only ever the "should this file be indexed at all" gate.
+_VIDEO_EXTS: frozenset = _video.VIDEO_EXTS
+_MEDIA_EXTS: frozenset = _IMAGE_EXTS | _VIDEO_EXTS
 
 def is_derivative_path_excluded(abs_path: str, root_path: str) -> bool:
     """Delegate to ``paths.is_derivative_path_excluded`` (T29)."""
@@ -151,6 +158,14 @@ def _is_image(name: str) -> bool:
     return ext in _IMAGE_EXTS
 
 
+def _is_media(name: str) -> bool:
+    """Indexable at all? — images *and* video containers (schema v8)."""
+    if _metadata.is_gallery_atomic_temp_basename(name):
+        return False
+    ext = os.path.splitext(name)[1].lower()
+    return ext in _MEDIA_EXTS
+
+
 def _read_dims(path: str) -> Tuple[Optional[int], Optional[int]]:
     # PIL Image.open is lazy: .size is read from the header without
     # decoding pixels, so this is cheap (~0.3 ms on a typical PNG).
@@ -162,6 +177,43 @@ def _read_dims(path: str) -> Tuple[Optional[int], Optional[int]]:
             return int(w), int(h)
     except (UnidentifiedImageError, OSError, ValueError):
         return None, None
+
+
+def _read_media_props(path: str) -> Dict[str, Any]:
+    """Dimensions + (for video) clip properties, as upsert kwargs.
+
+    One probe per file: ``av.open`` is not free, so the video branch must not
+    call it once for the size and again for the duration.
+    """
+    if not _video.is_video_path(path):
+        w, h = _read_dims(path)
+        return {
+            "media_kind": "image", "width": w, "height": h,
+            "duration_ms": None, "fps": None, "has_audio": None, "vcodec": None,
+        }
+    info = _video.probe(path)
+    if info is None:
+        # Unreadable container: still index the row (the file exists and the
+        # user should see it), just with nothing known about the picture.
+        return {
+            "media_kind": "video", "width": None, "height": None,
+            "duration_ms": None, "fps": None, "has_audio": None, "vcodec": None,
+        }
+    return {
+        "media_kind": "video",
+        "width": info.width,
+        "height": info.height,
+        "duration_ms": info.duration_ms,
+        "fps": info.fps,
+        "has_audio": 1 if info.has_audio else 0,
+        "vcodec": info.vcodec,
+    }
+
+
+def _load_audio_twin_suffixes(db_path: _PathLike) -> Tuple[str, ...]:
+    return _video.audio_twin_suffixes_from_config(
+        Path(db_path).parent / "gallery_config.json"
+    )
 
 
 def _normalise_tags_csv(raw: Optional[str]) -> Optional[str]:
@@ -220,7 +272,7 @@ def _build_upsert_op(
     ).as_posix()
     filename = os.path.basename(posix_path)
     ext = os.path.splitext(filename)[1].lower().lstrip(".")
-    width, height = _read_dims(abs_path)
+    props = _read_media_props(abs_path)
     now = int(time.time())
     prompt_tokens = _vocab.normalize_prompt(meta.positive_prompt, extra_stopwords)
     word_tokens = list(_vocab.split_positive_prompt_words(meta.positive_prompt))
@@ -234,8 +286,13 @@ def _build_upsert_op(
         filename=filename,
         filename_lc=filename.lower(),
         ext=ext,
-        width=width,
-        height=height,
+        media_kind=props["media_kind"],
+        width=props["width"],
+        height=props["height"],
+        duration_ms=props["duration_ms"],
+        fps=props["fps"],
+        has_audio=props["has_audio"],
+        vcodec=props["vcodec"],
         file_size=int(stat_result.st_size),
         mtime_ns=int(stat_result.st_mtime_ns),
         # SPEC §6.1: created_at epoch seconds; preferred ComfyUI metadata
@@ -263,19 +320,36 @@ def _build_upsert_op(
 
 # -- cold / delta scans -----------------------------------------------------
 
-def _iter_image_files(root_path: str) -> Iterable[str]:
+def _iter_image_files(
+    root_path: str, *, audio_twin_suffixes: Optional[Tuple[str, ...]] = None,
+) -> Iterable[str]:
     # os.walk with onerror logging: permission errors etc. should not
     # abort the entire scan. Broken symlinks are filtered by followlinks=False.
     def _onerror(exc: OSError) -> None:
         logger.warning("walk error under %s: %s", root_path, exc)
 
+    suffixes = (
+        _video.DEFAULT_AUDIO_TWIN_SUFFIXES
+        if audio_twin_suffixes is None else audio_twin_suffixes
+    )
     for dirpath, dirnames, filenames in os.walk(root_path, onerror=_onerror):
         _prune_derivative_walk_dirs(dirnames)
+        # The twin lookup answers from this listing rather than stat()-ing a
+        # candidate sibling per video — the walk already holds the directory.
+        here = {n.casefold() for n in filenames}
+
+        def _sibling_here(candidate: str, _here=here) -> bool:
+            return os.path.basename(candidate).casefold() in _here
+
         for name in filenames:
-            if not _is_image(name):
+            if not _is_media(name):
                 continue
             full = os.path.join(dirpath, name)
             if is_derivative_path_excluded(full, root_path):
+                continue
+            if _video.superseded_by_audio_twin(
+                full, suffixes=suffixes, exists=_sibling_here,
+            ):
                 continue
             yield full
 
@@ -317,6 +391,7 @@ def cold_scan(
 
     fingerprints = _load_fingerprints(db_path, root_id)
     extra_sw = _load_prompt_stopwords(db_path)
+    twin_suffixes = _load_audio_twin_suffixes(db_path)
 
     walked = 0
     skipped = 0
@@ -325,7 +400,9 @@ def cold_scan(
     crash = False
 
     try:
-        for abs_path in _iter_image_files(root_path):
+        for abs_path in _iter_image_files(
+            root_path, audio_twin_suffixes=twin_suffixes,
+        ):
             walked += 1
             key = _normalise_key(abs_path)
             if not _claim(key):
@@ -426,6 +503,9 @@ def index_one(
         return None
     if is_derivative_path_excluded(abs_path, str(root["path"])):
         return None
+    twin_suffixes = _load_audio_twin_suffixes(db_path)
+    if _video.superseded_by_audio_twin(abs_path, suffixes=twin_suffixes):
+        return None
     key = _normalise_key(abs_path)
     if not _claim(key):
         return None
@@ -451,6 +531,18 @@ def index_one(
         )
         fut = write_queue.enqueue_write(_repo.LOW, op)
         fut.result(timeout=30.0)
+        # Write order makes this necessary: the silent ``X.mp4`` lands (and is
+        # indexed) before ``X-audio.mp4`` is muxed, so skipping at index time
+        # cannot catch it — the row already exists by then. Drop it now.
+        for stale in _video.supersedes_paths(abs_path, suffixes=twin_suffixes):
+            if os.path.isfile(stale):
+                try:
+                    write_queue.enqueue_write(
+                        _repo.LOW,
+                        _repo.DeleteImageOp(path=Path(stale).as_posix()),
+                    )
+                except Exception:
+                    logger.exception("failed to drop silent twin row %s", stale)
         conn = _db.connect_read(db_path)
         try:
             row = conn.execute(
@@ -513,6 +605,7 @@ def delta_scan(
         )
 
     fingerprints = _load_fingerprints(db_path, root_id)
+    twin_suffixes = _load_audio_twin_suffixes(db_path)
     walked = 0
     changed = 0
     errors = 0
@@ -520,7 +613,9 @@ def delta_scan(
     deleted_ids: List[int] = []
 
     try:
-        for abs_path in _iter_image_files(root_path):
+        for abs_path in _iter_image_files(
+            root_path, audio_twin_suffixes=twin_suffixes,
+        ):
             walked += 1
             if jref is not None and (
                 walked == 1
@@ -586,6 +681,7 @@ def _reconcile_missing_disk_rows(
     """
     root_id = int(root["id"])
     root_path = os.path.normcase(os.path.normpath(str(root["path"])))
+    twin_suffixes = _load_audio_twin_suffixes(db_path)
     conn = _db.connect_read(db_path)
     try:
         rows = conn.execute(
@@ -607,7 +703,15 @@ def _reconcile_missing_disk_rows(
                 continue
         except (OSError, TypeError, ValueError):
             continue
-        if is_derivative_path_excluded(p, str(root["path"])):
+        # Two ways a row can be stale while its file is still on disk: the
+        # path became a derivative one, or a muxed audio twin has since
+        # appeared next to it. Both mean the row must go even though
+        # ``os.path.isfile`` below would happily keep it. The twin case also
+        # self-heals a library indexed before the rule existed, and reacts to
+        # the user editing ``video_audio_twin_suffixes``.
+        if is_derivative_path_excluded(p, str(root["path"])) or (
+            _video.superseded_by_audio_twin(p, suffixes=twin_suffixes)
+        ):
             try:
                 iid = delete_one(p, db_path=db_path, write_queue=write_queue)
             except Exception:

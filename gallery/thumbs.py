@@ -42,6 +42,7 @@ from PIL import Image, UnidentifiedImageError
 
 from . import db as _db
 from . import repo as _repo
+from . import video as _video
 
 logger = logging.getLogger("xyz.gallery.thumbs")
 
@@ -154,6 +155,25 @@ def _load_image_row(
 
 # -- thumbnail synthesis ----------------------------------------------------
 
+def _open_source_image(src_path: str):
+    """A PIL image for ``src_path`` — decoded frame for video, file for image.
+
+    Returned as a context manager either way so the caller's ``with`` block
+    is identical; an extracted frame is already fully in memory, and PIL
+    images support the protocol, so no wrapper is needed.
+    """
+    if not _video.is_video_path(src_path):
+        return Image.open(src_path)
+    frame = _video.extract_frame(src_path)
+    if frame is None:
+        # Same failure shape the image path produces for a corrupt file, so
+        # ``_generate_and_save``'s except clause handles both identically.
+        raise UnidentifiedImageError(
+            f"no decodable video frame: {src_path}"
+        )
+    return frame
+
+
 def _generate_and_save(src_path: str, dst_path: Path) -> Optional[int]:
     """Build a ``_THUMB_SIZE`` × ``_THUMB_SIZE`` cover-crop WebP.
 
@@ -164,7 +184,7 @@ def _generate_and_save(src_path: str, dst_path: Path) -> Optional[int]:
     """
     tmp_path = dst_path.with_suffix(dst_path.suffix + ".tmp")
     try:
-        with Image.open(src_path) as img:
+        with _open_source_image(src_path) as img:
             img.load()
             if img.mode not in ("RGB", "RGBA"):
                 img = img.convert("RGBA" if "A" in img.getbands() else "RGB")

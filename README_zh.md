@@ -39,7 +39,7 @@
 | **标签自动补全** | 在任意提示词框输入时给出 Danbooru 标签建议；带有版本化的本地数据集、增量/全量更新、快照，以及按日期回溯的「时间机器」重建。 | [tagdb](tagdb/README_zh.md) |
 | **提示词库 V2** | 基于 SQLite 的分层提示词库，支持 `[ref]` 引用、触发别名、权重、随机模式，以及浮动文本编辑器。由两个节点在执行时解析。 | [plv2](prompt_library_v2/README_zh.md) |
 | **LLM 提示词助手** | 一个浮动窗口，用大模型（DeepSeek / OpenAI / Claude / Grok / 自定义）生成或优化文生图提示词，并把 danbooru tag 拿到本地数据集验真，保证 tag 真实存在。 | [llm](llm/README_zh.md) |
-| **图片画廊** | 浏览与管理 ComfyUI 的 output/input 图片——筛选、标签、批量操作、元数据查看。 | [gallery](gallery/README_zh.md) |
+| **图片画廊** | 浏览与管理 ComfyUI 的 output/input 图片**和视频**——筛选、标签、批量操作、元数据查看、视频播放。 | [gallery](gallery/README_zh.md) |
 | **遮罩节点** | 在画布上画矩形遮罩并挂到 CLIP 上，让 PLv3 的 `imask: i` region 有东西可指。 | [masks](mask_nodes/README_zh.md) |
 | **Krita 联动** | 一个 Krita 插件 + 四个节点：从运行中的 Krita 拉图层/遮罩、把 flat color 图层拆成任意形状的区域遮罩、把结果推回去当新图层。ComfyUI 仍是主工作台，Krita 只当画板。 | [krita](krita_nodes/README_zh.md) |
 | **Cache Slot** | 把图片存进命名的槽，下次运行取出来——不经过 Krita 的跨运行交接。 | [cache](cache_nodes/README_zh.md) |

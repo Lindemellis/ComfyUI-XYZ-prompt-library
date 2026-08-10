@@ -351,6 +351,12 @@
                    font-size: 12px; color: var(--fg); margin: 2px 0; }
     .mv-date-row input[type=date] { flex: 1; }
 
+    .mv-media { border: 1px solid var(--border); border-radius: 4px; padding: 6px 8px; }
+    .mv-media legend { color: var(--muted); font-size: 12px; padding: 0 4px; }
+    .mv-media-row { display: inline-flex; align-items: center; gap: 6px;
+                    font-size: 12px; color: var(--fg); margin: 2px 12px 2px 0; }
+    .mv-media-hint { display: block; font-size: 11px; color: var(--muted); }
+
     .mv-folders {
       flex: 1 1 0;
       min-height: 0;
@@ -747,6 +753,18 @@
     .tc-thumb img { width: 100%; height: 100%; object-fit: cover;
                     display: block; }
     .tc-thumb-empty { width: 100%; height: 100%; background: var(--panel); }
+    /* The hover preview sits ON TOP of the poster rather than replacing it, so
+       the tile never flashes empty while the first frames arrive. */
+    .tc-preview { position: absolute; inset: 0; z-index: 1;
+                  width: 100%; height: 100%; object-fit: cover;
+                  display: block; background: var(--panel); }
+    .tc-vbadge { position: absolute; right: 4px; bottom: 4px; z-index: 2;
+                 display: inline-flex; align-items: center; gap: 4px;
+                 padding: 1px 5px; border-radius: 3px;
+                 background: rgba(0,0,0,0.65); color: #fff;
+                 font-size: 11px; line-height: 1.4;
+                 font-variant-numeric: tabular-nums; pointer-events: none; }
+    .tc-vbadge-audio { opacity: 0.85; }
     .tc-fav { position: absolute; top: 4px; right: 4px; z-index: 2;
               width: 28px; height: 28px; padding: 0;
               display: inline-flex; align-items: center; justify-content: center;
@@ -814,7 +832,6 @@
       position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
       overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
     }
-    .ib.ib--nav { min-height: 28px; padding: 5px 10px; font-size: 13px; font-weight: 400; }
     .dv-head .ib { flex-shrink: 0; }
     .dv-title { margin: 0; font-size: 15px; font-weight: 500;
                 flex: 1; min-width: 0;
@@ -935,12 +952,48 @@
       font-size: 13px;
       box-sizing: border-box;
     }
-    .dv-nav { display: flex; gap: 6px; align-items: center; }
-    .dv-nav-btn { background: var(--panel); color: var(--fg);
-                  border: 1px solid var(--border); border-radius: 4px;
-                  padding: 5px 10px; font-size: 13px; cursor: pointer; }
-    .dv-nav-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
-    .dv-nav-btn:disabled { opacity: 0.45; cursor: default; }
+    /* Top-bar operations group. ``flex-shrink: 0`` on the buttons plus the
+       title's own ellipsis means a long filename gives way, never the
+       actions. */
+    .dv-ops { display: flex; gap: 6px; align-items: center; flex-shrink: 0; }
+    .ib.ib--op { min-height: 30px; padding: 4px 9px; font-size: 12.5px; }
+    .ib.ib--op .ib-ico { width: 17px; height: 17px; }
+    .ib.ib--danger { border-color: rgba(255, 107, 107, 0.4); }
+    .ib.ib--danger:hover:not(:disabled):not(.ib--disabled) {
+      border-color: var(--error); color: var(--error);
+    }
+    /* Below this the filename would be squeezed to nothing by four buttons;
+       drop their labels and keep the icons (each still carries a title). */
+    @media (max-width: 900px) {
+      .ib.ib--op .ib-txt { display: none; }
+      .ib.ib--op { padding: 4px 7px; }
+    }
+
+    /* Canvas navigation — on the media, where the eye already is. */
+    .dv-cnav {
+      position: absolute; top: 50%; transform: translateY(-50%);
+      z-index: 3; width: 40px; height: 56px; padding: 0;
+      background: rgba(0, 0, 0, 0.42);
+      border-color: rgba(255, 255, 255, 0.16); color: #fff;
+      border-radius: 6px;
+      opacity: 0.28; transition: opacity 120ms ease, background 120ms ease;
+    }
+    .dv-cnav .ib-ico { width: 26px; height: 26px; }
+    .dv-cnav--prev { left: 10px; }
+    .dv-cnav--next { right: 10px; }
+    /* Faint until the pointer is on the canvas, so it never competes with the
+       picture; full strength the moment you go for it. */
+    .dv-canvas:hover .dv-cnav { opacity: 0.72; }
+    .dv-cnav:hover:not(:disabled):not(.ib--disabled) {
+      opacity: 1; background: rgba(0, 0, 0, 0.68);
+      border-color: var(--accent); color: var(--accent);
+    }
+    .dv-cnav:focus-visible { opacity: 1; }
+    .dv-cnav:disabled, .dv-cnav.ib--disabled { opacity: 0.12; }
+    /* Coarse pointers get no hover event at all — keep them always readable. */
+    @media (hover: none) {
+      .dv-cnav { opacity: 0.66; }
+    }
 
     .dv-body { display: flex; flex-direction: row; align-items: stretch;
                gap: 0; flex: 1 1 0; min-height: 0; min-width: 0; }
@@ -970,8 +1023,41 @@
               max-width: none; max-height: none;
               image-rendering: -webkit-optimize-contrast;
               will-change: transform; }
-    .dv-zoom { display: flex; align-items: center; gap: 6px;
-               font-size: 13px; flex-wrap: wrap; }
+    /* The clip is fitted inside the canvas, never panned — see the template
+       comment on why pan/zoom is a stills-only affordance. */
+    .dv-video { position: absolute; inset: 0; margin: auto;
+                max-width: 100%; max-height: 100%;
+                width: auto; height: auto; display: block;
+                background: #000; }
+
+    .dv-player { display: flex; flex-direction: column; gap: 6px; font-size: 13px; }
+    .dv-player-scrub { display: flex; align-items: center; gap: 8px; }
+    /* Centred to match the image canvas's zoom row — the scrub row above it
+       stays full width because the bar itself has to span the media. */
+    .dv-player-row { display: flex; align-items: center; justify-content: center;
+                     gap: 6px; flex-wrap: wrap; }
+    .dv-vbtn {
+      background: var(--panel); color: var(--fg);
+      border: 1px solid var(--border); border-radius: 4px;
+      padding: 4px 9px; font-size: 12px; cursor: pointer; min-width: 34px;
+    }
+    .dv-vbtn:hover { border-color: var(--accent); color: var(--accent); }
+    .dv-vbtn.active { border-color: var(--accent); color: var(--accent); }
+    .dv-vbtn--play { min-width: 40px; font-size: 13px; }
+    .dv-vseek { flex: 1 1 0; min-width: 80px; }
+    .dv-vvol { width: 84px; }
+    .dv-vtime { font-variant-numeric: tabular-nums; min-width: 5ch; font-size: 12px; }
+    .dv-vsep { width: 1px; align-self: stretch; background: var(--border); margin: 0 4px; }
+    .dv-vfield { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; }
+    .dv-vfield select {
+      background: var(--panel); color: var(--fg);
+      border: 1px solid var(--border); border-radius: 4px; padding: 3px 6px;
+      font-size: 12px;
+    }
+    .dv-dur { font-variant-numeric: tabular-nums; }
+
+    .dv-zoom { display: flex; align-items: center; justify-content: center;
+               gap: 6px; font-size: 13px; flex-wrap: wrap; }
     .dv-zoom button {
       background: var(--panel); color: var(--fg);
       border: 1px solid var(--border); border-radius: 4px;
@@ -1016,27 +1102,6 @@
                letter-spacing: .3px; }
     .dv-copy:hover:not(:disabled) { background: rgba(74,158,255,0.1); }
     .dv-copy:disabled { opacity: 0.35; cursor: default; }
-
-    .dv-actions { display: flex; flex-wrap: wrap; gap: 6px;
-                  margin-top: 16px; padding-top: 12px;
-                  border-top: 1px solid var(--border); }
-    .dv-btn {
-      background: var(--panel); color: var(--fg);
-      border: 1px solid var(--border); border-radius: 4px;
-      padding: 6px 12px; font-size: 12px; cursor: pointer;
-      text-decoration: none; display: inline-flex; align-items: center;
-      gap: 4px;
-    }
-    .dv-btn:hover:not(:disabled):not(.dv-btn-disabled) {
-      border-color: var(--accent); color: var(--accent);
-    }
-    .dv-btn-disabled,
-    .dv-btn[aria-disabled="true"] {
-      opacity: 0.4; cursor: default; pointer-events: none;
-    }
-    .dv-btn:disabled { opacity: 0.4; cursor: default; }
-    .dv-btn-danger { border-color: rgba(255, 107, 107, 0.4); }
-    .dv-btn-danger:not(:disabled):hover { color: var(--error); border-color: var(--error); }
 
     .dv-error { margin-top: 12px; }
 

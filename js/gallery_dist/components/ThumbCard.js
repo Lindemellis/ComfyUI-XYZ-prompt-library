@@ -16,7 +16,26 @@
 //   and swap in api.patch() later without re-plumbing the child.
 // * Right-click → parent context menu (Move… T24, Delete… T25).
 // * T22: `gallery.sync_status` — pending=amber dot, failed=red dot, ok=hidden.
-import { defineComponent, computed } from 'vue';
+// * Video cards (schema v8) keep the same server-rendered .webp poster as the
+//   still card — a grid page must not fetch 60 clips to show 60 tiles. The
+//   `<video>` element is created only on hover, and only when the user has
+//   left the hover-preview preference on. `preload="metadata"` plus the raw
+//   route's HTTP Range support means resting on a card pulls the first few
+//   hundred KB, not the whole file.
+import { defineComponent, computed, ref } from 'vue';
+import { videoPrefs } from '../stores/gallerySettings.js';
+
+/** ``m:ss`` (or ``h:mm:ss`` past an hour) for the corner badge. */
+export function formatDuration(ms) {
+  const total = Math.max(0, Math.round(Number(ms) / 1000));
+  if (!Number.isFinite(total)) return '';
+  const s = total % 60;
+  const m = Math.floor(total / 60) % 60;
+  const h = Math.floor(total / 3600);
+  const ss = String(s).padStart(2, '0');
+  if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${ss}`;
+  return `${m}:${ss}`;
+}
 
 export const ThumbCard = defineComponent({
   name: 'ThumbCard',
@@ -58,10 +77,54 @@ export const ThumbCard = defineComponent({
       emit('toggle-favorite', props.item.id);
     }
 
-    return { isFav, syncBadge, syncTitle, onClick, onContextMenu, onFavClick };
+    // -- video ---------------------------------------------------------------
+    const isVideo = computed(() => props.item && props.item.media_kind === 'video');
+    const vinfo = computed(() => (props.item && props.item.video) || null);
+    const durationLabel = computed(() => {
+      const d = vinfo.value && vinfo.value.duration_ms;
+      return d ? formatDuration(d) : '';
+    });
+    // Silent vs muxed matters here more than usual: ComfyUI video workflows
+    // emit both halves of a pair and the gallery keeps the one with sound, so
+    // a card with no speaker really is a clip that has no audio track.
+    const hasAudio = computed(() => !!(vinfo.value && vinfo.value.has_audio));
+
+    const previewing = ref(false);
+    const previewEl = ref(null);
+
+    function onEnter() {
+      if (!isVideo.value || !videoPrefs.hoverPreview) return;
+      previewing.value = true;
+    }
+    function onLeave() {
+      if (!previewing.value) return;
+      previewing.value = false;
+      // Vue tears the element down on the next tick, but an in-flight range
+      // request keeps streaming until the element is actually detached and
+      // its src cleared. Do it now so leaving a row does not leave six
+      // downloads running behind the grid.
+      const el = previewEl.value;
+      if (el) {
+        try { el.pause(); el.removeAttribute('src'); el.load(); } catch { /* ignore */ }
+      }
+    }
+    function onPreviewReady(e) {
+      // Autoplay can still be refused (a policy change, a background tab).
+      // A rejected promise here is not an error worth surfacing — the poster
+      // stays visible, which is exactly the non-preview experience.
+      const p = e.target && e.target.play && e.target.play();
+      if (p && typeof p.catch === 'function') p.catch(() => {});
+    }
+
+    return {
+      isFav, syncBadge, syncTitle, onClick, onContextMenu, onFavClick,
+      isVideo, durationLabel, hasAudio,
+      previewing, previewEl, onEnter, onLeave, onPreviewReady,
+    };
   },
   template: `
-    <div class="tc" :class="{ 'tc-bulk-on': bulkMode }" @click="onClick" @contextmenu="onContextMenu">
+    <div class="tc" :class="{ 'tc-bulk-on': bulkMode }" @click="onClick" @contextmenu="onContextMenu"
+         @mouseenter="onEnter" @mouseleave="onLeave">
       <div class="tc-thumb">
         <img v-if="item.thumb_url"
              class="tc-media"
@@ -70,6 +133,21 @@ export const ThumbCard = defineComponent({
              loading="lazy"
              decoding="async" />
         <div v-else class="tc-thumb-empty tc-media" aria-hidden="true"></div>
+        <video v-if="isVideo && previewing"
+               ref="previewEl"
+               class="tc-media tc-preview"
+               :src="item.raw_url"
+               muted
+               loop
+               playsinline
+               preload="metadata"
+               tabindex="-1"
+               aria-hidden="true"
+               @loadeddata="onPreviewReady"></video>
+        <div v-if="isVideo" class="tc-vbadge" aria-hidden="true">
+          <span v-if="hasAudio" class="tc-vbadge-audio" title="has audio">♪</span>
+          <span v-if="durationLabel">{{ durationLabel }}</span>
+        </div>
         <div v-if="bulkMode" class="tc-bulk" aria-hidden="true">
           <input
             type="checkbox"

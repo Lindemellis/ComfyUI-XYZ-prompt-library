@@ -174,11 +174,21 @@ def _serialize_image(rec: _repo.ImageRecord) -> dict:
         },
         "filename": rec.filename,
         "ext": rec.ext,
+        "media_kind": rec.media_kind,
         "size": {
             "width": rec.width,
             "height": rec.height,
             "bytes": rec.file_size,
         },
+        # Video-only; null on an image. Kept as a sibling of ``size`` rather
+        # than inside it because the detail pane shows duration on the same
+        # line as the dimensions but everything else here is playback state.
+        "video": {
+            "duration_ms": rec.duration_ms,
+            "fps": rec.fps,
+            "has_audio": rec.has_audio,
+            "vcodec": rec.vcodec,
+        } if rec.media_kind == "video" else None,
         "created_at": _iso(rec.created_at),
         "metadata": {
             "positive_prompt": rec.positive_prompt,
@@ -235,6 +245,22 @@ def _prompt_extra_stopwords() -> frozenset:
 def _f05_query_underscores(s: str) -> str:
     """§11 V1.1-F05 — query-side ``_`` → space before prompt normalisation."""
     return str(s).replace("_", " ")
+
+
+def _parse_media_kind(raw: object) -> str:
+    """Wire ``media_kind`` → FilterSpec value; default ``all`` (schema v8).
+
+    The UI sends the collapsed three-state form, never two booleans: with two
+    checkboxes, "both on" and "both off" have to mean the same thing, and
+    deciding that in one place beats deciding it in the store, the query
+    string and the SQL builder separately.
+    """
+    if raw in (None, ""):
+        return "all"
+    v = str(raw).strip().lower()
+    if v not in ("all", "image", "video"):
+        raise ValueError(f"invalid media_kind: {raw!r}")
+    return v
 
 
 def _parse_metadata_presence(raw: object) -> str:
@@ -316,6 +342,7 @@ def _parse_filter(query) -> _repo.FilterSpec:
         metadata_presence=meta,
         prompt_match_mode=pmm,
         prompt_substrings=prompt_substrings,
+        media_kind=_parse_media_kind(query.get("media_kind")),
     )
 
 
@@ -392,6 +419,7 @@ def _parse_filter_mapping(obj: Any) -> _repo.FilterSpec:
         metadata_presence=meta,
         prompt_match_mode=pmm,
         prompt_substrings=prompt_substrings,
+        media_kind=_parse_media_kind(obj.get("media_kind")),
     )
 
 

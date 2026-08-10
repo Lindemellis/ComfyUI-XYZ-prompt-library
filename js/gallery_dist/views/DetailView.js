@@ -48,6 +48,7 @@ import { Autocomplete } from '../components/Autocomplete.js';
 import { ConfirmModal } from '../components/ConfirmModal.js';
 import { IconButton } from '../components/IconButton.js';
 import { subscribeGalleryEvent, subscribeReconcile, EV } from '../stores/connection.js';
+import { videoPrefs, setVideoPref } from '../stores/gallerySettings.js';
 import { vocabCacheClear } from '../stores/vocab.js';
 import { vocabAutocompleteMatch, developerMode } from '../stores/gallerySettings.js';
 
@@ -684,12 +685,18 @@ export const DetailView = defineComponent({
       window.removeEventListener('mouseup', onAsideSplitUp, true);
       if (unsubEvent) { unsubEvent(); unsubEvent = null; }
       if (unsubRecon) { unsubRecon(); unsubRecon = null; }
+      stopVideo();
       cancelNeighborsRefresh();
       if (resizeObs) { resizeObs.disconnect(); resizeObs = null; }
       if (copyTimer) { clearTimeout(copyTimer); copyTimer = null; }
     });
 
     watch(() => props.id, (newId) => {
+      // Stop the outgoing clip before anything else. Vue reuses the <video>
+      // element across records, so without this the old audio keeps playing
+      // under the new one — and holding ← through a folder of clips stacks up
+      // one soundtrack per item.
+      stopVideo();
       posView.value = 'raw';
       nameEditing.value = false;
       renameErr.value = '';
@@ -743,6 +750,169 @@ export const DetailView = defineComponent({
     const size = computed(() => (record.value && record.value.size) || {});
     const folder = computed(() => (record.value && record.value.folder) || {});
 
+    // -- video (schema v8) ---------------------------------------------------
+    // The detail page is deliberately ONE page: everything on the right (the
+    // metadata, favourite, tags, delete) is identical for a clip, and only the
+    // left canvas swaps the <img> for a <video>. Two pages would have meant
+    // two copies of the rename box, the tag editor and the delete modal.
+    const isVideo = computed(() => !!record.value && record.value.media_kind === 'video');
+    const vinfo = computed(() => (record.value && record.value.video) || {});
+    const videoEl = ref(null);
+    const vPlaying = ref(false);
+    const vCurrentMs = ref(0);
+    const vDurationMs = ref(0);
+    const vMuted = ref(videoPrefs.muted);
+    const vVolume = ref(videoPrefs.volume);
+    const vLoop = ref(videoPrefs.loop);
+    const vRate = ref(1);
+    const V_RATES = [0.25, 0.5, 1, 1.5, 2];
+    /** Seconds one frame lasts; 1/24 is only the fallback for an unprobed clip. */
+    const vFrameStep = computed(() => {
+      const fps = Number(vinfo.value && vinfo.value.fps);
+      return Number.isFinite(fps) && fps > 0 ? 1 / fps : 1 / 24;
+    });
+    const vDurationLabel = computed(() => {
+      const ms = vDurationMs.value || (vinfo.value && vinfo.value.duration_ms) || 0;
+      return ms ? fmtClock(ms) : '';
+    });
+    const vCurrentLabel = computed(() => fmtClock(vCurrentMs.value));
+
+    function fmtClock(ms) {
+      const total = Math.max(0, Math.floor(Number(ms) / 1000));
+      const s = total % 60;
+      const m = Math.floor(total / 60) % 60;
+      const h = Math.floor(total / 3600);
+      const ss = String(s).padStart(2, '0');
+      if (h > 0) return `${h}:${String(m).padStart(2, '0')}:${ss}`;
+      return `${m}:${ss}`;
+    }
+
+    /** Halt and reset playback state — on navigation and on unmount. */
+    function stopVideo() {
+      const el = videoEl.value;
+      if (el) {
+        try { el.pause(); } catch { /* element already torn down */ }
+      }
+      vPlaying.value = false;
+      vCurrentMs.value = 0;
+      vDurationMs.value = 0;
+      vRate.value = 1;
+    }
+
+    function onVideoLoaded(e) {
+      const el = e.target;
+      vDurationMs.value = Number.isFinite(el.duration) ? Math.round(el.duration * 1000) : 0;
+      // Apply the remembered preferences to the freshly created element. They
+      // cannot be plain bindings: `muted` in particular must be set as a
+      // property before the first play() or the browser refuses autoplay.
+      el.muted = vMuted.value;
+      el.volume = vVolume.value;
+      el.loop = vLoop.value;
+      el.playbackRate = vRate.value;
+      if (videoPrefs.autoplay) {
+        // Must come after `muted` is set as a property, or the browser judges
+        // the play() against the element's audible state and refuses it.
+        // A refusal is not an error to surface: the clip simply waits on its
+        // first frame, which is the autoplay-off experience.
+        const p = el.play();
+        if (p && typeof p.catch === 'function') p.catch(() => {});
+      }
+    }
+    function onVideoTime(e) {
+      vCurrentMs.value = Math.round((e.target.currentTime || 0) * 1000);
+    }
+    function vTogglePlay() {
+      const el = videoEl.value;
+      if (!el) return;
+      if (el.paused) {
+        const p = el.play();
+        if (p && typeof p.catch === 'function') p.catch(() => {});
+      } else {
+        el.pause();
+      }
+    }
+    function vSeekTo(ms) {
+      const el = videoEl.value;
+      if (!el) return;
+      const dur = Number.isFinite(el.duration) ? el.duration : 0;
+      const t = Math.max(0, Math.min(dur || 0, Number(ms) / 1000));
+      el.currentTime = t;
+      vCurrentMs.value = Math.round(t * 1000);
+    }
+    /** ±n seconds, clamped. The scrub buttons; there is no keyboard binding
+     *  for this — ←/→ stay "previous / next item" across images and clips. */
+    function vSkip(seconds) {
+      const el = videoEl.value;
+      if (!el) return;
+      vSeekTo((el.currentTime + Number(seconds)) * 1000);
+    }
+    /** One frame either way. Pauses first: stepping while playing just fights
+     *  the playhead, and inspecting a single frame is the entire point. */
+    function vStepFrame(dir) {
+      const el = videoEl.value;
+      if (!el) return;
+      el.pause();
+      vSeekTo((el.currentTime + Math.sign(dir) * vFrameStep.value) * 1000);
+    }
+    function vSetVolume(v) {
+      const el = videoEl.value;
+      const val = Math.max(0, Math.min(1, Number(v)));
+      vVolume.value = val;
+      if (el) el.volume = val;
+      // Nudging the slider up from zero is how people unmute; honour that
+      // rather than leaving them dragging a silent control.
+      if (val > 0 && vMuted.value) vSetMuted(false);
+      setVideoPref('volume', val);
+    }
+    function vSetMuted(m) {
+      const el = videoEl.value;
+      vMuted.value = !!m;
+      if (el) el.muted = vMuted.value;
+      setVideoPref('muted', vMuted.value);
+    }
+    function vSetLoop(l) {
+      const el = videoEl.value;
+      vLoop.value = !!l;
+      if (el) el.loop = vLoop.value;
+      setVideoPref('loop', vLoop.value);
+    }
+    function vSetRate(r) {
+      const el = videoEl.value;
+      const val = Number(r) || 1;
+      vRate.value = val;
+      if (el) el.playbackRate = val;
+    }
+    /** Grab the displayed frame as a PNG — the bridge from a clip back into
+     *  the still pipeline (Krita, inpainting, a reference image). */
+    function vExportFrame() {
+      const el = videoEl.value;
+      if (!el || !el.videoWidth) return;
+      try {
+        const c = document.createElement('canvas');
+        c.width = el.videoWidth;
+        c.height = el.videoHeight;
+        c.getContext('2d').drawImage(el, 0, 0, c.width, c.height);
+        const base = (record.value && record.value.filename || 'frame')
+          .replace(/\.[^.]+$/, '');
+        const stamp = String(Math.round(vCurrentMs.value)).padStart(6, '0');
+        c.toBlob((blob) => {
+          if (!blob) return;
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `${base}_${stamp}ms.png`;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          // Revoke on the next tick: revoking synchronously can beat the
+          // download off the mark in Chromium.
+          setTimeout(() => URL.revokeObjectURL(url), 0);
+        }, 'image/png');
+      } catch (err) {
+        console.warn('[xyz-gallery] frame export failed', err);
+      }
+    }
+
     const hasWorkflow = computed(() => !!meta.value.has_workflow);
 
     const syncStatusBadge = computed(() => {
@@ -790,7 +960,7 @@ export const DetailView = defineComponent({
       if (!record.value) return;
       dlImageBusy.value = true;
       try {
-        await executeImageDownload(record.value.id);
+        await executeImageDownload(record.value.id, { isVideo: isVideo.value });
       } catch {
         /* ignore */
       } finally {
@@ -831,6 +1001,11 @@ export const DetailView = defineComponent({
       asideWidthPx, onAsideSplitDown,
       canvasRef, imgStyle, copiedKey,
       hasWorkflow, workflowUrl, dlImageBusy, onDownloadImage, onSendToKrita,
+      isVideo, vinfo, videoEl, V_RATES,
+      vPlaying, vCurrentMs, vDurationMs, vMuted, vVolume, vLoop, vRate,
+      vCurrentLabel, vDurationLabel,
+      onVideoLoaded, onVideoTime, vTogglePlay, vSeekTo, vSkip, vStepFrame,
+      vSetVolume, vSetMuted, vSetLoop, vSetRate, vExportFrame,
       vocabAutocompleteMatch,
       developerMode,
       syncStatusBadge,
@@ -867,21 +1042,42 @@ export const DetailView = defineComponent({
             {{ error.code || 'error' }}: {{ error.message }}
           </span>
         </h2>
-        <nav class="dv-nav">
+        <!-- Operations live up here, not at the bottom of the right pane:
+             they used to be a scroll away behind the metadata, which is a
+             long way to travel for "delete this". Previous/Next moved the
+             other way — onto the canvas, where the eye already is. -->
+        <nav class="dv-ops" aria-label="operations">
           <IconButton
-            class="ib ib--nav"
-            icon="chevronLeft"
-            text="Previous"
-            title="Previous (wraps)"
-            :disabled="neighborsLoading || !record"
-            @click="gotoPrev" />
+            class="ib ib--op"
+            icon="download"
+            :text="isVideo ? 'Video' : 'Image'"
+            :title="dlImageBusy ? 'Preparing…' : (isVideo ? 'Download video' : 'Download image')"
+            :disabled="dlImageBusy || !record"
+            @click="onDownloadImage" />
           <IconButton
-            class="ib ib--nav"
-            icon="chevronRight"
-            text="Next"
-            title="Next (wraps)"
-            :disabled="neighborsLoading || !record"
-            @click="gotoNext" />
+            class="ib ib--op"
+            icon="braces"
+            text="Workflow"
+            :title="hasWorkflow ? 'Download the workflow JSON' : 'This file carries no workflow'"
+            :disabled="!hasWorkflow"
+            :href="hasWorkflow ? workflowUrl : ''"
+            :download="true"
+            @click="onWorkflowClick" />
+          <IconButton
+            v-if="!isVideo"
+            class="ib ib--op"
+            icon="brush"
+            text="Krita"
+            title="Open it in Krita as a layer or a new document"
+            :disabled="!record"
+            @click="onSendToKrita" />
+          <IconButton
+            class="ib ib--op ib--danger"
+            icon="trash"
+            text="Delete"
+            :title="isVideo ? 'Permanently delete this video' : 'Permanently delete this image'"
+            :disabled="delBusy || !record"
+            @click="openDelModal" />
         </nav>
       </header>
 
@@ -891,23 +1087,120 @@ export const DetailView = defineComponent({
 
       <div v-else class="dv-body">
         <div class="dv-left">
+          <!-- A clip gets the plain canvas: pan/zoom on a playing video fights
+               the scrub bar for the same pointer, and the frame is already
+               fitted. Stills keep every gesture they had. -->
           <div class="dv-canvas"
                ref="canvasRef"
-               @pointerdown="onPointerDown"
-               @pointermove="onPointerMove"
-               @pointerup="onPointerUp"
-               @pointercancel="onPointerUp"
-               @wheel.prevent="onCanvasWheel">
-            <img v-if="record && record.raw_url"
+               @pointerdown="isVideo ? null : onPointerDown($event)"
+               @pointermove="isVideo ? null : onPointerMove($event)"
+               @pointerup="isVideo ? null : onPointerUp($event)"
+               @pointercancel="isVideo ? null : onPointerUp($event)"
+               @wheel="isVideo ? null : onCanvasWheel($event)">
+            <video v-if="isVideo && record && record.raw_url"
+                   ref="videoEl"
+                   class="dv-video"
+                   :src="record.raw_url"
+                   playsinline
+                   preload="metadata"
+                   @loadedmetadata="onVideoLoaded"
+                   @timeupdate="onVideoTime"
+                   @play="vPlaying = true"
+                   @pause="vPlaying = false"
+                   @dblclick="vTogglePlay"></video>
+            <img v-else-if="record && record.raw_url"
                  class="dv-img"
                  :src="record.raw_url"
                  :style="imgStyle"
                  draggable="false"
                  @load="onImgLoad"
                  alt="" />
-            <div v-else-if="loading" class="muted dv-canvas-hint">Loading image…</div>
+            <div v-else-if="loading" class="muted dv-canvas-hint">Loading…</div>
+
+            <!-- On the canvas, not in the corner: this is where the eye already
+                 is. The .stop on pointerdown keeps a click off the pan handler,
+                 which would otherwise start a drag under the button.
+                 (No backticks in here: this whole template is a JS template
+                 literal, and one would end it mid-comment.) -->
+            <IconButton
+              class="ib dv-cnav dv-cnav--prev"
+              icon="chevronLeft"
+              text="Previous"
+              :text-sr-only="true"
+              title="Previous (wraps)"
+              :disabled="neighborsLoading || !record"
+              @pointerdown.stop
+              @click.stop="gotoPrev" />
+            <IconButton
+              class="ib dv-cnav dv-cnav--next"
+              icon="chevronRight"
+              text="Next"
+              :text-sr-only="true"
+              title="Next (wraps)"
+              :disabled="neighborsLoading || !record"
+              @pointerdown.stop
+              @click.stop="gotoNext" />
           </div>
-          <div class="dv-zoom">
+          <div v-if="isVideo" class="dv-player">
+            <div class="dv-player-scrub">
+              <button type="button"
+                      class="dv-vbtn dv-vbtn--play"
+                      :title="vPlaying ? 'Pause' : 'Play'"
+                      @click="vTogglePlay">{{ vPlaying ? '❚❚' : '▶' }}</button>
+              <span class="dv-vtime">{{ vCurrentLabel }}</span>
+              <input type="range"
+                     class="dv-vseek"
+                     min="0"
+                     :max="vDurationMs || 0"
+                     step="1"
+                     :value="vCurrentMs"
+                     :disabled="!vDurationMs"
+                     aria-label="Seek"
+                     @input="vSeekTo($event.target.value)" />
+              <span class="dv-vtime muted">{{ vDurationLabel }}</span>
+            </div>
+            <div class="dv-player-row">
+              <button type="button" class="dv-vbtn" title="Back 5 s" @click="vSkip(-5)">« 5s</button>
+              <button type="button" class="dv-vbtn" title="Previous frame" @click="vStepFrame(-1)">◀|</button>
+              <button type="button" class="dv-vbtn" title="Next frame" @click="vStepFrame(1)">|▶</button>
+              <button type="button" class="dv-vbtn" title="Forward 5 s" @click="vSkip(5)">5s »</button>
+
+              <span class="dv-vsep" aria-hidden="true"></span>
+
+              <button type="button"
+                      class="dv-vbtn"
+                      :class="{ active: vMuted }"
+                      :title="vMuted ? 'Unmute' : 'Mute'"
+                      @click="vSetMuted(!vMuted)">{{ vMuted ? '🔇' : '🔊' }}</button>
+              <input type="range"
+                     class="dv-vvol"
+                     min="0" max="1" step="0.01"
+                     :value="vVolume"
+                     aria-label="Volume"
+                     @input="vSetVolume($event.target.value)" />
+
+              <span class="dv-vsep" aria-hidden="true"></span>
+
+              <label class="dv-vfield">
+                <span class="muted">speed</span>
+                <select :value="vRate" @change="vSetRate($event.target.value)">
+                  <option v-for="r in V_RATES" :key="r" :value="r">{{ r }}×</option>
+                </select>
+              </label>
+              <label class="dv-vfield" title="Loop this clip">
+                <input type="checkbox" :checked="vLoop" @change="vSetLoop($event.target.checked)" />
+                <span class="muted">loop</span>
+              </label>
+
+              <span class="dv-vsep" aria-hidden="true"></span>
+
+              <button type="button"
+                      class="dv-vbtn"
+                      title="Save the frame on screen as a PNG"
+                      @click="vExportFrame">Save frame</button>
+            </div>
+          </div>
+          <div v-else class="dv-zoom">
             <button type="button" @click="fit" title="Fit to screen">Fit</button>
             <button type="button" @click="actualSize" title="1:1 (actual size)">1:1</button>
             <button type="button" @click="zoomOut" title="Zoom out">−</button>
@@ -922,8 +1215,8 @@ export const DetailView = defineComponent({
              @mousedown.prevent="onAsideSplitDown"></div>
         <aside class="dv-right" :style="{ flex: '0 0 ' + asideWidthPx + 'px', width: asideWidthPx + 'px' }">
           <template v-if="record">
-            <section class="dv-sec-block" aria-label="image data">
-              <h3 class="dv-sec">Image data</h3>
+            <section class="dv-sec-block" :aria-label="isVideo ? 'video data' : 'image data'">
+              <h3 class="dv-sec">{{ isVideo ? 'Video data' : 'Image data' }}</h3>
               <dl class="dv-meta">
                 <dt>File name</dt>
                 <dd class="dv-fname-wrap">
@@ -962,8 +1255,19 @@ export const DetailView = defineComponent({
                     {{ size.width }} &times; {{ size.height }}
                   </template>
                   <span v-else class="muted">—</span>
+                  <!-- Duration rides on the dimensions line rather than a row
+                       of its own: it is the same kind of fact about the file. -->
+                  <span v-if="isVideo && vDurationLabel" class="dv-dur"> · {{ vDurationLabel }}</span>
                   <span v-if="size.bytes" class="muted dv-bytes"> ({{ fmtBytesDv(size.bytes) }})</span>
                 </dd>
+                <template v-if="isVideo">
+                  <dt>Video</dt>
+                  <dd>
+                    <code v-if="vinfo.vcodec">{{ vinfo.vcodec }}</code>
+                    <span v-if="vinfo.fps" class="muted"> · {{ Math.round(vinfo.fps * 100) / 100 }} fps</span>
+                    <span class="muted"> · {{ vinfo.has_audio ? 'with audio' : 'no audio' }}</span>
+                  </dd>
+                </template>
                 <dt>Created</dt>
                 <dd>{{ record.created_at || '—' }}</dd>
               </dl>
@@ -1092,41 +1396,16 @@ export const DetailView = defineComponent({
               </dl>
             </section>
 
-            <section class="dv-sec-block" aria-label="operations">
-              <h3 class="dv-sec">Operations</h3>
-              <div class="dv-actions">
-                <button type="button"
-                        class="dv-btn"
-                        :disabled="dlImageBusy || !record"
-                        @click="onDownloadImage">
-                  {{ dlImageBusy ? 'Preparing…' : 'Download image' }}
-                </button>
-                <button type="button"
-                        class="dv-btn"
-                        :disabled="!record"
-                        title="Open it in Krita as a layer or a new document"
-                        @click="onSendToKrita">Send to Krita…</button>
-                <a class="dv-btn"
-                   :href="workflowUrl"
-                   :aria-disabled="!hasWorkflow"
-                   :class="{ 'dv-btn-disabled': !hasWorkflow }"
-                   :tabindex="hasWorkflow ? 0 : -1"
-                   @click="onWorkflowClick"
-                   download>Download workflow</a>
-                <button type="button"
-                        class="dv-btn dv-btn-danger"
-                        :disabled="delBusy || !record"
-                        title="Permanently delete this image"
-                        @click="openDelModal">Delete</button>
-              </div>
-            </section>
+            <!-- The Operations block used to live here, below every metadata
+                 section — so reaching Delete meant scrolling past the prompt.
+                 It is the top bar's right-hand group now. -->
           </template>
           <div v-else-if="loading" class="dv-meta muted">Loading…</div>
         </aside>
       </div>
       <ConfirmModal
         v-if="delModal"
-        title="Delete image"
+        :title="isVideo ? 'Delete video' : 'Delete image'"
         :lines="deleteModalLines"
         confirm-label="Delete"
         cancel-label="Cancel"

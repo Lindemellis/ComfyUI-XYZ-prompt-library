@@ -14,6 +14,8 @@ import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Set, Tuple, TYPE_CHECKING
 
+from . import video as _video
+
 if TYPE_CHECKING:
     from .repo import WriteQueue  # noqa: F401
 
@@ -80,6 +82,13 @@ def _bypasses_watcher_path_event(last_path: str, ev: str) -> bool:
 
 _IMAGE_EXTS: frozenset = frozenset({".png", ".jpg", ".jpeg", ".webp"})
 
+# Schema v8: the watcher decides what is worth waking the indexer for, so this
+# set has to match ``indexer._MEDIA_EXTS`` or a freshly rendered video would
+# never appear until the next delta scan. It is a second copy of the same
+# knowledge — sourced from ``video.VIDEO_EXTS`` so at least the video half
+# cannot drift.
+_MEDIA_EXTS: frozenset = frozenset(_IMAGE_EXTS | _video.VIDEO_EXTS)
+
 # ---- T25: coalescer counters (reset when heartbeat writes audit stats) ----
 
 _coalescer_events_seen: int = 0
@@ -127,12 +136,49 @@ def _fan_out_delta_scan_result(root: Dict[str, Any], st: Dict[str, Any]) -> None
 
 
 def _is_image_name(name: str) -> bool:
+    """Name the watcher should react to — images *and* videos (schema v8).
+
+    Kept under the old name because every call site means "is this a media
+    file we index", not "is this a raster".
+    """
     from . import metadata as _metadata
 
     if _metadata.is_gallery_atomic_temp_basename(name):
         return False
     ext = os.path.splitext(name)[1].lower()
-    return ext in _IMAGE_EXTS
+    return ext in _MEDIA_EXTS
+
+
+# Bounded settle wait for a file still being written (videos). Every wait in
+# this project must be able to time out on its own — an unbounded "until the
+# size stops changing" loop hangs the coalescer thread on a stalled encode.
+_SETTLE_POLL_S: float = 0.15
+_SETTLE_MAX_S: float = 4.0
+
+
+def _wait_for_size_stable(path: str) -> bool:
+    """Block until ``path``'s size repeats twice, or the budget runs out.
+
+    Returns True when it settled, False on timeout / stat failure. The caller
+    indexes either way: a timeout means "encode is unusually slow", and an
+    incomplete row the user can see beats a file that never shows up.
+    """
+    deadline = time.monotonic() + _SETTLE_MAX_S
+    last: Optional[int] = None
+    while time.monotonic() < deadline:
+        try:
+            size = os.stat(path).st_size
+        except OSError:
+            return False
+        if last is not None and size == last:
+            return True
+        last = size
+        time.sleep(_SETTLE_POLL_S)
+    logger.warning(
+        "watcher: %s never settled within %.1fs; indexing anyway",
+        path, _SETTLE_MAX_S,
+    )
+    return False
 
 
 def _is_derivative_excluded_path(path: str, root_path: str) -> bool:
@@ -384,6 +430,13 @@ class Coalescer:
             return
         if _is_derivative_excluded_path(pend.path, str(self._root["path"])):
             return
+        if _video.is_video_path(pend.path):
+            # A PNG is written in one go; an MP4 is muxed progressively and
+            # can still be growing when the 250 ms debounce expires. Indexing
+            # it then gives a row with no duration and no workflow — and the
+            # fingerprint would match on the next delta scan, so it would stay
+            # wrong forever. Wait for the size to settle first.
+            _wait_for_size_stable(pend.path)
         iid = _indexer.index_one(
             pend.path, root=self._root,
             db_path=self._db_path,

@@ -39,6 +39,22 @@ const VALID_VIEW_MODE = new Set(['compact', 'line']);
 const VALID_METADATA_PRESENCE = new Set(['all', 'yes', 'no']);
 /** T31 / SPEC §11 F04 — wire ``prompt_match_mode`` (default ``prompt`` = omit). */
 const VALID_PROMPT_MATCH_MODE = new Set(['prompt', 'word', 'string']);
+/** Schema v8 — wire ``media_kind`` (default ``all`` = omit). */
+const VALID_MEDIA_KIND = new Set(['all', 'image', 'video']);
+
+/**
+ * The two media checkboxes are stored as two booleans (that is what the UI
+ * is) but travel as one three-state value, because "both ticked" and
+ * "neither ticked" have to mean the same thing — an empty grid is a dead end
+ * a user reads as a bug. Both defaults are `true`, so an existing install
+ * sees exactly what it saw before videos were indexable.
+ */
+export function mediaKindOf(f) {
+  const img = f.show_images !== false;
+  const vid = f.show_videos !== false;
+  if (img === vid) return 'all';
+  return img ? 'image' : 'video';
+}
 
 export const DEFAULT_FILTER = Object.freeze({
   name: '',
@@ -52,6 +68,8 @@ export const DEFAULT_FILTER = Object.freeze({
   recursive: false,
   metadata_presence: 'all',
   prompt_match_mode: 'prompt',
+  show_images: true,
+  show_videos: true,
 });
 
 export const DEFAULT_SORT = Object.freeze({ key: 'time', dir: 'desc' });
@@ -65,6 +83,8 @@ function cloneDefaults() {
       tag_tokens: [],
       metadata_presence: 'all',
       prompt_match_mode: 'prompt',
+      show_images: true,
+      show_videos: true,
     },
     sort: { ...DEFAULT_SORT },
     view_mode: DEFAULT_VIEW_MODE,
@@ -111,6 +131,14 @@ function _readURL() {
     const v = (sp.get('prompt_match_mode') || '').trim().toLowerCase();
     if (VALID_PROMPT_MATCH_MODE.has(v)) { filter.prompt_match_mode = v; hasAny = true; }
   }
+  if (sp.has('media_kind')) {
+    const v = (sp.get('media_kind') || '').trim().toLowerCase();
+    if (VALID_MEDIA_KIND.has(v)) {
+      filter.show_images = v !== 'video';
+      filter.show_videos = v !== 'image';
+      hasAny = true;
+    }
+  }
   if (sp.has('sort')) {
     const v = sp.get('sort');
     if (VALID_SORT_KEY.has(v)) { sort.key = v; hasAny = true; }
@@ -143,6 +171,8 @@ function _readLocal() {
     if (typeof mp === 'string' && VALID_METADATA_PRESENCE.has(mp)) filter.metadata_presence = mp;
     const pmm = f.prompt_match_mode;
     if (typeof pmm === 'string' && VALID_PROMPT_MATCH_MODE.has(pmm)) filter.prompt_match_mode = pmm;
+    if (typeof f.show_images === 'boolean') filter.show_images = f.show_images;
+    if (typeof f.show_videos === 'boolean') filter.show_videos = f.show_videos;
     const s = obj.sort || {};
     if (VALID_SORT_KEY.has(s.key)) sort.key = s.key;
     if (VALID_SORT_DIR.has(s.dir)) sort.dir = s.dir;
@@ -256,6 +286,10 @@ export function apiQueryObject() {
   }
   if (fv.prompt_mode && f.prompt_match_mode && f.prompt_match_mode !== 'prompt') {
     q.prompt_match_mode = f.prompt_match_mode;
+  }
+  if (fv.media_kind !== false) {
+    const mk = mediaKindOf(f);
+    if (mk !== 'all') q.media_kind = mk;
   }
   q.sort = s.key;
   q.dir = s.dir;

@@ -1047,6 +1047,12 @@ def send_images_to_krita(
             rec = _repo.get_image(iid, db_path=db_path)
             if rec is None:
                 raise KeyError(f"image {iid} not found")
+            if rec.media_kind == "video":
+                # Krita has no notion of a video layer. The grid already hides
+                # the button on a video card; this is the batch case, where a
+                # mixed selection must skip the clips and still send the stills
+                # rather than failing the whole send.
+                raise ValueError("videos cannot be sent to Krita")
             _paths.assert_inside_root(rec.path, root_paths)
             disk = Path(rec.path)
             if not disk.is_file():

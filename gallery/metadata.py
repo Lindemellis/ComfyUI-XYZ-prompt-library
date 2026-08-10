@@ -33,6 +33,7 @@ from PIL import Image, UnidentifiedImageError
 from PIL.PngImagePlugin import PngInfo
 
 from . import paths as _paths
+from . import video as _video
 
 
 _KEY_PROMPT = "prompt"          # ComfyUI: API workflow JSON (executable form)
@@ -54,8 +55,37 @@ def is_gallery_atomic_temp_basename(name: str) -> bool:
 
 
 _SAMPLER_NODE_HINTS: Tuple[str, ...] = ("KSampler", "Sampler")
-_CHECKPOINT_NODE_HINTS: Tuple[str, ...] = ("Checkpoint", "Loader", "Model")
+#: Ordered by how specific the hint is, because ``_iter_nodes`` walks them in
+#: order and the first candidate that actually carries a model name wins.
+#: ``Loader`` and ``Model`` are so broad that they match ``VAELoader``,
+#: ``CLIPLoader`` and ``ApplyFBCacheOnModel`` — they must come last or they
+#: shadow the real loader (which is exactly the bug this ordering fixes).
+_CHECKPOINT_NODE_HINTS: Tuple[str, ...] = (
+    "Checkpoint", "UNETLoader", "UnetLoader", "DiffusionModel", "Loader", "Model",
+)
 _TEXT_ENCODE_HINTS: Tuple[str, ...] = ("CLIPTextEncode", "TextEncode")
+
+#: Input names that hold a model file name, most specific first.
+_MODEL_NAME_FIELDS: Tuple[str, ...] = (
+    "ckpt_name", "unet_name", "model_name", "model",
+)
+
+#: ``SamplerCustomAdvanced`` takes noise / guider / sampler / sigmas as LINKS
+#: and so carries no scalar of its own. Everything a KSampler would have said
+#: is spread across these core ComfyUI nodes instead. This is not a
+#: workflow-pack special case — it is the standard modern graph (Flux, Anima,
+#: MiniMax H3 and anything else built on SamplerCustomAdvanced).
+_ADVANCED_SAMPLER_SOURCES: Tuple[Tuple[str, Tuple[Tuple[str, str], ...]], ...] = (
+    ("RandomNoise", (("noise_seed", "seed"),)),
+    ("DisableNoise", (("noise_seed", "seed"),)),
+    ("BasicScheduler", (("steps", "steps"), ("scheduler", "scheduler"))),
+    ("KSamplerSelect", (("sampler_name", "sampler"),)),
+    ("CFGGuider", (("cfg", "cfg"),)),
+    ("SamplerCustom", (("noise_seed", "seed"), ("cfg", "cfg"))),
+)
+
+#: Nodes that stand between an advanced sampler and its conditioning.
+_GUIDER_HINTS: Tuple[str, ...] = ("Guider",)
 
 #: ComfyUI's scheduler list (``comfy.samplers.SCHEDULER_HANDLERS``).  A1111's
 #: ``parameters`` convention packs the scheduler *into* the ``Sampler:`` field
@@ -106,7 +136,7 @@ class ComfyMeta:
 
 
 def read_comfy_metadata(path) -> ComfyMeta:
-    """Extract ComfyUI / A1111 metadata + gallery mirror fields from a PNG.
+    """Extract ComfyUI / A1111 metadata + gallery mirror fields from a media file.
 
     Source-priority for derived fields (TASKS T06 / SPEC §10 Q3):
     ``workflow JSON > parameters text > empty``.  Within "workflow JSON"
@@ -115,12 +145,21 @@ def read_comfy_metadata(path) -> ComfyMeta:
     ``{node_id: {class_type, inputs}}`` — the only form from which we can
     deterministically follow ``positive`` / ``negative`` links to text
     encoders without re-implementing the visual editor's link table.
+
+    Video containers go through the identical pipeline.  Only the *reader*
+    differs: ComfyUI writes the same ``workflow`` / ``prompt`` JSON into an
+    MP4's container tags that it writes into a PNG's ``tEXt`` chunks, so
+    swapping ``_open_png_text`` for ``video.read_container_metadata`` is the
+    whole of the change — every derivation below is shared verbatim.
     """
 
     p = Path(path)
     errors: list[str] = []
 
-    chunks = _open_png_text(p, errors)
+    if _video.is_video_path(p):
+        chunks = _open_video_tags(p, errors)
+    else:
+        chunks = _open_png_text(p, errors)
     if chunks is None:
         return ComfyMeta(errors=tuple(errors))
 
@@ -154,6 +193,27 @@ def read_comfy_metadata(path) -> ComfyMeta:
         favorite=str(favorite_raw) if favorite_raw is not None else None,
         errors=tuple(errors),
     )
+
+
+def _open_video_tags(p: Path, errors: list[str]) -> Optional[dict[str, str]]:
+    """Container tags for a video, shaped like ``_open_png_text``'s return.
+
+    A clip with *no* tags is not an error — plenty of videos carry none — so
+    an empty dict is returned rather than None; the caller then derives
+    nothing and the row is simply metadata-less. None is reserved for "could
+    not read the file at all", which is what the image path means by it too.
+    """
+    if not p.is_file():
+        errors.append(f"file not found: {p}")
+        return None
+    if not _video.have_av():
+        errors.append("PyAV unavailable: video metadata not read")
+        return None
+    tags = _video.read_container_metadata(p)
+    if tags is None:
+        errors.append(f"could not open video container: {p.name}")
+        return None
+    return tags
 
 
 def _open_png_text(p: Path, errors: list[str]) -> Optional[dict[str, str]]:
@@ -207,41 +267,130 @@ def _derive_from_workflow(workflow: Mapping[str, Any]) -> dict[str, Any]:
     nodes: Mapping[str, Mapping[str, Any]] = workflow  # type: ignore[assignment]
 
     out: dict[str, Any] = {}
-    sampler_node = _find_node(nodes, _SAMPLER_NODE_HINTS)
-    if sampler_node is not None:
-        inputs = sampler_node.get("inputs") or {}
-        for src, dst in (
-            ("seed", "seed"),
-            ("noise_seed", "seed"),
-            ("cfg", "cfg"),
-            ("steps", "steps"),
-            ("sampler_name", "sampler"),
-            ("scheduler", "scheduler"),
+    _derive_sampler_fields(nodes, out)
+    _derive_model_name(nodes, out)
+    return out
+
+
+_SAMPLER_SCALAR_FIELDS: Tuple[Tuple[str, str], ...] = (
+    ("seed", "seed"),
+    ("noise_seed", "seed"),
+    ("cfg", "cfg"),
+    ("steps", "steps"),
+    ("sampler_name", "sampler"),
+    ("scheduler", "scheduler"),
+)
+
+
+def _derive_sampler_fields(
+    nodes: Mapping[str, Mapping[str, Any]], out: dict[str, Any]
+) -> None:
+    """Fill seed / cfg / steps / sampler / scheduler / prompts.
+
+    Walks EVERY sampler-shaped node rather than only the first one. The old
+    code stopped at the first class_type containing "Sampler", which on a
+    ``SamplerCustomAdvanced`` graph is a node whose five inputs are all links —
+    so it extracted nothing and never looked further. First value wins per
+    field, so a graph that already worked derives exactly what it did before.
+    """
+    for node in _iter_nodes(nodes, _SAMPLER_NODE_HINTS):
+        inputs = node.get("inputs") or {}
+        for src, dst in _SAMPLER_SCALAR_FIELDS:
+            if dst in out:
+                continue
+            value = _literal(inputs, src)
+            if value is not None:
+                out[dst] = value
+        _derive_prompts(nodes, inputs, out)
+
+    # The advanced-sampler family keeps its scalars in sibling nodes.
+    for hint, mapping in _ADVANCED_SAMPLER_SOURCES:
+        if all(dst in out for _, dst in mapping):
+            continue
+        for node in _iter_nodes(nodes, (hint,)):
+            inputs = node.get("inputs") or {}
+            for src, dst in mapping:
+                if dst in out:
+                    continue
+                value = _literal(inputs, src)
+                if value is not None:
+                    out[dst] = value
+
+
+def _derive_prompts(
+    nodes: Mapping[str, Mapping[str, Any]],
+    inputs: Mapping[str, Any],
+    out: dict[str, Any],
+) -> None:
+    """Positive / negative text, direct or through a guider.
+
+    A KSampler links ``positive`` / ``negative`` straight at the text encoders.
+    ``SamplerCustomAdvanced`` links a ``guider`` instead, and the conditioning
+    hangs off that — one extra hop, and without it every modern graph reports
+    no prompt at all.
+    """
+    for src, dst in (("positive", "positive_prompt"), ("negative", "negative_prompt")):
+        if dst in out:
+            continue
+        text = _follow_text_link(nodes, inputs.get(src))
+        if text is not None:
+            out[dst] = text
+
+    if "positive_prompt" in out and "negative_prompt" in out:
+        return
+
+    # SamplerCustomAdvanced hides conditioning behind a guider…
+    guider = _resolve_link(nodes, inputs.get("guider"))
+    if guider is not None:
+        ginputs = guider.get("inputs") or {}
+        # BasicGuider names it ``conditioning``; CFGGuider keeps pos/neg.
+        for src, dst, role in (
+            ("positive", "positive_prompt", "positive"),
+            ("conditioning", "positive_prompt", "positive"),
+            ("negative", "negative_prompt", "negative"),
         ):
             if dst in out:
                 continue
-            value = inputs.get(src)
-            if value is None or _is_link(value):
-                continue
-            out[dst] = value
+            text = _trace_prompt_text(nodes, ginputs.get(src), role)
+            if text is not None:
+                out[dst] = text
 
-        positive = _follow_text_link(nodes, inputs.get("positive"))
-        if positive is not None:
-            out["positive_prompt"] = positive
-        negative = _follow_text_link(nodes, inputs.get("negative"))
-        if negative is not None:
-            out["negative_prompt"] = negative
+    # …and Impact Pack hides it behind a pipe. Both end at the same walk.
+    for src, dst, role in (
+        ("positive", "positive_prompt", "positive"),
+        ("negative", "negative_prompt", "negative"),
+    ):
+        if dst in out:
+            continue
+        start = inputs.get(src)
+        if not _is_link(start):
+            start = inputs.get("basic_pipe") or inputs.get("pipe")
+        text = _trace_prompt_text(nodes, start, role)
+        if text is not None:
+            out[dst] = text
 
-    ckpt = _find_node(nodes, _CHECKPOINT_NODE_HINTS)
-    if ckpt is not None:
-        inputs = ckpt.get("inputs") or {}
-        for key in ("ckpt_name", "model_name", "model"):
-            value = inputs.get(key)
-            if value is None or _is_link(value):
-                continue
-            out["model"] = value
-            break
-    return out
+
+def _derive_model_name(
+    nodes: Mapping[str, Mapping[str, Any]], out: dict[str, Any]
+) -> None:
+    """The checkpoint / UNet file name.
+
+    Candidates are visited most-specific-hint first, and a candidate that
+    carries none of the name fields is SKIPPED rather than ending the search.
+    That is the fix for the shadowing bug: ``VAELoader`` matches the broad
+    ``Loader`` hint and only has ``vae_name``, so under the old first-match
+    rule it beat the real ``UNETLoader`` and the model came out empty — on
+    roughly a third of an ordinary library, not just on video workflows.
+    """
+    if "model" in out:
+        return
+    for node in _iter_nodes(nodes, _CHECKPOINT_NODE_HINTS):
+        inputs = node.get("inputs") or {}
+        for key in _MODEL_NAME_FIELDS:
+            value = _literal(inputs, key)
+            if value is not None and str(value).strip():
+                out["model"] = value
+                return
 
 
 def _is_link(value: Any) -> bool:
@@ -253,13 +402,49 @@ def _is_link(value: Any) -> bool:
     )
 
 
+def _literal(inputs: Mapping[str, Any], key: str) -> Optional[Any]:
+    """The value of ``key`` when it is a literal, not a node-to-node link."""
+    value = inputs.get(key)
+    if value is None or _is_link(value):
+        return None
+    return value
+
+
+def _iter_nodes(
+    nodes: Mapping[str, Mapping[str, Any]], hints: Tuple[str, ...]
+):
+    """Every node matching ``hints``, hint by hint in the order given.
+
+    Hint order is priority order: all ``Checkpoint`` nodes are offered before
+    any ``Loader`` node, so a broad hint can no longer shadow a specific one.
+    Each node is yielded at most once even when several hints match it.
+    """
+    seen: set = set()
+    for hint in hints:
+        for nid, node in nodes.items():
+            if nid in seen or not isinstance(node, Mapping):
+                continue
+            if hint in str(node.get("class_type") or ""):
+                seen.add(nid)
+                yield node
+
+
+def _resolve_link(
+    nodes: Mapping[str, Mapping[str, Any]], link: Any
+) -> Optional[Mapping[str, Any]]:
+    """The node a ``[node_id, slot]`` link points at."""
+    if not _is_link(link):
+        return None
+    target = nodes.get(str(link[0]))
+    return target if isinstance(target, Mapping) else None
+
+
 def _find_node(
     nodes: Mapping[str, Mapping[str, Any]], hints: Tuple[str, ...]
 ) -> Optional[Mapping[str, Any]]:
-    for node in nodes.values():
-        ct = str(node.get("class_type") or "")
-        if any(h in ct for h in hints):
-            return node
+    """First node matching any hint (hint order = priority)."""
+    for node in _iter_nodes(nodes, hints):
+        return node
     return None
 
 
@@ -282,6 +467,85 @@ def _follow_text_link(
         return text
     if _is_link(text):
         return _follow_text_link(nodes, text, depth + 1)
+    return None
+
+
+#: Inputs that may hold prompt text as a literal, most likely first.
+#: ``populated_text`` before ``wildcard_text``: Impact's wildcard processor
+#: keeps the pattern in one and the RESOLVED prompt in the other, and the
+#: resolved one is what actually generated the picture.
+_TEXT_LITERAL_FIELDS: Tuple[str, ...] = (
+    "text", "populated_text", "wildcard_text", "template",
+    "string", "value", "prompt", "text_g", "text_l",
+)
+
+#: Role-specific text inputs, tried before the shared ones above so a node
+#: carrying both halves cannot answer with the wrong one.
+_TEXT_ROLE_FIELDS: dict = {
+    "positive": ("text_positive", "positive_text", "positive_prompt"),
+    "negative": ("text_negative", "negative_text", "negative_prompt"),
+}
+
+#: Inputs to follow when a node is a pass-through rather than an encoder.
+#: Walked after the role-named input (``positive`` / ``negative``), which is
+#: what keeps a negative chain from wandering into the positive branch.
+_TEXT_PASSTHROUGH_FIELDS: Tuple[str, ...] = (
+    "text", "conditioning", "basic_pipe", "pipe",
+)
+
+#: Conditioning rarely sits more than a handful of hops from the sampler even
+#: through Impact's pipes; the cap is what stops a corrupt graph looping.
+_TEXT_TRACE_MAX_DEPTH: int = 8
+
+
+def _trace_prompt_text(
+    nodes: Mapping[str, Mapping[str, Any]],
+    link: Any,
+    role: str,
+    depth: int = 0,
+    seen: Optional[set] = None,
+) -> Optional[str]:
+    """Follow a conditioning link to the text behind it, keeping its role.
+
+    ``_follow_text_link`` only succeeds when the sampler links *straight* at a
+    ``CLIPTextEncode``. Real graphs rarely do: Impact Pack routes conditioning
+    through ``ToBasicPipe`` → ``FromBasicPipe`` → the sampler's ``basic_pipe``,
+    and encoder wrappers add more hops. This walks that chain.
+
+    ``role`` ('positive' / 'negative') is carried through every hop and tried
+    before any generic input, so a negative chain cannot cross into the
+    positive branch of a node that carries both — which is the one way a
+    generic graph walk produces confidently wrong metadata.
+    """
+    if depth >= _TEXT_TRACE_MAX_DEPTH or not _is_link(link):
+        return None
+    node_id = str(link[0])
+    seen = set() if seen is None else seen
+    if node_id in seen:
+        return None
+    seen.add(node_id)
+    target = nodes.get(node_id)
+    if not isinstance(target, Mapping):
+        return None
+    inputs = target.get("inputs") or {}
+
+    text_fields = (*_TEXT_ROLE_FIELDS.get(role, ()), *_TEXT_LITERAL_FIELDS)
+    for field in text_fields:
+        value = inputs.get(field)
+        if isinstance(value, str) and value.strip():
+            return value
+
+    # The same field names again, this time as links: a text field is very
+    # often wired from a string node rather than typed in (``XYZ Multi Text
+    # Replace.template`` ← a wildcard processor), and stopping at "it is not a
+    # literal" is what left the positive prompt empty while the negative —
+    # which happened to end at a plain string node — resolved fine.
+    for field in (role, *text_fields, *_TEXT_PASSTHROUGH_FIELDS):
+        nxt = inputs.get(field)
+        if _is_link(nxt):
+            found = _trace_prompt_text(nodes, nxt, role, depth + 1, seen)
+            if found is not None:
+                return found
     return None
 
 

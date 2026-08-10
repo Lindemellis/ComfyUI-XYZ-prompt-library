@@ -14,6 +14,8 @@ import {
   applyServerPreferences,
   applyThemeToDocument,
   filtersPaneFitRequest,
+  videoPrefs,
+  setVideoPref,
 } from '../stores/gallerySettings.js';
 
 /** Same order as MainView sidebar filters (top → bottom). */
@@ -26,6 +28,7 @@ const FV_LABELS = [
   ['favorite', 'Favorite filter'],
   ['model', 'Model filter'],
   ['dates', 'Date filter'],
+  ['media_kind', 'Media filter (images / videos)'],
 ];
 
 function _fireFoldersRefresh() {
@@ -60,6 +63,7 @@ export const SettingsView = defineComponent({
         favorite: true,
         model: true,
         dates: true,
+        media_kind: true,
       },
     });
 
@@ -480,6 +484,8 @@ export const SettingsView = defineComponent({
       saveServerPrefs,
       saveFlashOk,
       FV_LABELS,
+      videoPrefs,
+      setVideoPref,
       scrollTo,
       tagSearch,
       tagRows,
@@ -548,6 +554,7 @@ export const SettingsView = defineComponent({
         <nav class="gs-win-side" aria-label="Settings sections">
           <a href="#gs-appearance" @click.prevent="scrollTo('gs-appearance')">Appearance</a>
           <a href="#gs-filters" @click.prevent="scrollTo('gs-filters')">Filter visibility</a>
+          <a href="#gs-video" @click.prevent="scrollTo('gs-video')">Video</a>
           <a href="#gs-download" @click.prevent="scrollTo('gs-download')">Download</a>
           <a href="#gs-autocomplete" @click.prevent="scrollTo('gs-autocomplete')">Autocomplete</a>
           <a href="#gs-tags" @click.prevent="scrollTo('gs-tags')">Tags</a>
@@ -580,6 +587,44 @@ export const SettingsView = defineComponent({
               </label>
             </div>
           </section>
+          <section id="gs-video" class="gs-sec">
+            <h2>Video</h2>
+            <p class="muted gs-hint">
+              These are remembered in this browser only — they describe how this
+              machine should play clips, not what the library contains.
+            </p>
+            <label class="gs-row">
+              <input type="checkbox"
+                     :checked="videoPrefs.hoverPreview"
+                     @change="(e)=>setVideoPref('hoverPreview', e.target.checked)" />
+              <span>Play a muted preview when the pointer rests on a video card</span>
+            </label>
+            <label class="gs-row">
+              <input type="checkbox"
+                     :checked="videoPrefs.autoplay"
+                     @change="(e)=>setVideoPref('autoplay', e.target.checked)" />
+              <span>Start playing as soon as a video is opened</span>
+            </label>
+            <p v-if="videoPrefs.autoplay && !videoPrefs.muted" class="muted gs-hint">
+              With "start muted" off, the browser may refuse to autoplay until you
+              interact with the page — the clip then waits on its first frame.
+            </p>
+            <label class="gs-row">
+              <input type="checkbox"
+                     :checked="videoPrefs.loop"
+                     @change="(e)=>setVideoPref('loop', e.target.checked)" />
+              <span>Loop by default on the detail page</span>
+            </label>
+            <label class="gs-row">
+              <input type="checkbox"
+                     :checked="videoPrefs.muted"
+                     @change="(e)=>setVideoPref('muted', e.target.checked)" />
+              <span>Start muted</span>
+            </label>
+            <p class="muted gs-hint">
+              Volume is remembered separately, from wherever you last left the slider.
+            </p>
+          </section>
           <section id="gs-download" class="gs-sec">
             <h2>Download (PNG)</h2>
             <label class="gs-row">
@@ -599,6 +644,10 @@ export const SettingsView = defineComponent({
               <span>Generation data — prompt, seed, steps, sampler</span>
             </label>
             <p class="muted gs-hint">{{ dlSummary }}</p>
+            <p class="muted gs-hint">
+              Applies to PNG only — stripping these rewrites PNG text chunks. Videos,
+              JPEGs and WebPs always download exactly as they are on disk.
+            </p>
             <label class="gs-row gs-row--select">
               <span>Download filename prefix (optional)</span>
               <input type="text" class="gs-input" v-model="form.downloadBasenamePrefix"
@@ -699,8 +748,9 @@ export const SettingsView = defineComponent({
           <section id="gs-backfill" class="gs-sec">
             <h2>Image metadata</h2>
             <p class="muted gs-hint">
-              Step count was added later, so images indexed before it show no Steps.
-              This re-reads their PNG metadata in the background. It never touches the
+              Some images show blank generation data — either they were indexed before
+              a field existed, or their workflow used nodes the reader has since learned
+              to follow. This re-reads them in the background. It never touches the
               files, and it is safe to run again.
             </p>
             <div class="gs-row">
@@ -709,7 +759,7 @@ export const SettingsView = defineComponent({
                 {{ backfillBusy ? 'Queueing…' : 'Re-read missing metadata' }}
               </button>
               <span v-if="backfillMissing != null" class="muted">
-                {{ backfillMissing }} image(s) have no step count
+                {{ backfillMissing }} image(s) have incomplete generation data
               </span>
             </div>
             <p v-if="backfillMsg" class="gs-tagmsg">{{ backfillMsg }}</p>

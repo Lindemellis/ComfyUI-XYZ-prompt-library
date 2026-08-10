@@ -308,10 +308,42 @@ def _migrate_v7(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE image ADD COLUMN steps INTEGER")
 
 
+# -- Schema v8 — video: what kind of media a row is, and its clip properties --
+
+
+def _migrate_v8(conn: sqlite3.Connection) -> None:
+    """Add ``image.media_kind`` + the video-only columns.
+
+    ``media_kind`` is a real column with an index rather than something
+    derived from ``ext`` at query time, because the grid's image/video filter
+    is a SQL ``WHERE`` on every page of a 2000+ row library and ``ext`` has no
+    index.
+
+    Unlike v7 (``steps``), this one needs **no backfill**: every row that
+    exists at migration time was indexed under the image-only extension
+    whitelist, so the ``'image'`` default is not a guess — it is the answer.
+    The video columns stay NULL for them, which is exactly right.
+    """
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(image)")}
+    additions = (
+        ("media_kind", "TEXT NOT NULL DEFAULT 'image'"),
+        ("duration_ms", "INTEGER"),
+        ("fps", "REAL"),
+        ("has_audio", "INTEGER"),
+        ("vcodec", "TEXT"),
+    )
+    for name, decl in additions:
+        if name not in columns:
+            conn.execute(f"ALTER TABLE image ADD COLUMN {name} {decl}")
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_image_media_kind ON image(media_kind)"
+    )
+
+
 # -- Migration framework ----------------------------------------------------
 
 # Forward-only ledger. ``6`` = word_token / image_word_token (§11 F04 word);
-# ``7`` = image.steps.
+# ``7`` = image.steps; ``8`` = media_kind + video columns.
 # FTS5 / T28 will append later steps (see module docstring).
 MIGRATIONS: Dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migrate_v1,
@@ -321,6 +353,7 @@ MIGRATIONS: Dict[int, Callable[[sqlite3.Connection], None]] = {
     5: _migrate_v5,
     6: _migrate_v6,
     7: _migrate_v7,
+    8: _migrate_v8,
 }
 
 SCHEMA_VERSION: int = max(MIGRATIONS)

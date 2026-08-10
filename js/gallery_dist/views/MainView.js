@@ -1043,6 +1043,16 @@ export const MainView = defineComponent({
     }
 
     const ctxDownloadBusy = ref(false);
+    /** The row the context menu was opened on — the menu itself only carries an id. */
+    const ctxItem = computed(() => {
+      const id = contextMenu.value.id;
+      if (typeof id !== 'number') return null;
+      return images.value.find((x) => x && x.id === id) || null;
+    });
+    const ctxIsVideo = computed(
+      () => !!(ctxItem.value && ctxItem.value.media_kind === 'video'),
+    );
+
     function onCtxSendToKrita() {
       const id = contextMenu.value.id;
       closeContextMenu();
@@ -1055,11 +1065,13 @@ export const MainView = defineComponent({
 
     async function onCtxDownload() {
       const id = contextMenu.value.id;
+      // Read the kind BEFORE closing: the menu is what ``ctxItem`` keys off.
+      const isVideo = ctxIsVideo.value;
       closeContextMenu();
       if (typeof id !== 'number') return;
       ctxDownloadBusy.value = true;
       try {
-        await executeImageDownload(id);
+        await executeImageDownload(id, { isVideo });
       } catch {
         /* ignore — user may cancel or network blip */
       } finally {
@@ -1091,6 +1103,7 @@ export const MainView = defineComponent({
       onCardsPerRowInput,
       onOpenImage, onToggleFavorite, onContext,
       closeContextMenu, onCtxOpenDetail, onCtxMove, onCtxDownload, ctxDownloadBusy,
+      ctxIsVideo,
       closeMovePicker,
       loadMore, bulkMode, onToggleBulk, gridListGen, folderTreeScrollEl,
       sidebarStackEl, mvGridStyle, filtersPaneStyle, onSplitVDown, onSplitHDown,
@@ -1191,6 +1204,21 @@ export const MainView = defineComponent({
                     </button>
                   </div>
                 </div>
+                <fieldset v-show="filterVisibility.media_kind" class="mv-field mv-media">
+                  <legend>media filter:</legend>
+                  <label class="mv-media-row">
+                    <input type="checkbox" v-model="filter.show_images" />
+                    images
+                  </label>
+                  <label class="mv-media-row">
+                    <input type="checkbox" v-model="filter.show_videos" />
+                    videos
+                  </label>
+                  <!-- Unticking both would ask for an empty grid, which reads
+                       as a broken page; it means the same as ticking both. -->
+                  <span v-if="!filter.show_images && !filter.show_videos"
+                        class="mv-media-hint">showing everything</span>
+                </fieldset>
                 <label v-show="filterVisibility.favorite" class="mv-field">
                   <span>favorite filter:</span>
                   <select v-model="filter.favorite">
@@ -1367,15 +1395,15 @@ export const MainView = defineComponent({
              @click.stop>
           <button type="button" @click="onCtxOpenDetail">Open detail</button>
           <button type="button" :disabled="ctxDownloadBusy" @click="onCtxDownload">
-            {{ ctxDownloadBusy ? 'Downloading…' : 'Download image' }}
+            {{ ctxDownloadBusy ? 'Downloading…' : (ctxIsVideo ? 'Download video' : 'Download image') }}
           </button>
-          <button type="button" @click="onCtxSendToKrita">Send to Krita…</button>
+          <button v-if="!ctxIsVideo" type="button" @click="onCtxSendToKrita">Send to Krita…</button>
           <button type="button" @click="onCtxMove">Move…</button>
           <button type="button" @click="onCtxDelete">Delete…</button>
         </div>
         <ConfirmModal
           v-if="deleteCtxOpen"
-          title="Delete image"
+          :title="ctxIsVideo ? 'Delete video' : 'Delete image'"
           :lines="deleteCtxLines"
           confirm-label="Delete"
           cancel-label="Cancel"

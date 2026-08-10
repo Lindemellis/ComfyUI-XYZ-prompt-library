@@ -159,6 +159,11 @@ class UpsertImageOp:
                  width: Optional[int],
                  height: Optional[int],
                  file_size: int,
+                 media_kind: str = "image",
+                 duration_ms: Optional[int] = None,
+                 fps: Optional[float] = None,
+                 has_audio: Optional[int] = None,
+                 vcodec: Optional[str] = None,
                  mtime_ns: int,
                  created_at: int,
                  positive_prompt: Optional[str],
@@ -186,6 +191,14 @@ class UpsertImageOp:
         self.ext = ext
         self.width = width
         self.height = height
+        # Schema v8. ``media_kind`` defaults to 'image' here as well as in the
+        # DDL so an older caller that never heard of video still writes a row
+        # the filter can classify.
+        self.media_kind = str(media_kind or "image")
+        self.duration_ms = duration_ms
+        self.fps = fps
+        self.has_audio = has_audio
+        self.vcodec = vcodec
         self.file_size = int(file_size)
         self.mtime_ns = int(mtime_ns)
         self.created_at = int(created_at)
@@ -216,6 +229,11 @@ class UpsertImageOp:
             "ext": self.ext,
             "width": self.width,
             "height": self.height,
+            "media_kind": self.media_kind,
+            "duration_ms": self.duration_ms,
+            "fps": self.fps,
+            "has_audio": self.has_audio,
+            "vcodec": self.vcodec,
             "file_size": self.file_size,
             "mtime_ns": self.mtime_ns,
             "created_at": self.created_at,
@@ -296,12 +314,14 @@ class UpsertImageOp:
 _UPSERT_IMAGE_SQL = """
 INSERT INTO image (
     path, folder_id, relative_path, filename, filename_lc, ext,
-    width, height, file_size, mtime_ns, created_at,
+    width, height, media_kind, duration_ms, fps, has_audio, vcodec,
+    file_size, mtime_ns, created_at,
     positive_prompt, negative_prompt, model, seed, cfg, steps, sampler, scheduler,
     workflow_present, favorite, tags_csv, indexed_at
 ) VALUES (
     :path, :folder_id, :relative_path, :filename, :filename_lc, :ext,
-    :width, :height, :file_size, :mtime_ns, :created_at,
+    :width, :height, :media_kind, :duration_ms, :fps, :has_audio, :vcodec,
+    :file_size, :mtime_ns, :created_at,
     :positive_prompt, :negative_prompt, :model, :seed, :cfg, :steps, :sampler, :scheduler,
     :workflow_present, :favorite, :tags_csv, :indexed_at
 )
@@ -313,6 +333,11 @@ ON CONFLICT(path) DO UPDATE SET
     ext              = excluded.ext,
     width            = excluded.width,
     height           = excluded.height,
+    media_kind       = excluded.media_kind,
+    duration_ms      = excluded.duration_ms,
+    fps              = excluded.fps,
+    has_audio        = excluded.has_audio,
+    vcodec           = excluded.vcodec,
     file_size        = excluded.file_size,
     mtime_ns         = excluded.mtime_ns,
     created_at       = COALESCE(image.created_at, excluded.created_at),
@@ -670,14 +695,30 @@ class ResyncMetadataOp:
         return int(row[0])
 
 
-class ResyncMissingStepsOp:
-    """Mark every image whose ``steps`` is NULL for a metadata re-read.
+# A row is worth re-reading when the file claims to carry a workflow but a
+# field we know how to derive from one is still empty. It started as "steps IS
+# NULL" (the schema-v7 backfill) and had to widen: the workflow-derivation fix
+# recovers ``model`` and ``positive_prompt`` on graphs that previously yielded
+# neither, and those rows have a perfectly good ``steps`` — under the old
+# predicate they would never be revisited and would stay wrong forever.
+#
+# Re-reading a row that genuinely has no prompt is harmless (it is a manual
+# button and the read is idempotent); never revisiting one that could be fixed
+# is not.
+_NEEDS_METADATA_REREAD_SQL = (
+    "workflow_present = 1 AND ("
+    "steps IS NULL OR model IS NULL OR seed IS NULL "
+    "OR sampler IS NULL OR positive_prompt IS NULL)"
+)
 
-    ``steps`` only arrived in schema v7, so every row indexed before it has NULL —
-    and the value lives in the PNG, not in anything the database already holds.
-    Rather than re-read the whole library, hand exactly those rows to the metadata
-    sync worker the same way ``/resync`` hands it one: same retry policy, same
-    backoff, same broadcasts.
+
+class ResyncMissingStepsOp:
+    """Mark every image with derivable-but-missing metadata for a re-read.
+
+    The values live in the file, not in anything the database already holds.
+    Rather than re-read the whole library, hand exactly those rows to the
+    metadata sync worker the same way ``/resync`` hands it one: same retry
+    policy, same backoff, same broadcasts.
 
     ONE transaction, not one per image: a library of 20k pictures would otherwise be
     20k round trips through the write queue, and the queue is single-writer.
@@ -693,10 +734,13 @@ class ResyncMissingStepsOp:
             "metadata_sync_retry_count = 0, "
             "metadata_sync_next_retry_at = NULL, "
             "metadata_sync_last_error = NULL "
-            "WHERE steps IS NULL"
+            f"WHERE {_NEEDS_METADATA_REREAD_SQL}"
         )
         if self.limit > 0:
-            sql += " AND id IN (SELECT id FROM image WHERE steps IS NULL LIMIT ?)"
+            sql += (
+                " AND id IN (SELECT id FROM image WHERE "
+                f"{_NEEDS_METADATA_REREAD_SQL} LIMIT ?)"
+            )
             cur = conn.execute(sql, (self.limit,))
         else:
             cur = conn.execute(sql)
@@ -704,9 +748,13 @@ class ResyncMissingStepsOp:
 
 
 def count_missing_steps(*, db_path: _PathLike) -> int:
+    """How many rows the re-read button would queue — same predicate as the op,
+    or the label would promise a different number than the button delivers."""
     conn = _db.connect_read(db_path)
     try:
-        (n,) = conn.execute("SELECT COUNT(*) FROM image WHERE steps IS NULL").fetchone()
+        (n,) = conn.execute(
+            f"SELECT COUNT(*) FROM image WHERE {_NEEDS_METADATA_REREAD_SQL}"
+        ).fetchone()
         return int(n)
     finally:
         conn.close()
@@ -1489,6 +1537,7 @@ _VALID_SORT_KEYS: frozenset = frozenset({"name", "time", "size", "folder"})
 _VALID_SORT_DIRS: frozenset = frozenset({"asc", "desc"})
 _VALID_FAVORITE_STATES: frozenset = frozenset({"all", "yes", "no"})
 _VALID_METADATA_PRESENCE: frozenset = frozenset({"all", "yes", "no"})
+_VALID_MEDIA_KIND_FILTERS: frozenset = frozenset({"all", "image", "video"})
 _VALID_PROMPT_MATCH_MODE: frozenset = frozenset({"prompt", "word", "string"})
 
 # §11 F03 — row counts as having Comfy-derived metadata when any indexed
@@ -1557,10 +1606,17 @@ class FilterSpec:
     metadata_presence: str = "all"
     prompt_match_mode: str = "prompt"
     prompt_substrings: Tuple[str, ...] = field(default_factory=tuple)
+    # Schema v8 / the grid's two media checkboxes. Three states, not four:
+    # "neither ticked" is meaningless as an empty result set, so the UI folds
+    # it onto ``all`` — the same value both-ticked produces. ``all`` is the
+    # default so an upgraded install sees exactly what it saw before.
+    media_kind: str = "all"       # 'all' | 'image' | 'video'
 
     def __post_init__(self) -> None:
         if self.favorite not in _VALID_FAVORITE_STATES:
             raise ValueError(f"invalid favorite state: {self.favorite!r}")
+        if self.media_kind not in _VALID_MEDIA_KIND_FILTERS:
+            raise ValueError(f"invalid media_kind: {self.media_kind!r}")
         if self.metadata_presence not in _VALID_METADATA_PRESENCE:
             raise ValueError(f"invalid metadata_presence: {self.metadata_presence!r}")
         if self.prompt_match_mode not in _VALID_PROMPT_MATCH_MODE:
@@ -1615,6 +1671,13 @@ class ImageRecord:
     width: Optional[int]
     height: Optional[int]
     file_size: Optional[int]
+    # Schema v8 — ``media_kind`` is 'image' | 'video'; the four below are
+    # meaningful only for video and stay None otherwise.
+    media_kind: str
+    duration_ms: Optional[int]
+    fps: Optional[float]
+    has_audio: Optional[bool]
+    vcodec: Optional[str]
     mtime_ns: Optional[int]
     created_at: Optional[int]
     positive_prompt: Optional[str]
@@ -1678,6 +1741,7 @@ _IMAGE_SELECT = (
     "SELECT image.id, image.path, image.folder_id, "
     "image.relative_path, image.filename, image.filename_lc, image.ext, "
     "image.width, image.height, image.file_size, image.mtime_ns, "
+    "image.media_kind, image.duration_ms, image.fps, image.has_audio, image.vcodec, "
     "image.created_at, image.positive_prompt, image.negative_prompt, "
     "image.model, image.seed, image.cfg, image.steps, image.sampler, image.scheduler, "
     "image.workflow_present, image.favorite, image.tags_csv, "
@@ -1837,6 +1901,17 @@ def _build_filter(
         where.append("image.favorite = 1")
     elif flt.favorite == "no":
         where.append("(image.favorite = 0 OR image.favorite IS NULL)")
+    # 'all' → no predicate
+
+    if flt.media_kind == "video":
+        where.append("image.media_kind = 'video'")
+    elif flt.media_kind == "image":
+        # NULL cannot happen (the column is NOT NULL DEFAULT 'image'), but
+        # spell it out so a row written by a hand-rolled migration still
+        # counts as an image rather than vanishing from both checkboxes.
+        where.append(
+            "(image.media_kind = 'image' OR image.media_kind IS NULL)"
+        )
     # 'all' → no predicate
 
     if flt.model is not None:
@@ -2073,6 +2148,13 @@ def _row_to_image_record(row: sqlite3.Row) -> ImageRecord:
         width=row["width"],
         height=row["height"],
         file_size=row["file_size"],
+        media_kind=str(row["media_kind"] or "image"),
+        duration_ms=row["duration_ms"],
+        fps=row["fps"],
+        has_audio=(
+            bool(row["has_audio"]) if row["has_audio"] is not None else None
+        ),
+        vcodec=row["vcodec"],
         mtime_ns=row["mtime_ns"],
         created_at=row["created_at"],
         positive_prompt=row["positive_prompt"],
