@@ -83,13 +83,33 @@ OpenAI 兼容端点会忽略）。开启思考后，模型的推理会流入可�
 | **Danbooru (default)** | SDXL / Illustrious / Pony 之流 | 逗号分隔的小写 booru tag，开启查表。 |
 | **Anima** | [Anima](https://huggingface.co/circlestone-labs/Anima) | tag **+** 自然语言混写；优先 gelbooru 拼写；画师加 `@`；权重更高（~1.4+）。开启查表。 |
 | **Krea 2** | [krea-ai/krea-2](https://github.com/krea-ai/krea-2) | 纯描述性英文，**不用 tag、不用权重、没有负面提示词**。**关闭**查表。 |
+| **MiniMax H3** | MiniMax H3（画面 **+** 声音） | 按 MiniMax 官方格式写的结构化多字段提示词，覆盖全部五种输入模式。**两个工具都关**。 |
+
+**MiniMax H3** 是唯一一个不是文生图的模板。H3 同时生成画面和声音，它的提示词是一份小型
+结构化文档而不是一行 tag：具名字段、带 `[Shot N] At MM:SS.mmm` 切点的镜头时间线、
+写成「运动类型 + 幅度 + 速度」的运镜、`(S1)` 说话人编号配 `<d>[语言] …</d>` 台词，
+以及两个独立的声音字段。模板覆盖每一种输入模式：
+
+| 模式 | 你给什么 | 骨架 |
+|---|---|---|
+| **T2VA** | 只有文字 | `integrated_multimodal_description` + `overall_soundscape` + `non_diegetic_music` |
+| **I2VA** | 首帧图 | 三个字段，前面加一行首帧指令 |
+| **FL2VA** | 首帧**和**尾帧 | 三个字段，前面加一行双图对齐说明 |
+| **L2VA** | 尾帧图 | 三个字段，前面加一行单图对齐说明 |
+| **Ref2VA** | 参考图 / 参考视频 / 参考音频 | 六个段落：`subject_definitions`、`summary`、`retention_analysis`、`detailed_description`、`overall_soundscape`、`non_diegetic_music` |
+
+前四种走 ComfyUI 的 `MiniMax H3 Image to Video`（填或不填 `first_frame` / `last_frame`），
+Ref2VA 走 `MiniMax H3 Reference to Video`。模板里写进了真实的时长换算——24 fps，节点默认
+`length=124` 帧即 5.17 秒——所以模型写出的时间戳会落在你实际渲染的片长之内。
 
 模板**就是**一个变体名：切到 `krea2` 会把每个板块指向它的 `krea2` 变体，并设定哪些板块启用。
 这和每个板块的**变体**下拉做的是同一件事——两者是同一份数据的两个视图，所以切完之后你仍然
 可以单独微调某一个板块。
 
 **板块被关掉，它对应的工具也一并撤掉。** Krea 2 会关闭 *Danbooru lookup tool* 板块，于是这次
-请求根本不会挂上 danbooru 工具——模型不会拿到一个系统提示词里从没提过的工具。（你在
+请求根本不会挂上 danbooru 工具——模型不会拿到一个系统提示词里从没提过的工具。MiniMax H3
+把**两个**工具文档板块都关掉，于是它完全不带工具运行：没有 tag 词表需要验真，提示词是照着
+你的需求写出来的，不是查出来的。（你在
 *设置 → LLM* 里的全局开关仍然叠加生效；模板只能收走工具，不能凭空给出工具。）
 
 - **Save as…** 把当前每个板块的文本**和**开关状态快照成你自己的模板——想给未内置的模型加预设
@@ -158,5 +178,9 @@ Krea 2 还会在心里先比较**两三个**风格/媒介/光照候选再定一�
 - 优化结果是一段扁平字符串。**Apply** 会用它覆盖绑定节点的整篇文档——原本用到库分组、region
   或调度的 PLv3 文档会被这一趟往返拍平。这是设计如此（纯逗号文本本身就是合法 PLv3）；想保留
   结构就用 Copy 而不是 Apply。
-- *Web search tool* 板块在所有模板下都可用；Krea 2 版本让模型去搜"它长什么样"然后用文字描述
-  出来，因为这里没有 tag 可验真。
+- *Web search tool* 板块在除 MiniMax H3 外的所有模板下都可用（H3 把它关了）；Krea 2 版本让
+  模型去搜"它长什么样"然后用文字描述出来，因为这里没有 tag 可验真。
+- **用 H3 模板时请用 Copy，不要用 Apply。** Apply 是写进 *PLv3* 节点的，而 PLv3 会去编译这段
+  文本：它会转义每一个冒号（`integrated_multimodal_description\:`、`00\:03.500`），把分隔各
+  字段的空行压成一整行，还会对每个 `[Shot N]` 报 `W14`。编译不会失败，但出来的东西已经不是
+  合法的 H3 提示词了。请复制那个块，粘进 H3 节点自己的 `prompt` 输入框。

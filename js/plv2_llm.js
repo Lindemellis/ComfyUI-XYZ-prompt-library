@@ -861,6 +861,32 @@ async function _doSendStream(request, base) {
   let contentBuf = '', toolCount = 0;
   const setContent = () => { bubble.textContent = contentBuf; bubble.append(cursor); };
 
+  // The stream delivers ONE event per token, so anything done per event is done hundreds
+  // of times. Two things here used to be, and together they froze the whole ComfyUI page
+  // while the model typed: writing the DOM and then immediately reading scrollHeight /
+  // scrollTop (atBottom) forces a synchronous reflow on every token, and `_pre.textContent
+  // += delta` re-reads the entire accumulated text each time, which is O(n^2). A one-line
+  // tag prompt survived that; the MiniMax H3 template — hundreds of words plus a long
+  // reasoning trace — does not.
+  //
+  // So: accumulate into buffers, and repaint at most once per animation frame, reading the
+  // scroll position ONCE per frame and always BEFORE the writes.
+  let reasonBuf = '', reasonDirty = false, contentDirty = false, raf = 0;
+  const flush = () => {
+    raf = 0;
+    if (!contentDirty && !reasonDirty) return;
+    const stick = atBottom();               // the only read, and it happens before any write
+    if (reasonDirty) {
+      reason._pre.textContent = reasonBuf;  // assign, never += (that would re-read it all)
+      reason._pre.scrollTop = reason._pre.scrollHeight;
+      reasonDirty = false;
+    }
+    if (contentDirty) { setContent(); contentDirty = false; }
+    if (stick) _logEl.scrollTop = _logEl.scrollHeight;
+  };
+  const schedule = () => { if (!raf) raf = requestAnimationFrame(flush); };
+  const flushNow = () => { if (raf) cancelAnimationFrame(raf); raf = 0; flush(); };
+
   _abort = new AbortController();
   let stopped = false;
   try {
@@ -892,32 +918,37 @@ async function _doSendStream(request, base) {
         const data = block.split('\n').filter(l => l.startsWith('data:')).map(l => l.slice(5)).join('');
         if (!data.trim()) continue;
         let ev; try { ev = JSON.parse(data.trim()); } catch { continue; }
-        const stick = atBottom();
         if (ev.type === 'reasoning') {
-          reason.style.display = ''; reason._pre.style.display = 'block'; reason._setLbl();
-          reason._pre.textContent += ev.delta; reason._pre.scrollTop = reason._pre.scrollHeight;
+          if (reason.style.display === 'none') {   // one-time reveal, not per token
+            reason.style.display = ''; reason._pre.style.display = 'block'; reason._setLbl();
+          }
+          reasonBuf += ev.delta; reasonDirty = true; schedule();
         } else if (ev.type === 'content') {
-          contentBuf += ev.delta; setContent();
+          contentBuf += ev.delta; contentDirty = true; schedule();
         } else if (ev.type === 'round_reset') {
-          contentBuf = ''; setContent();
+          contentBuf = ''; contentDirty = true; schedule();
         } else if (ev.type === 'tool') {
           toolCount++; const n = (ev.results || []).length;
           traceLine.style.display = ''; traceLine.textContent = `🔎 ${ev.name} ×${toolCount} (last: ${n} result(s))`;
         } else if (ev.type === 'done') {
+          flushNow();                                            // land every buffered token
           reason._pre.style.display = 'none'; reason._setLbl();  // collapse CoT when finished
         } else if (ev.type === 'error') {
+          flushNow();
           wrap.remove(); _handleChatError({ error: { message: ev.message } });
         }
-        if (stick) _logEl.scrollTop = _logEl.scrollHeight;
       }
     }
+    flushNow();
     cursor.remove();
     await _loadMessages();  // authoritative render (prompt boxes, copy/apply, persisted CoT)
   } catch (e) {
+    flushNow();      // Stop / a dropped connection must still show what already arrived
     cursor.remove();
     if (e.name === 'AbortError') { stopped = true; }
     else { wrap.remove(); _logEl.append(_errBubble(String(e.message || e))); }
   } finally {
+    if (raf) { cancelAnimationFrame(raf); raf = 0; }   // never leave a frame pointing at a removed bubble
     _setSending(false);
     _abort = null;
     if (stopped) { _logEl.append(el('div', `align-self:flex-start;color:${C.sub};font-size:11px;`, '⏹ stopped')); }

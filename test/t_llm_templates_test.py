@@ -20,7 +20,7 @@ import llm.store as store
 import llm.settings as settings
 import llm.templates as templates
 import llm.assembly as assembly
-from llm.defaults import TEMPLATES, KREA2_BLOCKS, MANAGED_KINDS, reflow
+from llm.defaults import TEMPLATES, H3_BLOCKS, KREA2_BLOCKS, MANAGED_KINDS, reflow
 
 
 def _fresh_repo():
@@ -99,6 +99,48 @@ def test_apply_krea2_switches_variants_enable_and_tool_gate():
         assert templates.tool_gate()["lookup"] is True
         assert "lookup_danbooru_tags" in assembly.build_messages(None, "", "a cat")[0]["content"]
         print("ok: krea2 switches variants + disables tooldoc + closes the lookup gate")
+    finally:
+        repo.stop()
+
+
+def test_apply_h3_closes_both_tool_gates():
+    """H3 is the first template that withholds BOTH tools, so both doc blocks go off.
+
+    It is also the only one whose prompt is a structured multi-field document, so the
+    field names the official format mandates must actually reach the system prompt —
+    a template that seeds but loses `integrated_multimodal_description` is useless.
+    """
+    _fresh_repo()
+    try:
+        res = templates.apply_template("h3")
+        assert res["active"] == "h3"
+        assert res["missing"] == []
+
+        blocks = _by_kind()
+        for kind in H3_BLOCKS:
+            assert blocks[kind]["variant_name"] == "h3", kind
+            assert blocks[kind]["enabled"], kind
+        # neither tool is offered, because neither doc block is on
+        assert not blocks["tooldoc"]["enabled"]
+        assert not blocks["web_search"]["enabled"]
+        assert templates.tool_gate() == {"lookup": False, "web_search": False}
+
+        system = assembly.build_messages(None, "", "a girl on a train")[0]["content"]
+        assert "MiniMax H3" in system
+        assert "lookup_danbooru_tags" not in system
+        assert "web_search(queries" not in system
+        # the five modes and every mandated field name survive seeding + reflow
+        for token in ("T2VA", "I2VA", "FL2VA", "L2VA", "Ref2VA",
+                      "integrated_multimodal_description", "overall_soundscape",
+                      "non_diegetic_music", "subject_definitions", "retention_analysis",
+                      "detailed_description", "fully_preserved", "fully_copy",
+                      "<scenetrans>", "<cutoff>"):
+            assert token in system, token
+
+        # switching away restores both tools
+        templates.apply_template("default")
+        assert templates.tool_gate() == {"lookup": True, "web_search": True}
+        print("ok: h3 switches variants, closes BOTH tool gates, keeps its field names")
     finally:
         repo.stop()
 

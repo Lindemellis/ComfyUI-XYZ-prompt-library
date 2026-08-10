@@ -88,6 +88,26 @@ top of the Blocks tab (and of the Chat tab) switches every block at once:
 | **Danbooru (default)** | SDXL / Illustrious / Pony and friends | Comma-separated lowercase booru tags, tag lookup on. |
 | **Anima** | [Anima](https://huggingface.co/circlestone-labs/Anima) | Tags **+** natural language mixed; gelbooru-preferred spellings; `@artist` prefix; higher weights (~1.4+). Tag lookup on. |
 | **Krea 2** | [krea-ai/krea-2](https://github.com/krea-ai/krea-2) | Plain descriptive English, **no tags, no weights, no negative prompt**. Tag lookup **off**. |
+| **MiniMax H3** | MiniMax H3 (video **+** audio) | A structured multi-field prompt in MiniMax's official format, covering all five input modes. **Both** tools off. |
+
+**MiniMax H3** is the one template that isn't txt2img. H3 generates picture and sound
+together, and its prompt is a small structured document rather than a line of tags: named
+fields, a shot-by-shot timeline with `[Shot N] At MM:SS.mmm` cut times, camera motion as
+`type + amplitude + speed`, speaker IDs `(S1)` with dialogue in `<d>[Language] …</d>`, and
+two separate sound fields. The template covers every input mode:
+
+| Mode | You supply | Skeleton |
+|---|---|---|
+| **T2VA** | text only | `integrated_multimodal_description` + `overall_soundscape` + `non_diegetic_music` |
+| **I2VA** | a first frame | the three fields, after a first-frame instruction line |
+| **FL2VA** | first **and** last frame | the three fields, after a two-picture alignment line |
+| **L2VA** | a last frame | the three fields, after a one-picture alignment line |
+| **Ref2VA** | reference images / videos / audio | six sections: `subject_definitions`, `summary`, `retention_analysis`, `detailed_description`, `overall_soundscape`, `non_diegetic_music` |
+
+The first four go to ComfyUI's `MiniMax H3 Image to Video` (fill `first_frame` /
+`last_frame` or leave them empty); Ref2VA goes to `MiniMax H3 Reference to Video`. The
+model is told the real timing facts — 24 fps, the node's default `length` of 124 frames is
+5.17 s — so the timestamps it writes land inside the clip you actually render.
 
 A template **is** a variant name: switching to `krea2` points every block at its `krea2`
 variant and sets which blocks are on. That is the same thing the per-block **variant**
@@ -96,7 +116,9 @@ after switching.
 
 **A disabled block also withholds its tool.** Krea 2 turns the *Danbooru lookup tool* block
 off, so the danbooru tool isn't attached to the request at all — the model is never handed a
-tool its system prompt never mentioned. (Your global *Settings → LLM* toggles still apply on
+tool its system prompt never mentioned. MiniMax H3 turns off *both* doc blocks, so it runs
+with no tools at all: there is no tag vocabulary to verify against, and its prompts are
+written from the request rather than researched. (Your global *Settings → LLM* toggles still apply on
 top; a template can only take a tool away, never grant one.)
 
 - **Save as…** snapshots every block's current text **and** its on/off state as your own
@@ -182,6 +204,11 @@ so it stays off unless you turn it on.
   with it — a PLv3 document that used library groups, regions or schedules is flattened by the
   round trip. That is by design (plain comma-separated text is valid PLv3); copy instead of
   applying if you want to keep the structure.
-- The *Web search tool* block works in every template; Krea 2's version tells the model to
-  search for what something **looks like** and then describe it, since there is no tag to
-  verify.
+- The *Web search tool* block works in every template except MiniMax H3, which switches it
+  off; Krea 2's version tells the model to search for what something **looks like** and then
+  describe it, since there is no tag to verify.
+- **With the H3 template, use Copy — not Apply.** Apply writes into a *PLv3* node, and PLv3
+  then compiles that text: it escapes every colon (`integrated_multimodal_description\:`,
+  `00\:03.500`), collapses the blank lines that separate the fields into one long line, and
+  warns `W14` on each `[Shot N]`. The result still compiles, but it is no longer a valid H3
+  prompt. Copy the block and paste it into the H3 node's own `prompt` widget instead.
