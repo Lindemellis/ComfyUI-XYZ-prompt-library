@@ -574,7 +574,14 @@ function _tokenStart(text, pos) {
   // Prompt Library's delimiter handling.
   const lastComma   = text.lastIndexOf(',', pos - 1);
   const lastNewline = text.lastIndexOf('\n', pos - 1);
-  let start = Math.max(lastComma, lastNewline) + 1;
+  // Braces are boundaries too. No tag contains one, and in PLv3 a group body opens
+  // inline — `0.3 - 1: { open eyes, looking at viewer }` — so without this the FIRST
+  // item of every `{ }` swallows the brace and the entry head before it, and the last
+  // one swallows the closing brace. (PLv2's `{a|b}` only benefits: the token stops
+  // being the whole choice construct.)
+  const lastOpenBrace  = text.lastIndexOf('{', pos - 1);
+  const lastCloseBrace = text.lastIndexOf('}', pos - 1);
+  let start = Math.max(lastComma, lastNewline, lastOpenBrace, lastCloseBrace) + 1;
   const lastDotSpace = text.lastIndexOf('. ', pos - 1);
   if (lastDotSpace !== -1) start = Math.max(start, lastDotSpace + 2);
   // Skip the segment's leading whitespace so it is NOT part of the range an insertion
@@ -586,7 +593,8 @@ function _tokenStart(text, pos) {
 
 function _tokenEnd(text, pos) {
   let end = text.length;
-  for (const idx of [text.indexOf(',', pos), text.indexOf('\n', pos), text.indexOf('. ', pos)]) {
+  for (const idx of [text.indexOf(',', pos), text.indexOf('\n', pos), text.indexOf('. ', pos),
+                     text.indexOf('{', pos), text.indexOf('}', pos)]) {
     if (idx !== -1) end = Math.min(end, idx);
   }
   return end;
@@ -641,6 +649,16 @@ function getTokenAtCaret(el) {
   const start = _tokenStart(text, pos);
   const end = _tokenEnd(text, pos);
   let tok = text.substring(start, end).trim();
+
+  // A PLv3 schedule / region entry may hold a BARE item instead of a group:
+  // `0 - 0.3: closed eyes`, `[imask: 0]: red dress`. That head belongs to the construct,
+  // not to the tag — and unlike a brace it cannot be made a token boundary, because `:`
+  // is also the weight separator. So strip it as a prefix, BEFORE the weight strip below,
+  // or `0 - 0.3: (wlop:1.2)` never peels down to `wlop`. Both patterns are anchored and
+  // shaped so a real tag cannot match: a weight is `:num` with no ` - ` pair in front of
+  // it, and no danbooru tag starts with `[`.
+  tok = tok.replace(/^\d*\.?\d+\s*-\s*\d*\.?\d+\s*:\s*/, '')   // schedule head: 0 - 0.3:
+           .replace(/^\[[^\]]*\]\s*:\s*/, '');                 // region head:   [imask: 0]:
 
   // Drop a trailing weight suffix like ":1.1" but KEEP any close-wrapper that followed it,
   // so "(wlop:1.1)" → "(wlop)" (not "(wlop", which would leave the leading "(" unbalanced
@@ -1507,7 +1525,11 @@ class TagAutocompleteUI {
       if (l + rootW > vW - 8) l = rect.left - rootW - gap;
       if (l < 4) l = 4;
       t = rect.top;
-      if (t + rootH > vH - 8) t = Math.max(4, vH - rootH - 8);
+      if (t + rootH > vH - 8) t = vH - rootH - 8;
+      // A host taller than the viewport can have a NEGATIVE rect.top (its top edge is
+      // scrolled off the screen) — top-aligning to it then puts the panel above the
+      // viewport entirely. The horizontal side already had this clamp; this is its twin.
+      if (t < 4) t = 4;
     } else {
       // Autocomplete: below the text cursor (caret), aligned to caret horizontal.
       // getCaretCoordinates mixes viewport element position with local caret
