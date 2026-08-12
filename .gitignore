@@ -45,3 +45,9 @@ output/
 
 # Krita launcher settings (krita.exe path)
 krita_data/
+
+# Agent orchestrator settings + log (local paths, a borrowed key)
+agent_data/
+
+# SillyTavern preset dumps — third-party content, multi-MB, reference only
+提示词参考/

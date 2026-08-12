@@ -82,3 +82,9 @@ try:
 except Exception as _tagdb_err:
     print(f"[TagDB] setup failed, continuing without TagDB: {_tagdb_err!r}")
 
+try:
+    from .agent_nodes import setup as _agent_setup
+    _agent_setup()
+except Exception as _agent_err:
+    print(f"[XYZ Agent] setup failed, continuing without the agent routes: {_agent_err!r}")
+

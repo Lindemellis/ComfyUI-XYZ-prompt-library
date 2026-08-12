@@ -20,6 +20,15 @@ import { app } from '../../../scripts/app.js';
 import { createRichEditor } from './plv2_richedit.js';
 import { createIslandBackend } from './plv2_island_backend.js';
 
+
+// The bundled LLM assistant is retired: the ComfyUI agent panel does this job
+// now. Its code, routes and data are untouched — only the four ways INTO it are
+// hidden — so nothing that was saved is lost and it can be brought back with
+//   localStorage.setItem('xyz.llm.enabled', '1')
+// followed by a refresh.
+const XYZ_LLM_ENABLED = (() => {
+  try { return localStorage.getItem('xyz.llm.enabled') === '1'; } catch { return false; }
+})();
 // ─── Constants ──────────────────────────────────────────────────────────────
 
 const FONT = '"Fira Code","Cascadia Code",Consolas,monospace';
@@ -347,12 +356,14 @@ function _build(col) {
   previewBtn.addEventListener('click', () => window.plv2.windows.preview.showEditor());
   row1.appendChild(previewBtn);
 
-  const llmBtn = _flatBtn('🤖 LLM');
-  // Opens the assistant only — it binds to PLv3 nodes now (use the node's own 🤖 button,
-  // or the Base-prompt selector inside the window).
-  llmBtn.title = 'Open the LLM prompt assistant';
-  llmBtn.addEventListener('click', () => window.plv2.windows.llm.show());
-  row1.appendChild(llmBtn);
+  if (XYZ_LLM_ENABLED) {
+    // Opens the assistant only — it binds to PLv3 nodes now (use the node's own 🤖
+    // button, or the Base-prompt selector inside the window).
+    const llmBtn = _flatBtn('🤖 LLM');
+    llmBtn.title = 'Open the LLM prompt assistant';
+    llmBtn.addEventListener('click', () => window.plv2.windows.llm.show());
+    row1.appendChild(llmBtn);
+  }
 
   // ── Top bar, row 2: orientation + (single: tabs + node select) ──
   _row2 = document.createElement('div');

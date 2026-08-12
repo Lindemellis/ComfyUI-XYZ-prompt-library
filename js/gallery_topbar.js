@@ -1,6 +1,15 @@
 import { app } from '../../../scripts/app.js';
 import { makeMenuButton, makeButtonGroup } from './xyz_topbar.js';
 
+
+// The bundled LLM assistant is retired: the ComfyUI agent panel does this job
+// now. Its code, routes and data are untouched — only the four ways INTO it are
+// hidden — so nothing that was saved is lost and it can be brought back with
+//   localStorage.setItem('xyz.llm.enabled', '1')
+// followed by a refresh.
+const XYZ_LLM_ENABLED = (() => {
+  try { return localStorage.getItem('xyz.llm.enabled') === '1'; } catch { return false; }
+})();
 const BUTTON_GROUP_CLASS = 'xyz-gallery-top-menu-group';
 const DROPDOWN_CLASS = 'xyz-topbar-dropdown';
 const GALLERY_URL = '/xyz/gallery';
@@ -88,13 +97,20 @@ function createDropdownButton() {
       { label: 'Prompt Library V3 — Library',
         action: () => { try { window.plv3?.library?.toggle()?.catch?.(() => {}); } catch {} } },
       // The assistant binds to PLv3 nodes; its window is merely hosted by plv2.js.
-      { label: 'LLM Prompt Assistant',
-        action: () => { try { window.plv2?.windows?.llm?.show(); } catch {} } },
+      ...(XYZ_LLM_ENABLED
+        ? [{ label: 'LLM Prompt Assistant',
+             action: () => { try { window.plv2?.windows?.llm?.show(); } catch {} } }]
+        : []),
       { separator: true },
       { label: 'Prompt Library V2 — Text Editor',
         action: () => { try { window.plv2?.windows?.editor?.show(null); } catch {} } },
       { label: 'Prompt Library V2 — Library',
         action: () => { try { window.plv2?.windows?.library?.show(); } catch {} } },
+      { separator: true },
+      // The agent panel is a sidebar in this page, but its orchestrator is a
+      // separate Node process that the panel is not allowed to spawn itself.
+      { label: 'Agent Orchestrator — 启动 / 状态',
+        action: () => { try { window.xyzAgent?.toggle(); } catch {} } },
       { separator: true },
       { label: 'XYZ Prompt Tools Settings',
         action: () => { try { window.xyzSettingsPage?.show(); } catch {} } },

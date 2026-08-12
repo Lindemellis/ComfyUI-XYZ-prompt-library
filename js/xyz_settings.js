@@ -16,6 +16,15 @@ import {
   DEFAULTS as PLV3_DEFAULTS, reset as plv3Reset, set as plv3Set, settings as plv3,
 } from './plv3/settings.js';
 
+// The bundled LLM assistant is retired: the ComfyUI agent panel does this job
+// now. Its code, routes and data are untouched — only the four ways INTO it are
+// hidden — so nothing that was saved is lost and it can be brought back with
+//   localStorage.setItem('xyz.llm.enabled', '1')
+// followed by a refresh.
+const XYZ_LLM_ENABLED = (() => {
+  try { return localStorage.getItem('xyz.llm.enabled') === '1'; } catch { return false; }
+})();
+
 const EXT_ID = 'XYZNodes.PromptTools';
 
 // ─── tiny DOM helpers ───────────────────────────────────────────────────────────
@@ -151,7 +160,7 @@ const NAV = [
   ['preview',      '🖼', 'Preview'],
   ['plv3',         '⬡',  'Prompt Library V3'],
   ['dataset',      '🗄', 'Tag dataset'],
-  ['llm',          '🤖', 'LLM'],
+  ...(XYZ_LLM_ENABLED ? [['llm', '🤖', 'LLM']] : []),
   ['about',        'ⓘ',  'About'],
 ];
 
