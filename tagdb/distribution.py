@@ -108,7 +108,6 @@ def _versions_payload(manifest: Dict[str, Any], key: str, latest_key: str,
             "tag_count": d.get("tag_count"),
             "alias_count": d.get("alias_count"),
             "min_post_count": d.get("min_post_count"),
-            "has_translations": bool(d.get("translations")),
             "installed": v in installed_set,
             "is_latest": v == latest,
         })

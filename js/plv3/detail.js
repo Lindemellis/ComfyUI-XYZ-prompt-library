@@ -2,9 +2,8 @@
 //
 // Every control edits by rewriting *exactly the source range it owns* (the span the
 // backend parser handed us), so the user's blank lines and indentation survive an
-// edit. That is why PLv2's reconciliation machinery — normalise, dedupe, sep_after,
-// content-keyed matching — has no counterpart here: the text is the only store, and
-// a span is an unambiguous handle into it.
+// edit. Span ownership preserves the user's formatting and gives each visible control
+// an unambiguous handle into the rendered text.
 //
 // The one hazard a span brings is staleness. Each AST snapshot is stamped with the
 // Monaco version it was parsed from; an edit computed against older text is dropped
@@ -175,7 +174,7 @@ function groupIcon(group) {
 // --- controls ---------------------------------------------------------------
 
 // Danbooru autocomplete on a detail-page text box. Same bridge the Monaco editor uses:
-// `tagsOnly` (this is PLv3 text, not a PLv2 `[ref]`), `related` so a click on a token
+// `tagsOnly` leaves PLv3 structural completion to the editor; `related` lets a token click
 // opens its related tags (gated by the global "related" AC setting, like everywhere else).
 function attachAC(el) {
   try { window.xyzTagAC?.attach(el, { tagsOnly: true, related: true }); } catch { /* AC off */ }
@@ -185,6 +184,33 @@ function attachAC(el) {
 // appends "tag, ") or a paste may have left, so it is not stored as part of the prompt.
 function cleanItem(v) {
   return String(v).replace(/^[\s,]+/, '').replace(/[\s,]+$/, '');
+}
+
+/**
+ * Canonical form for a prompt tag stored in a library group.  Danbooru uses
+ * underscores for spaces, and PLv3 reserves unescaped parentheses for attention
+ * weights. Preserve one outer `(tag:weight)` wrapper, but escape every other
+ * parenthesis so a tag such as `foo_(bar)` remains one item.
+ */
+export function normalizeGroupTag(v) {
+  const src = cleanItem(v);
+  const weighted = src.match(/^\(([\s\S]*):\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+))\)$/);
+  const body = weighted ? weighted[1] : src;
+  let out = '';
+  for (let i = 0; i < body.length; i += 1) {
+    const c = body[i];
+    if (c === '_') {
+      out += ' ';
+    } else if (c === '(' || c === ')') {
+      let slashes = 0;
+      for (let j = i - 1; j >= 0 && body[j] === '\\'; j -= 1) slashes += 1;
+      if (slashes % 2 === 0) out += '\\';
+      out += c;
+    } else {
+      out += c;
+    }
+  }
+  return weighted ? `(${out}:${weighted[2]})` : out;
 }
 
 // Split typed text into items on every comma, each trimmed, blanks dropped. What "remember
@@ -268,6 +294,10 @@ export class DetailPane {
     this.container = container;
     this.pane = pane; // the PromptEditor — owns the model and the undo stack
     this.outline = outline;
+    // The main editor window can hide the outline and the prompt controls independently.
+    // Library presets pass `outline: false` and keep their existing single-column layout.
+    this.outlineVisible = outline;
+    this.bodyVisible = true;
     // A DISABLED library item is not in the text, so a weight the user gave it has no
     // home there. This is that home: a document-scoped `{header: {item text: weight}}`
     // map the host persists (a node's `properties` in the main window, the preset's body
@@ -434,6 +464,52 @@ export class DetailPane {
     this.nav?.replaceChildren();
   }
 
+  /** Show/hide the two visual columns without rebuilding their contents.
+   *
+   *  Keeping the DOM alive matters here: text inputs may be focused, scroll positions
+   *  belong to the elements, and a full render would also discard transient control state.
+   *  When the outline is the only visible column it fills the host; when the prompt
+   *  controls return, its last dragged width is restored. */
+  setColumnVisibility({ outline = this.outlineVisible, body = this.bodyVisible } = {}) {
+    this.outlineVisible = this.outline && !!outline;
+    this.bodyVisible = !!body;
+    this.buildShell();
+    this.applyColumnVisibility();
+  }
+
+  setOutlineWidth(width) {
+    if (Number.isFinite(width) && width > 0) this._outlineWidth = `${width}px`;
+    this.applyColumnVisibility();
+  }
+
+  columnWidths() {
+    return {
+      outline: this.nav?.offsetWidth || 0,
+      body: this.body?.offsetWidth || 0,
+    };
+  }
+
+  applyColumnVisibility() {
+    if (!this.built) return;
+    const showOutline = this.outline && this.outlineVisible;
+    const showBody = this.bodyVisible;
+
+    if (this.nav) {
+      this.nav.style.display = showOutline ? 'block' : 'none';
+      if (showOutline && !showBody) {
+        this.nav.style.flex = '1 1 auto';
+        this.nav.style.width = 'auto';
+      } else {
+        this.nav.style.flex = '0 0 auto';
+        this.nav.style.width = this._outlineWidth || '190px';
+      }
+    }
+    if (this.navSplitter) {
+      this.navSplitter.style.display = showOutline && showBody ? 'block' : 'none';
+    }
+    this.body.style.display = showBody ? 'block' : 'none';
+  }
+
   buildShell() {
     if (this.built) return;
     this.built = true;
@@ -454,13 +530,21 @@ export class DetailPane {
     if (this.outline) {
       this.nav = div(`width:190px;flex-shrink:0;overflow-y:auto;background:${T.bg2};
         padding:6px 4px;min-width:0;`);
-      split.append(
+      this.navSplitter = splitter(
         this.nav,
-        splitter(this.nav, { dir: 'x', key: 'xyz.plv3.detailnav.w', min: 110, max: 280 }),
+        { dir: 'x', key: 'xyz.plv3.detailnav.w', min: 110, max: 280 },
       );
+      this._outlineWidth = this.nav.style.width || '190px';
+      this.nav.addEventListener('plv3:resized', () => {
+        if (this.outlineVisible && this.bodyVisible && this.nav.offsetWidth) {
+          this._outlineWidth = `${this.nav.offsetWidth}px`;
+        }
+      });
+      split.append(this.nav, this.navSplitter);
     }
     split.append(this.body);
     this.container.replaceChildren(split);
+    this.applyColumnVisibility();
   }
 
   // --- editing primitives ---
@@ -1183,7 +1267,9 @@ export class DetailPane {
     // A comma is the item separator — `tag1, tag2` is TWO items. Split it, or the joined
     // string gets stored as a third (disabled) library item on top of the two the block text
     // splits into anyway.
-    const parts = splitItems(text);
+    const parts = splitItems(text)
+      .map((p) => p.startsWith('<lora:') ? cleanItem(p) : normalizeGroupTag(p))
+      .filter(Boolean);
     if (!parts.length) return;
 
     const info = this.library.get(group.header);
@@ -1341,7 +1427,8 @@ export class DetailPane {
 
     if (on) {
       const box = textbox(entry.text, (v) =>
-        this.edit([{ span: entry.body.span, text: cleanItem(v) }]), { ac: !isLora });
+        this.edit([{ span: entry.body.span, text: isLora ? cleanItem(v) : normalizeGroupTag(v) }]),
+        { ac: !isLora });
       if (isLora) { box.style.color = T.lora; box.style.fontFamily = T.mono; }
       row.append(box);
       const weight = this.enabledWeight(entry.node, src);
@@ -1367,7 +1454,7 @@ export class DetailPane {
     // Editing a disabled item edits the LIBRARY row (that is all it is), and carries its
     // remembered weight to the new text so the weight is not lost by a rename.
     const box = textbox(entry.text, async (v) => {
-      const next = cleanItem(v);
+      const next = isLora ? cleanItem(v) : normalizeGroupTag(v);
       if (!next || next === entry.text) return;
       this.memRename(group.header, entry.text, next);
       await this.libApi('PATCH', `/items/${entry.item.id}`, { text: next });

@@ -1,9 +1,9 @@
 """Prompt Library V3 — own nested-group syntax, compiled to comfyui-prompt-control.
 
-Design spec: `prompt_library_v3_design.md` (locked).  This is P1: lexer, parser,
-IR, the two backends, validation and the two nodes.  No DB, no routes, no
-frontend yet — compilation is a pure function of (text, seed, region_mode) and
-deliberately never reads the library (spec §4.7).
+The document model is authoritative; rendered text contains enabled nodes only.
+Compilation remains a pure function of (text, seed, region_mode) and deliberately
+never reads the library database. The package also owns the V3 library, routes and
+frontend integration.
 
 Public:
     compile_text(text, seed, region_mode, polarity) -> CompileResult

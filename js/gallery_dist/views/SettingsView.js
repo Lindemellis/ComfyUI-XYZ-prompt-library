@@ -1,6 +1,6 @@
 // T36 — Settings overlay: prefs, nav, tag admin (sort / inline rename / purge).
 import {
-  defineComponent, ref, reactive, onMounted, watch, computed,
+  defineComponent, ref, reactive, onMounted, onBeforeUnmount, watch, computed,
 } from 'vue';
 import * as api from '../api.js';
 import { Autocomplete } from '../components/Autocomplete.js';
@@ -98,6 +98,7 @@ export const SettingsView = defineComponent({
     const tagSortKey = ref('usage');
     const tagSortDir = ref('desc');
     const tagSearchDebounce = ref(null);
+    let tagRequestSeq = 0;
 
     const tagTotalPages = computed(() =>
       Math.max(1, Math.ceil((tagTotal.value || 0) / TAG_PAGE_SIZE)),
@@ -178,6 +179,7 @@ export const SettingsView = defineComponent({
     }
 
     async function loadTagRows() {
+      const requestSeq = ++tagRequestSeq;
       tagBusy.value = true;
       tagMsg.value = '';
       try {
@@ -191,6 +193,7 @@ export const SettingsView = defineComponent({
             dir: tagSortDir.value,
           },
         });
+        if (requestSeq !== tagRequestSeq) return;
         const rows = data && Array.isArray(data.tags) ? data.tags : [];
         const total = data && typeof data.total === 'number' ? data.total : rows.length;
         tagTotal.value = total;
@@ -202,11 +205,12 @@ export const SettingsView = defineComponent({
         }
         tagRows.value = rows;
       } catch (e) {
+        if (requestSeq !== tagRequestSeq) return;
         tagMsg.value = (e && e.message) ? String(e.message) : String(e);
         tagRows.value = [];
         tagTotal.value = 0;
       } finally {
-        tagBusy.value = false;
+        if (requestSeq === tagRequestSeq) tagBusy.value = false;
       }
     }
 
@@ -268,6 +272,12 @@ export const SettingsView = defineComponent({
       void loadTagRows();
     });
     watch(tagSearch, () => { scheduleTagSearch(); });
+
+    onBeforeUnmount(() => {
+      tagRequestSeq += 1;
+      if (tagSearchDebounce.value) clearTimeout(tagSearchDebounce.value);
+      tagSearchDebounce.value = null;
+    });
 
     const saveFlashOk = ref(false);
     let saveFlashTimer = null;
@@ -419,7 +429,7 @@ export const SettingsView = defineComponent({
         const n = (r && typeof r.queued === 'number') ? r.queued : 0;
         backfillMsg.value = n === 0
           ? 'Nothing to re-read — every image already has its metadata.'
-          : `Queued ${n} image(s). The sync worker reads them in the background; `
+          : `Queued ${n} image(s). The indexer reads them in the background; `
             + 'reopen an image to see the result.';
         await loadBackfillCount();
       } catch (e) {
@@ -748,10 +758,10 @@ export const SettingsView = defineComponent({
           <section id="gs-backfill" class="gs-sec">
             <h2>Image metadata</h2>
             <p class="muted gs-hint">
-              Some images show blank generation data — either they were indexed before
-              a field existed, or their workflow used nodes the reader has since learned
-              to follow. This re-reads them in the background. It never touches the
-              files, and it is safe to run again.
+              Some images have blank or outdated generation data — either they were
+              indexed before a field existed, or their workflow used nodes the reader
+              has since learned to follow. This re-reads them in the background. It
+              never touches the files, and it is safe to run again.
             </p>
             <div class="gs-row">
               <button type="button" class="gs-btn" :disabled="backfillBusy"
@@ -759,7 +769,7 @@ export const SettingsView = defineComponent({
                 {{ backfillBusy ? 'Queueing…' : 'Re-read missing metadata' }}
               </button>
               <span v-if="backfillMissing != null" class="muted">
-                {{ backfillMissing }} image(s) have incomplete generation data
+                {{ backfillMissing }} image(s) need a metadata refresh
               </span>
             </div>
             <p v-if="backfillMsg" class="gs-tagmsg">{{ backfillMsg }}</p>

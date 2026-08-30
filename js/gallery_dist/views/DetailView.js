@@ -71,6 +71,23 @@ function fmtBytesDv(n) {
   return `${(x / (1024 * 1024 * 1024)).toFixed(2)} GiB`;
 }
 
+/** Join general → character 1 → character 2 without doubled boundary commas. */
+export function joinNovelAIPromptParts(parts) {
+  let out = '';
+  for (const raw of Array.isArray(parts) ? parts : []) {
+    let part = raw == null ? '' : String(raw).trim();
+    if (!part) continue;
+    if (!out) {
+      out = part;
+      continue;
+    }
+    part = part.replace(/^,\s*/, '');
+    out = out.trimEnd();
+    out += out.endsWith(',') ? ' ' + part : ', ' + part;
+  }
+  return out;
+}
+
 export const DetailView = defineComponent({
   name: 'DetailView',
   components: { Autocomplete, ConfirmModal, IconButton },
@@ -713,6 +730,35 @@ export const DetailView = defineComponent({
     });
 
     const meta = computed(() => (record.value && record.value.metadata) || {});
+    const generation = computed(() => {
+      const value = meta.value && meta.value.generation;
+      return value && typeof value === 'object' ? value : {};
+    });
+    const isNovelAI = computed(() => generation.value.provider === 'novelai');
+    const novelAICharacters = computed(() => {
+      const rows = generation.value && generation.value.characters;
+      if (!Array.isArray(rows)) return [];
+      return rows.filter((row) => row && typeof row === 'object')
+        .map((row, i) => ({
+          index: Number.isFinite(Number(row.index)) ? Number(row.index) : i + 1,
+          positive_prompt: row.positive_prompt == null ? null : String(row.positive_prompt),
+          negative_prompt: row.negative_prompt == null ? null : String(row.negative_prompt),
+        }));
+    });
+    const novelAICombinedPositive = computed(() => {
+      if (!isNovelAI.value) return '';
+      return joinNovelAIPromptParts([
+        meta.value && meta.value.positive_prompt,
+        ...novelAICharacters.value.map((row) => row.positive_prompt),
+      ]);
+    });
+    const novelAICombinedNegative = computed(() => {
+      if (!isNovelAI.value) return '';
+      return joinNovelAIPromptParts([
+        meta.value && meta.value.negative_prompt,
+        ...novelAICharacters.value.map((row) => row.negative_prompt),
+      ]);
+    });
     const displayPositive = computed(() => {
       const m = meta.value;
       if (!m || typeof m !== 'object') return null;
@@ -994,7 +1040,9 @@ export const DetailView = defineComponent({
     });
 
     return {
-      loading, error, record, meta, gallery, size, folder,
+      loading, error, record, meta, generation, isNovelAI, novelAICharacters,
+      novelAICombinedPositive, novelAICombinedNegative,
+      gallery, size, folder,
       posView, displayPositive, loras, lorasText,
       prevId, nextId, neighborsLoading,
       scale, tx, ty, scalePct,
@@ -1318,8 +1366,8 @@ export const DetailView = defineComponent({
               </dl>
             </section>
 
-            <section class="dv-sec-block" aria-label="comfyui data">
-              <h3 class="dv-sec">ComfyUI data</h3>
+            <section class="dv-sec-block" aria-label="generation data">
+              <h3 class="dv-sec">{{ isNovelAI ? 'NovelAI data' : 'ComfyUI data' }}</h3>
               <dl class="dv-meta">
                 <dt>Model</dt>
                 <dd><code v-if="meta.model">{{ meta.model }}</code><span v-else class="muted">—</span></dd>
@@ -1357,6 +1405,21 @@ export const DetailView = defineComponent({
                 <dd><code v-if="meta.sampler">{{ meta.sampler }}</code><span v-else class="muted">—</span></dd>
                 <dt>Scheduler</dt>
                 <dd><code v-if="meta.scheduler">{{ meta.scheduler }}</code><span v-else class="muted">—</span></dd>
+                <dt v-if="isNovelAI" class="dv-nai-combined-actions">
+                  <span>General + all characters</span>
+                  <span class="dv-nai-combined-buttons">
+                    <button type="button" class="dv-copy dv-nai-combined-copy"
+                            :disabled="!novelAICombinedPositive"
+                            @click="copy('nai-combined-positive', novelAICombinedPositive)">
+                      {{ copiedKey === 'nai-combined-positive' ? 'Copied positive!' : 'Copy positive' }}
+                    </button>
+                    <button type="button" class="dv-copy dv-nai-combined-copy"
+                            :disabled="!novelAICombinedNegative"
+                            @click="copy('nai-combined-negative', novelAICombinedNegative)">
+                      {{ copiedKey === 'nai-combined-negative' ? 'Copied negative!' : 'Copy negative' }}
+                    </button>
+                  </span>
+                </dt>
                 <dt>
                   Positive prompt
                   <span class="dv-prompt-mode" role="group" aria-label="positive prompt view">
@@ -1393,6 +1456,40 @@ export const DetailView = defineComponent({
                   <pre v-if="meta.negative_prompt" class="dv-prompt">{{ meta.negative_prompt }}</pre>
                   <span v-else class="muted">—</span>
                 </dd>
+                <template v-if="isNovelAI && novelAICharacters.length">
+                  <dt>Character prompts</dt>
+                  <dd class="dv-nai-characters">
+                    <article v-for="character in novelAICharacters"
+                             :key="'nai-character-'+character.index"
+                             class="dv-nai-character">
+                      <h4 class="dv-nai-character-title">Character {{ character.index }}</h4>
+                      <div class="dv-nai-prompt-block">
+                        <div class="dv-nai-prompt-head">
+                          <span>Positive prompt</span>
+                          <button type="button" class="dv-copy"
+                                  :disabled="!character.positive_prompt"
+                                  @click="copy('character-positive-'+character.index, character.positive_prompt)">
+                            {{ copiedKey === 'character-positive-'+character.index ? 'Copied!' : 'Copy' }}
+                          </button>
+                        </div>
+                        <pre v-if="character.positive_prompt" class="dv-prompt">{{ character.positive_prompt }}</pre>
+                        <span v-else class="muted">—</span>
+                      </div>
+                      <div class="dv-nai-prompt-block">
+                        <div class="dv-nai-prompt-head">
+                          <span>Negative prompt</span>
+                          <button type="button" class="dv-copy"
+                                  :disabled="!character.negative_prompt"
+                                  @click="copy('character-negative-'+character.index, character.negative_prompt)">
+                            {{ copiedKey === 'character-negative-'+character.index ? 'Copied!' : 'Copy' }}
+                          </button>
+                        </div>
+                        <pre v-if="character.negative_prompt" class="dv-prompt">{{ character.negative_prompt }}</pre>
+                        <span v-else class="muted">—</span>
+                      </div>
+                    </article>
+                  </dd>
+                </template>
               </dl>
             </section>
 

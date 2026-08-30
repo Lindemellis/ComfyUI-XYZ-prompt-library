@@ -50,6 +50,34 @@ class Part:
 
     text: str
     terminated: bool = False
+    # Text before this part's own wrappers.  An ancestor format must decorate the
+    # item inside a child weight: `@$p` + `(tag:0.8)` -> `(@tag:0.8)`.
+    format_body: str | None = None
+    wrapper: str | None = None  # "weight" or "paren"
+    weight: float | None = None
+    schedule: tuple[float, float] | None = None
+
+    def with_format(self, fmt: str) -> "Part":
+        """Apply an item format while preserving this part's own wrappers."""
+        if self.format_body is None:
+            return Part(fmt.replace("$p", self.text), self.terminated)
+
+        inner_body = fmt.replace("$p", self.format_body)
+        body = inner_body
+        if self.wrapper == "weight":
+            body = f"({body}:{num(self.weight)})"
+        elif self.wrapper == "paren":
+            body = f"({body})"
+        if self.schedule is not None:
+            body = f"[{body}, :{num(self.schedule[0])},{num(self.schedule[1])}]"
+        return Part(
+            body,
+            self.terminated,
+            format_body=inner_body,
+            wrapper=self.wrapper,
+            weight=self.weight,
+            schedule=self.schedule,
+        )
 
 
 @dataclass
@@ -199,27 +227,40 @@ def _render_group(group: Group, ctx: RenderCtx) -> Part | None:
 
     fmt = group.settings.format
     if fmt:
-        parts = [Part(fmt.replace("$p", p.text), p.terminated) for p in parts]
+        parts = [p.with_format(fmt) for p in parts]
 
     body = _join(parts)
     if not body.strip():
         return None
 
+    format_body = body
     weight = group.settings.weight
+    wrapper = None
     if weight is not None and weight != 1.0:
         body = f"({body}:{num(weight)})"
+        wrapper = "weight"
     elif group.paren and weight is None:
         # Bare parens with no weight: pass the user's parens through as written.
         body = f"({body})"
+        wrapper = "paren"
 
     terminated = False
+    schedule = None
     if will_wrap:
         # The comma lives inside the bracket so that a closed time window cannot
         # leave a dangling separator behind (spec §4.4).
         body = f"[{body}, :{num(interval[0])},{num(interval[1])}]"
         terminated = True
+        schedule = interval
 
-    return Part(body, terminated)
+    return Part(
+        body,
+        terminated,
+        format_body=format_body,
+        wrapper=wrapper,
+        weight=weight if wrapper == "weight" else None,
+        schedule=schedule,
+    )
 
 
 # --- segments ---------------------------------------------------------------

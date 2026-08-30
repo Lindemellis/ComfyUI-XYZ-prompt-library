@@ -6,7 +6,7 @@
 //                            block (a document never holds a bare pointer, §3.6)
 //   inside `.set{ … }`    -> the field names (see language.js)
 //   plain prompt text     -> NOT here: danbooru tags come from js/tagac.js, the same
-//                            autocomplete PLv2 uses (see tagac_monaco.js). It brings
+//                            tag autocomplete uses (see tagac_monaco.js). It brings
 //                            the wiki links, preview images, artist works and related
 //                            tags, which a Monaco suggest item cannot render.
 

@@ -2,7 +2,7 @@
 //
 // Nothing here may use window.prompt / alert / confirm. A browser dialog is a
 // separate OS window: it steals focus from the canvas, cannot be themed, and on
-// top of a floating window it looks like the app broke. Same rule as PLv2.
+// top of a floating window it looks like the app broke.
 
 import { T } from './theme.js';
 

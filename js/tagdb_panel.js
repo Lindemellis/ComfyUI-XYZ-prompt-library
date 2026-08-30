@@ -6,7 +6,7 @@
  * vs full) with a live log + staleness banner, and snapshot switching/export.
  *
  * Talks to the /xyz/tagdb/* routes. Opened via the "Open Tag DB Manager" command
- * / action-bar button. No external deps (does not import the PLv2 window helper).
+ * / action-bar button. No external window-helper dependency.
  */
 
 import { app } from '../../../scripts/app.js';
@@ -270,27 +270,13 @@ class TagDBManager {
     } catch {}
   }
 
-  // ── credentials (login + api key; key masked with Show/Hide) ──
+  // ── credentials (saved keys are never returned to the browser) ──
   _sectionCredentials() {
     this.els.login = el('input', { type: 'text', placeholder: 'danbooru login', style: this._inputStyle() });
     this.els.apikey = el('input', { type: 'password', placeholder: 'api key', style: this._inputStyle() });
-    this._keyShown = false;
-    const toggle = this._btn('Show', async () => {
-      if (!this._keyShown) {
-        if (!this.els.apikey.value) {
-          try {
-            const s = await api.getJSON('/xyz/tagdb/settings?reveal=1');
-            this.els.apikey.value = s.danbooru_api_key || '';
-          } catch {}
-        }
-        this.els.apikey.type = 'text'; this._keyShown = true; toggle.textContent = 'Hide';
-      } else {
-        this.els.apikey.type = 'password'; this._keyShown = false; toggle.textContent = 'Show';
-      }
-    });
     return this._section('Danbooru credentials (optional — raises rate limit)',
       el('div', { style: { fontSize: '11px', color: '#999', marginBottom: '4px' } },
-        'Stored locally; the API key is masked by default.'),
+        'Stored locally. A saved API key is never sent back to the browser; type a new value to replace it.'),
       this.els.login,
       this.els.apikey,
       el('div', { style: { marginTop: '6px' } },
@@ -301,7 +287,6 @@ class TagDBManager {
           this._loadCredentials();
           this._toast('Credentials saved');
         }, { primary: true }),
-        toggle,
       ),
     );
   }
@@ -338,7 +323,6 @@ class TagDBManager {
         v.min_post_count != null ? `count≥${v.min_post_count}` : '',
         fmtTags(v.tag_count),
         fmtMB(v.size_bytes),
-        v.has_translations ? '+translations' : '',
       ].filter(Boolean).join(' · ');
       const latestBadge = v.is_latest
         ? el('span', { style: {
@@ -367,24 +351,13 @@ class TagDBManager {
     return this._section('Active gelbooru dataset', this.els.gelBanner);
   }
 
-  // Gelbooru credentials (api_key + user_id; masked with Show/Hide).
+  // Gelbooru credentials (saved keys are never returned to the browser).
   _sectionGelbooruCreds() {
     this.els.gelUserId = el('input', { type: 'text', placeholder: 'gelbooru user_id', style: this._inputStyle() });
     this.els.gelApiKey = el('input', { type: 'password', placeholder: 'gelbooru api key', style: this._inputStyle() });
-    this._gelKeyShown = false;
-    const toggle = this._btn('Show', async () => {
-      if (!this._gelKeyShown) {
-        if (!this.els.gelApiKey.value) {
-          try { const s = await api.getJSON('/xyz/tagdb/settings?reveal=1'); this.els.gelApiKey.value = s.gelbooru_api_key || ''; } catch {}
-        }
-        this.els.gelApiKey.type = 'text'; this._gelKeyShown = true; toggle.textContent = 'Hide';
-      } else {
-        this.els.gelApiKey.type = 'password'; this._gelKeyShown = false; toggle.textContent = 'Show';
-      }
-    });
     return this._section('Gelbooru credentials (needed only to build/update directly)',
       el('div', { style: { fontSize: '11px', color: '#999', marginBottom: '4px' } },
-        'Required to build directly from gelbooru (its tag API returns 401 without them). Downloading a prebuilt dataset needs no credentials. Stored locally, masked by default.'),
+        'Required to build directly from gelbooru. Downloading a prebuilt dataset needs no credentials. Saved keys are never sent back to the browser.'),
       this.els.gelUserId,
       this.els.gelApiKey,
       el('div', { style: { marginTop: '6px' } },
@@ -395,7 +368,6 @@ class TagDBManager {
           this._loadCredentials();
           this._toast('Gelbooru credentials saved');
         }, { primary: true }),
-        toggle,
       ),
     );
   }
@@ -455,7 +427,7 @@ class TagDBManager {
     }}, '');
     return this._section('Update from danbooru',
       el('div', { style: { fontSize: '12px', marginBottom: '6px', color: '#fb8' } },
-        'Incremental: new events + full post_count refresh + artist translations. Full: re-scrape everything from scratch (~15–20 min).'),
+        'Incremental: new events + full post_count refresh. Full: re-scrape everything from scratch (~15–20 min).'),
       el('label', { style: { fontSize: '12px' } }, 'only scrape tags with post count ≥ '), this.els.minCount,
       el('div', { style: { fontSize: '11px', color: '#888', margin: '2px 0' } },
         'Default is set in ComfyUI Settings → XYZ Tag Autocomplete; change here for a one-off run.'),
@@ -510,13 +482,11 @@ class TagDBManager {
       this.els.login.value = s.danbooru_login || '';
       this.els.apikey.value = '';
       this.els.apikey.type = 'password';
-      this._keyShown = false;
       this.els.apikey.placeholder = s.has_credentials ? 'api key saved (•••) — type to change' : 'api key';
       if (this.els.gelUserId) {
         this.els.gelUserId.value = s.gelbooru_user_id || '';
         this.els.gelApiKey.value = '';
         this.els.gelApiKey.type = 'password';
-        this._gelKeyShown = false;
         this.els.gelApiKey.placeholder = s.has_gelbooru_credentials ? 'api key saved (•••) — type to change' : 'gelbooru api key';
       }
     } catch {}

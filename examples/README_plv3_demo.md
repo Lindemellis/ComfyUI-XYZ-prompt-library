@@ -76,6 +76,11 @@ This is the part worth poking at, because it is where v3 differs most from v2:
 7. Rewrite an item's text: you get a new item, and the old one simply becomes
    disabled.  That is the whole "edit = add + disable" rule, with no dialog.
 
+When a prompt tag is copied into or added to a library group, underscores are converted to spaces
+and literal parentheses are escaped; a real outer weight wrapper is preserved. For example,
+`blue_hair_(foo_bar)` is stored as `blue hair \(foo bar\)`, while `(red_hair:0.8)` is stored as
+`red hair` with item weight `0.8`. LoRA entries keep their original syntax.
+
 ---
 
 ## 2. The document (spec §3, §4) — `plv3_demo_positive.txt`

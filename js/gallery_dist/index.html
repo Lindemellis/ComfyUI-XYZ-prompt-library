@@ -1086,6 +1086,30 @@
                  border-radius: 4px; padding: 8px 10px;
                  max-height: 200px; overflow: auto; white-space: pre-wrap;
                  word-break: break-word; }
+    .dv-nai-characters { display: flex; flex-direction: column; gap: 8px; }
+    .dv-nai-character {
+      background: var(--bg); border: 1px solid var(--border);
+      border-radius: 6px; padding: 9px 10px;
+    }
+    .dv-nai-character-title {
+      margin: 0 0 8px; color: var(--accent); font-size: 12px;
+      font-weight: 600; letter-spacing: .25px;
+    }
+    .dv-nai-prompt-block + .dv-nai-prompt-block { margin-top: 9px; }
+    .dv-meta dt.dv-nai-combined-actions {
+      align-items: center; gap: 10px; text-transform: none; letter-spacing: 0;
+    }
+    .dv-nai-combined-actions > span:first-child {
+      text-transform: uppercase; letter-spacing: .4px;
+    }
+    .dv-nai-combined-buttons { display: inline-flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
+    .dv-copy.dv-nai-combined-copy { padding: 3px 8px; font-size: 11px; }
+    .dv-nai-prompt-head {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 8px; color: var(--muted); font-size: 10px;
+      text-transform: uppercase; letter-spacing: .35px;
+    }
+    .dv-nai-character .dv-prompt { max-height: 150px; }
     .dv-loras { list-style: none; margin: 4px 0 0; padding: 0;
                 display: flex; flex-direction: column; gap: 4px; }
     .dv-lora { display: flex; align-items: center; gap: 8px;

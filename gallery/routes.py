@@ -161,6 +161,17 @@ def _metadata_positive_prompt_normalized(
     return ", ".join(toks)
 
 
+def _metadata_generation_data(raw: Optional[str]) -> Optional[dict]:
+    """Decode normalized provider detail JSON stored by the indexer."""
+    if not raw:
+        return None
+    try:
+        value = json.loads(str(raw))
+    except (TypeError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
 def _serialize_image(rec: _repo.ImageRecord) -> dict:
     v_suffix = f"?v={rec.mtime_ns}" if rec.mtime_ns is not None else ""
     return {
@@ -202,6 +213,7 @@ def _serialize_image(rec: _repo.ImageRecord) -> dict:
             "steps": rec.steps,
             "sampler": rec.sampler,
             "scheduler": rec.scheduler,
+            "generation": _metadata_generation_data(rec.generation_data_json),
             "has_workflow": rec.has_workflow,
         },
         "gallery": {
@@ -1427,9 +1439,9 @@ async def _post_send_to_krita(request: web.Request) -> web.Response:
 
 
 async def _post_backfill_steps(request: web.Request) -> web.Response:
-    """Queue a metadata re-read for every image with no step count.
+    """Queue a metadata re-read for every incomplete or stale image row.
 
-    Returns immediately with the counts; the sync worker does the reading on its own
+    Returns immediately with the counts; the indexer does the reading on its own
     poll, so a big library does not hold the request open.
     """
     try:
@@ -1441,7 +1453,7 @@ async def _post_backfill_steps(request: web.Request) -> web.Response:
 
 
 async def _get_backfill_steps(request: web.Request) -> web.Response:
-    """How many images still have no step count — what the button's label says."""
+    """How many image rows need the metadata reader to revisit them."""
     try:
         missing = await _run(_repo.count_missing_steps, db_path=DB_PATH)
     except Exception:

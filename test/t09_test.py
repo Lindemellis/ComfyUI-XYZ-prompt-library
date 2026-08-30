@@ -13,13 +13,12 @@ Covers:
 """
 from __future__ import annotations
 
-import os
-import shutil
 import sqlite3
 import sys
-import tempfile
 import time
 from pathlib import Path
+
+import pytest
 
 _PLUGIN_ROOT = Path(__file__).resolve().parent.parent
 if str(_PLUGIN_ROOT) not in sys.path:
@@ -163,6 +162,26 @@ def _seed_fixture(db_path: Path) -> dict:
         "out_a": out_a, "out_b": out_b, "inp_a": inp_a,
         "img_ids": img_ids,
     }
+
+
+@pytest.fixture(scope="module")
+def _gallery_fixture(tmp_path_factory):
+    """One shared scratch database, matching the original ordered T09 script."""
+    scratch = tmp_path_factory.mktemp("xyz_t09")
+    db_path = _bootstrap(scratch)
+    ref = _seed_fixture(db_path)
+    _seed_vocab_links(db_path)
+    return db_path, ref
+
+
+@pytest.fixture(scope="module")
+def db_path(_gallery_fixture) -> Path:
+    return _gallery_fixture[0]
+
+
+@pytest.fixture(scope="module")
+def ref(_gallery_fixture) -> dict:
+    return _gallery_fixture[1]
 
 
 def _seed_vocab_links(db_path: Path) -> None:
@@ -619,30 +638,3 @@ def test_explain_query_plan_hits_indexes(db_path: Path, ref: dict) -> None:
     finally:
         conn.close()
     print("T09 EXPLAIN QUERY PLAN index hits OK")
-
-
-def main() -> None:
-    scratch = Path(tempfile.mkdtemp(prefix="xyz_t09_"))
-    try:
-        db_path = _bootstrap(scratch)
-        ref = _seed_fixture(db_path)
-        _seed_vocab_links(db_path)
-
-        test_get_image(db_path, ref)
-        test_list_basic_and_pagination(db_path, ref)
-        test_cursor_stable_under_concurrent_insert(db_path, ref)
-        test_filters(db_path, ref)
-        test_folder_recursive(db_path, ref)
-        test_sorts(db_path, ref)
-        test_folder_line_header_sort_order(db_path, ref)
-        test_total_estimate_cap(db_path, ref)
-        test_neighbors(db_path, ref)
-        test_folder_tree(db_path, ref)
-        test_explain_query_plan_hits_indexes(db_path, ref)
-        print("\nALL T09 TESTS PASSED")
-    finally:
-        shutil.rmtree(scratch, ignore_errors=True)
-
-
-if __name__ == "__main__":
-    main()

@@ -14,17 +14,8 @@ import { PLV3_TYPES, isMonacoNode, plv3Window } from './plv3/window.js';
 import { PromptEditor, acquireNodeModel, releaseNodeModel } from './plv3/editor_core.js';
 import { nodePolarity } from './plv3/editor.js';
 
-
-// The bundled LLM assistant is retired: the ComfyUI agent panel does this job
-// now. Its code, routes and data are untouched — only the four ways INTO it are
-// hidden — so nothing that was saved is lost and it can be brought back with
-//   localStorage.setItem('xyz.llm.enabled', '1')
-// followed by a refresh.
-const XYZ_LLM_ENABLED = (() => {
-  try { return localStorage.getItem('xyz.llm.enabled') === '1'; } catch { return false; }
-})();
 // The top-bar menu (gallery_topbar.js) opens these without importing the modules —
-// the same handle PLv2 exposes as `window.plv2`.
+// keep one stable global handle for extensions that do not import these modules.
 window.plv3 = {
   window: plv3Window,
   library: libraryWindow,
@@ -206,23 +197,7 @@ app.registerExtension({
         setTimeout(() => (edit.textContent = 'Editor'), 4000);
       });
     });
-    // The LLM Prompt Assistant (js/plv2_llm.js) binds to THIS node: it shows the node's
-    // compiled output as the base prompt and Apply writes the model's prompt back into
-    // the `text` widget. The window itself is hosted by plv2.js, hence the plv2 handle.
-    const llm = XYZ_LLM_ENABLED ? button('🤖 LLM') : null;
-    llm?.addEventListener('click', () => {
-      const win = window.plv2?.windows?.llm;
-      if (!win) {
-        console.warn('[PLv3] the LLM window is not available');
-        llm.textContent = 'LLM unavailable';
-        setTimeout(() => (llm.textContent = '🤖 LLM'), 4000);
-        return;
-      }
-      win.show();
-      document.dispatchEvent(new CustomEvent('plv3:llm-bind', { detail: { nodeId: node.id } }));
-    });
     wrap.append(edit);
-    if (llm) wrap.append(llm);
 
     const w = node.addDOMWidget('plv3_open_btns', 'custom', wrap, {
       getValue: () => '',

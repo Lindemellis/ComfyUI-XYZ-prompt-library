@@ -87,7 +87,7 @@ def main() -> None:
     ap.add_argument("--with-versions", action="store_true",
                     help="also backfill the full tag_versions event log")
     ap.add_argument("--with-artists", action="store_true",
-                    help="also scrape artist other_names + slim artist_versions (rename history)")
+                    help="also build the slim artist rename-history event log")
     ap.add_argument("--zip", action="store_true", help="also produce a .zip asset")
     ap.add_argument("--login", default=None)
     ap.add_argument("--api-key", default=None)
@@ -140,7 +140,7 @@ def main() -> None:
         summary = _up.run_full_update(
             out, min_post_count=args.min_post_count, label="danbooru",
             login=login, api_key=api_key,
-            with_artist_names=args.with_artists, with_artist_versions=args.with_artists,
+            with_artist_versions=args.with_artists,
             progress_cb=print,
         )
         if args.with_versions:

@@ -6,10 +6,14 @@ the plugin binds to localhost); ComfyUI proxies.
 
 from __future__ import annotations
 
+import asyncio
+
 from aiohttp import web
 
 from . import client, installer, launcher
 from .nodes import DOCUMENT_ENTRY, combo_entry
+
+_registered = False
 
 
 def _flatten(layers: list[dict], depth: int = 0) -> list[dict]:
@@ -33,12 +37,16 @@ def _flatten(layers: list[dict], depth: int = 0) -> list[dict]:
 
 
 def register(server) -> None:
+    global _registered
+    if _registered:
+        return
+    _registered = True
     routes = server.routes
 
     @routes.get("/xyz/krita/ping")
     async def krita_ping(request):
         try:
-            return web.json_response(client.ping())
+            return web.json_response(await asyncio.to_thread(client.ping))
         except client.KritaUnreachable as exc:
             return web.json_response({"ok": False, "error": str(exc)}, status=503)
         except client.KritaError as exc:
@@ -47,7 +55,7 @@ def register(server) -> None:
     @routes.get("/xyz/krita/layers")
     async def krita_layers(request):
         try:
-            data = client.layers()
+            data = await asyncio.to_thread(client.layers)
         except client.KritaUnreachable as exc:
             return web.json_response({"ok": False, "error": str(exc)}, status=503)
         except client.KritaError as exc:
@@ -78,18 +86,14 @@ def register(server) -> None:
 
     @routes.get("/xyz/krita/launch")
     async def krita_launch_status(request):
-        return web.json_response(launcher.status())
+        return web.json_response(await asyncio.to_thread(launcher.status))
 
     @routes.post("/xyz/krita/launch")
     async def krita_launch(request):
         # Krita takes ~20s to come up, so this blocks until its bridge answers.
         # aiohttp would otherwise report success while Krita was still splashing.
-        import asyncio
-
         try:
-            result = await asyncio.get_running_loop().run_in_executor(
-                None, launcher.launch
-            )
+            result = await asyncio.to_thread(launcher.launch)
             return web.json_response(result)
         except launcher.KritaNotFound as exc:
             return web.json_response(
@@ -103,25 +107,27 @@ def register(server) -> None:
         payload = await request.json()
         try:
             return web.json_response(
-                {"ok": True, "executable": launcher.set_executable(payload.get("path", ""))}
+                {"ok": True, "executable": await asyncio.to_thread(
+                    launcher.set_executable, payload.get("path", "")
+                )}
             )
         except launcher.KritaNotFound as exc:
             return web.json_response({"ok": False, "error": str(exc)}, status=400)
 
     @routes.get("/xyz/krita/plugin")
     async def krita_plugin_status(request):
-        return web.json_response(installer.status())
+        return web.json_response(await asyncio.to_thread(installer.status))
 
     @routes.post("/xyz/krita/plugin/install")
     async def krita_plugin_install(request):
         try:
-            return web.json_response(installer.install())
+            return web.json_response(await asyncio.to_thread(installer.install))
         except Exception as exc:  # noqa: BLE001 - surfaced to the user as-is
             return web.json_response({"ok": False, "error": str(exc)}, status=500)
 
     @routes.post("/xyz/krita/plugin/uninstall")
     async def krita_plugin_uninstall(request):
         try:
-            return web.json_response(installer.uninstall())
+            return web.json_response(await asyncio.to_thread(installer.uninstall))
         except Exception as exc:  # noqa: BLE001
             return web.json_response({"ok": False, "error": str(exc)}, status=500)

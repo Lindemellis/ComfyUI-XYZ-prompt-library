@@ -32,7 +32,7 @@ import os
 import threading
 import time
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional, Set, Tuple, Union
+from typing import Any, Dict, Iterable, List, Mapping, Optional, Sequence, Set, Tuple, Union
 
 from PIL import Image, UnidentifiedImageError
 
@@ -52,6 +52,8 @@ __all__ = [
     "delete_one",
     "is_cold_scanning",
     "schedule_cold_scan_all",
+    "reread_metadata_targets",
+    "schedule_metadata_reread",
     "is_derivative_path_excluded",
     "maybe_rebuild_prompt_vocab_from_config",
     "reconcile_folders_under_root",
@@ -308,6 +310,7 @@ def _build_upsert_op(
         steps=meta.steps,
         sampler=meta.sampler,
         scheduler=meta.scheduler,
+        generation_data_json=meta.generation_data_json,
         workflow_present=1 if meta.has_workflow else 0,
         favorite=_normalise_favorite(meta.favorite),
         tags_csv=_normalise_tags_csv(meta.tags),
@@ -489,12 +492,15 @@ def cold_scan(
 
 def index_one(
     path: _PathLike, *, root: Dict[str, Any],
-    db_path: _PathLike, write_queue,
+    db_path: _PathLike, write_queue, force: bool = False,
 ) -> Optional[int]:
     """Index a single file. Returns the ``image.id`` if a row was written.
 
     Returns ``None`` when the path is skipped (inflight loss, stat
     failure, or fingerprint still matches) — T07 test #2 / #5 semantics.
+    ``force`` bypasses only the fingerprint check; all sandbox/derivative,
+    missing-file and inflight protections remain active. Metadata backfill uses
+    it because the whole bug it repairs is "same file fingerprint, newer reader".
 
     ``delete_one`` is the delete counterpart for T20 watcher.
     """
@@ -517,7 +523,7 @@ def index_one(
 
         posix_path = Path(abs_path).as_posix()
         cached = _load_single_fingerprint(db_path, posix_path)
-        if cached is not None and cached == (
+        if not force and cached is not None and cached == (
             int(st.st_size), int(st.st_mtime_ns)
         ):
             return None
@@ -554,6 +560,62 @@ def index_one(
         return int(row[0]) if row is not None else None
     finally:
         _release(key)
+
+
+def reread_metadata_targets(
+    targets: Sequence[Mapping[str, Any]], *, db_path: _PathLike, write_queue,
+) -> Dict[str, int]:
+    """Synchronously force selected legacy rows through the normal index path.
+
+    This reads image metadata and updates the database only. It never rewrites
+    the source PNG; Gallery's separate metadata-sync worker is intentionally not
+    involved.
+    """
+    read = 0
+    errors = 0
+    for target in targets:
+        root = {
+            "id": int(target["root_id"]),
+            "path": str(target["root_path"]),
+            "kind": str(target["root_kind"]),
+        }
+        try:
+            image_id = index_one(
+                str(target["path"]), root=root, db_path=db_path,
+                write_queue=write_queue, force=True,
+            )
+            if image_id is None:
+                errors += 1
+            else:
+                read += 1
+        except Exception:
+            errors += 1
+            logger.exception("metadata re-read failed for %s", target.get("path"))
+    return {"read": read, "errors": errors}
+
+
+def schedule_metadata_reread(
+    targets: Sequence[Mapping[str, Any]], *, db_path: _PathLike, write_queue,
+) -> threading.Thread:
+    """Run :func:`reread_metadata_targets` in one background worker thread."""
+    snapshot = [dict(target) for target in targets]
+
+    def _worker() -> None:
+        result = reread_metadata_targets(
+            snapshot, db_path=db_path, write_queue=write_queue,
+        )
+        logger.info(
+            "metadata re-read finished: read=%s errors=%s",
+            result["read"], result["errors"],
+        )
+
+    thread = threading.Thread(
+        target=_worker,
+        name="xyz-gallery-metadata-reread",
+        daemon=True,
+    )
+    thread.start()
+    return thread
 
 
 def delete_one(

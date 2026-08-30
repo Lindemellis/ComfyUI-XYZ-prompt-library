@@ -82,7 +82,7 @@ Gelbooru is an **optional second tag set** that lives in its own file (`tagdb_da
 
 ## FAQ
 
-**Typing Japanese/Chinese finds nothing.** The dataset has no wiki translations — search matches English tag names and artists' former names only.
+**Typing Japanese/Chinese finds nothing by design.** The database stores and searches only English canonical tag names and aliases.
 
 **Tag count doesn't match the release.** Releases use `min_post_count = 50`. Your own update with a lower threshold yields more tags.
 

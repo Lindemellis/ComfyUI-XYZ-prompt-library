@@ -15,6 +15,8 @@ loop cannot hang the editor (spec §5.5, layer 2).
 """
 from __future__ import annotations
 
+import re
+
 from . import repo
 from .diagnostics import E02, PLv3Error
 from .parser import Group, Item, Lora, Text, parse
@@ -69,6 +71,42 @@ def _ends_sentence(text: str) -> bool:
     """An item that already ends in a full stop carries its own separator (spec update
     2026-08-05): the period splits items and stays with the one it ends."""
     return text.rstrip().endswith(".")
+
+
+def normalize_group_tag(text: str) -> str:
+    """Store a tag in the form PLv3 group items use.
+
+    Danbooru names use underscores as spaces, while unescaped parentheses are
+    PLv3 attention syntax.  A tag copied into a library group must therefore be
+    stored as e.g. ``foo bar \\(baz\\)``.  This function is intentionally only
+    for ordinary prompt tags; LoRAs and group constructs are kept verbatim by
+    the callers below.
+    """
+    source = str(text)
+    weighted = re.fullmatch(
+        r"\((.*):\s*([-+]?(?:\d+(?:\.\d*)?|\.\d+))\)", source, re.DOTALL
+    )
+    body = weighted.group(1) if weighted else source
+
+    out: list[str] = []
+    for i, char in enumerate(body):
+        if char == "_":
+            out.append(" ")
+        elif char in "()":
+            # Preserve an escape that is already present.  An even number of
+            # preceding backslashes means the parenthesis itself is unescaped.
+            slashes = 0
+            j = i - 1
+            while j >= 0 and body[j] == "\\":
+                slashes += 1
+                j -= 1
+            if slashes % 2 == 0:
+                out.append("\\")
+            out.append(char)
+        else:
+            out.append(char)
+    normalized = "".join(out)
+    return f"({normalized}:{weighted.group(2)})" if weighted else normalized
 
 
 def join_items(parts: list[str]) -> str:
@@ -213,7 +251,7 @@ def _is_blank(src: str, node) -> bool:
     return isinstance(node, Text) and not _source(src, node).strip(" \t\r\n,")
 
 
-def block_entries(src: str, group: Group) -> list[dict]:
+def block_entries(src: str, group: Group, normalize_tags: bool = False) -> list[dict]:
     """What a `[path]: { ... }` block contains, in text order.
 
     Prompts and nested library blocks are interleaved, and their order changes the
@@ -225,7 +263,15 @@ def block_entries(src: str, group: Group) -> list[dict]:
     """
     out: list[dict] = []
     for child in group.children:
-        if isinstance(child, (Text, Lora, Item)):
+        if isinstance(child, (Text, Item)):
+            text = _source(src, child).strip()
+            if text:
+                out.append({
+                    "kind": "item",
+                    "text": normalize_group_tag(text) if normalize_tags else text,
+                    "weight": None,
+                })
+        elif isinstance(child, Lora):
             text = _source(src, child).strip()
             if text:
                 out.append({"kind": "item", "text": text, "weight": None})
@@ -240,13 +286,31 @@ def block_entries(src: str, group: Group) -> list[dict]:
             ):
                 text = _source(src, child.children[0]).strip()
                 if text:
-                    out.append({"kind": "item", "text": text, "weight": child.settings.weight})
+                    out.append({
+                        "kind": "item",
+                        "text": normalize_group_tag(text) if normalize_tags else text,
+                        "weight": child.settings.weight,
+                    })
+            elif normalize_tags and child.paren and child.settings.weight is not None:
+                # A weighted tag may contain a literal parenthesised part, e.g.
+                # `(green_hair_(foo_bar):0.8)`.  Keep the outer weight as the row's
+                # weight and normalise/escape only its body.
+                start, end = child.spans.content
+                text = normalize_group_tag(src[start:end].strip())
+                if text:
+                    out.append({
+                        "kind": "item",
+                        "text": text,
+                        "weight": child.settings.weight,
+                    })
             else:
                 # An inline group written inside a block — `{a, b}.set{random_select: 1}`,
                 # which is what PLv2's `{a|b}` migrates to. It is one item whose text
                 # happens to be a group; storing it verbatim keeps it round-tripping.
                 text = _source(src, child).strip()
                 if text:
+                    if normalize_tags and child.paren and child.settings.weight is not None:
+                        text = normalize_group_tag(text)
                     out.append({"kind": "item", "text": text, "weight": None})
     return out
 
@@ -364,7 +428,7 @@ def create_group_from_text(name: str, text: str, folder_id: int | None = None,
         if settings:
             root = inner[0]
 
-    entries = block_entries(text, root)
+    entries = block_entries(text, root, normalize_tags=True)
     if not entries:
         raise ValueError("nothing to save — that selection has no items in it")
 

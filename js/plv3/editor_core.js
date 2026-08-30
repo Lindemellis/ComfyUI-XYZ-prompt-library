@@ -246,7 +246,7 @@ export class PromptEditor {
       ...this.options,
     });
 
-    // The danbooru autocomplete PLv2 already has — wiki links, preview images, artist
+    // The shared Danbooru autocomplete — wiki links, preview images, artist
     // works, related tags — driven straight from this editor (see tagac_monaco.js).
     attachTagAC(this.editor, this.container).catch((err) =>
       console.warn('[PLv3] could not attach the tag autocomplete', err));

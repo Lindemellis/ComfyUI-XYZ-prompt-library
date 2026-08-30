@@ -10,8 +10,14 @@ from aiohttp import web
 
 from .nodes import IMAGE_NAME, create_slot, delete_slot, describe_slots, slot_path
 
+_registered = False
+
 
 def register(server) -> None:
+    global _registered
+    if _registered:
+        return
+    _registered = True
     routes = server.routes
 
     @routes.get("/xyz/cache/slots")

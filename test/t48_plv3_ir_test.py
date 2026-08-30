@@ -174,6 +174,10 @@ def test_format_applies_to_each_item_with_a_subgroup_counting_as_one():
     assert r.text == "masterpiece a, masterpiece b, c"
 
 
+def test_format_stays_inside_an_items_weight_wrapper():
+    assert compile_text('{(tag:0.8)}.set{format: "@$p"}').text == "(@tag:0.8)"
+
+
 def test_settings_do_not_inherit_from_the_parent_group():
     r = compile_text("{ {a, b}, c }.set{weight: 1.5}")
     assert r.text == "(a, b, c:1.5)"

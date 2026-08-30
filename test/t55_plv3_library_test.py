@@ -76,6 +76,26 @@ def test_an_items_weight_lives_in_the_row_and_renders_as_parens(lib):
     assert "(illya:1.3)," in library.expand(gid)
 
 
+def test_copied_tags_are_normalized_when_saved_as_a_group(lib):
+    created = library.create_group_from_text(
+        "g", "blue_hair_(foo_bar), (red_hair:0.8), (green_hair_(foo_bar):0.8), "
+        "<lora:detail_name:1.0>"
+    )
+    rows = repo.list_items(created["id"])
+    assert [r["text"] for r in rows] == [
+        r"blue hair \(foo bar\)",
+        "red hair",
+        r"green hair \(foo bar\)",
+        "<lora:detail_name:1.0>",
+    ]
+    assert rows[1]["weight"] == 0.8
+    assert rows[2]["weight"] == 0.8
+    assert r"blue hair \(foo bar\)" in library.expand(created["id"])
+    expanded = library.expand(created["id"])
+    assert "(red hair:0.8)" in expanded
+    assert compile_text(expanded).text.startswith(r"blue hair \(foo bar\), (red hair:0.8)")
+
+
 def test_a_ref_expands_inline_and_keeps_its_own_header(lib):
     # spec §3.6: nested library groups are laid out inline but stay identifiable
     inner = make_group("illya", items=["illya", "blonde hair"])

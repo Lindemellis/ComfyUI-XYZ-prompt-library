@@ -8,7 +8,6 @@ Tables:
   meta            — key/value metadata + provenance watermarks (see V2 keys below)
   tags            — name, source, category, post_count, is_deprecated + V2 provenance
   aliases         — antecedent → canonical mapping (+ V2 created_at/synced_at)
-  translations    — optional multilingual aliases (lang, text)
   tags_fts        — FTS5 contentless table with trigram tokenizer for substring search
   tag_versions    — (V2) append-only danbooru tag category/deprecation event log
   artist_versions — (V2) append-only danbooru artist-entry event log
@@ -20,6 +19,9 @@ V2 meta watermark keys (see plan §"Provenance / time-binding"):
 
 V3 is a data repair, not a schema change: it decodes the HTML entities gelbooru's
 API leaves in tag names (`girls&#039;_frontline`) and rebuilds the FTS index.
+
+V4 removes multilingual/artist alternate-name content. TagDB is intentionally
+English-only; canonical tag names and tag aliases remain searchable.
 """
 
 from __future__ import annotations
@@ -84,7 +86,7 @@ def connect_write(path: _PathLike) -> sqlite3.Connection:
     return conn
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 _V1_DDL = """\
 CREATE TABLE IF NOT EXISTS meta (
@@ -110,13 +112,6 @@ CREATE TABLE IF NOT EXISTS aliases (
 );
 
 CREATE INDEX IF NOT EXISTS idx_aliases_canonical ON aliases(canonical);
-
-CREATE TABLE IF NOT EXISTS translations (
-    tag  TEXT NOT NULL,
-    lang TEXT NOT NULL DEFAULT 'ja',
-    text TEXT NOT NULL,
-    PRIMARY KEY (tag, lang)
-);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS tags_fts USING fts5(
     name,
@@ -236,7 +231,7 @@ def _migrate_v2(conn: sqlite3.Connection) -> None:
 
 
 def _migrate_v3(conn: sqlite3.Connection) -> int:
-    """Decode HTML entities left in tag/alias/translation text by the gelbooru scrape.
+    """Decode HTML entities left in tag/alias text by the gelbooru scrape.
 
     Gelbooru's JSON dapi returns HTML-escaped names (`girls&#039;_frontline`), and
     every gelbooru dataset built before this migration stored them verbatim — so the
@@ -285,31 +280,27 @@ def _migrate_v3(conn: sqlite3.Connection) -> int:
             )
         changed += 1
 
-    # translations PK is (tag, lang).
-    rows = conn.execute(
-        "SELECT tag, lang, text FROM translations WHERE tag LIKE '%&%' OR text LIKE '%&%'"
-    ).fetchall()
-    for tag, lang, text in rows:
-        f_tag = unescape_html_entities(tag)
-        f_text = unescape_html_entities(text)
-        if (f_tag, f_text) == (tag, text):
-            continue
-        if f_tag != tag and conn.execute(
-            "SELECT 1 FROM translations WHERE tag = ? AND lang = ?", (f_tag, lang)
-        ).fetchone():
-            conn.execute("DELETE FROM translations WHERE tag = ? AND lang = ?", (tag, lang))
-        else:
-            conn.execute(
-                "UPDATE translations SET tag = ?, text = ? WHERE tag = ? AND lang = ?",
-                (f_tag, f_text, tag, lang),
-            )
-        changed += 1
-
     if changed:
         # The contentless FTS index holds the escaped names; it must be rebuilt.
         from .snapshots import rebuild_fts  # local import: snapshots imports this module
         rebuild_fts(conn)
     return changed
+
+
+def _migrate_v4(conn: sqlite3.Connection) -> None:
+    """Remove non-English content and rebuild FTS from canonical names + aliases."""
+    conn.execute("DROP TABLE IF EXISTS translations")
+    conn.execute("UPDATE artist_versions SET other_names = NULL WHERE other_names IS NOT NULL")
+    conn.execute("INSERT INTO tags_fts(tags_fts) VALUES('delete-all')")
+    rows = conn.execute("""
+        SELECT t.id, t.name, COALESCE(GROUP_CONCAT(a.alias, ' '), '')
+        FROM tags t
+        LEFT JOIN aliases a ON a.canonical = t.name
+        GROUP BY t.id
+    """).fetchall()
+    conn.executemany(
+        "INSERT INTO tags_fts(rowid, name, aliases_text) VALUES (?, ?, ?)", rows
+    )
 
 
 def migrate(conn: sqlite3.Connection) -> None:
@@ -323,4 +314,6 @@ def migrate(conn: sqlite3.Connection) -> None:
         _migrate_v2(conn)
     if ver < 3:
         _migrate_v3(conn)
+    if ver < 4:
+        _migrate_v4(conn)
     conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")

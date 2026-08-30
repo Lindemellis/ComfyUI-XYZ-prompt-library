@@ -40,6 +40,11 @@ _KEY_PROMPT = "prompt"          # ComfyUI: API workflow JSON (executable form)
 _KEY_WORKFLOW = "workflow"      # ComfyUI: UI graph JSON (download target)
 _KEY_PARAMETERS = "parameters"  # A1111-style human-readable text
 
+_KEY_NAI_SOFTWARE = "Software"
+_KEY_NAI_SOURCE = "Source"
+_KEY_NAI_DESCRIPTION = "Description"
+_KEY_NAI_COMMENT = "Comment"
+
 _KEY_XYZ_TAGS = "xyz_gallery.tags"
 _KEY_XYZ_FAVORITE = "xyz_gallery.favorite"
 
@@ -132,6 +137,10 @@ class ComfyMeta:
     has_workflow: bool = False
     tags: Optional[str] = None
     favorite: Optional[str] = None
+    # Compact, normalized provider-specific detail data.  A JSON string keeps
+    # this frozen DTO hashable while allowing structured character prompts to
+    # survive the index → SQLite → detail API pipeline.
+    generation_data_json: Optional[str] = None
     errors: Tuple[str, ...] = ()
 
 
@@ -163,16 +172,28 @@ def read_comfy_metadata(path) -> ComfyMeta:
     if chunks is None:
         return ComfyMeta(errors=tuple(errors))
 
-    workflow_obj = _parse_json_chunk(chunks, _KEY_PROMPT, errors)
-    if workflow_obj is None:
-        workflow_obj = _parse_json_chunk(chunks, _KEY_WORKFLOW, errors)
+    # A NovelAI PNG can later acquire ComfyUI chunks when it passes through a
+    # workflow.  Its native signed generation data remains the authoritative
+    # description of how the underlying image was generated, so detect it
+    # before the generic ComfyUI/A1111 fallbacks.
+    derived = _derive_from_novelai(chunks, errors)
+    if not derived:
+        workflow_obj = _parse_json_chunk(chunks, _KEY_PROMPT, errors)
+        if workflow_obj is None:
+            workflow_obj = _parse_json_chunk(chunks, _KEY_WORKFLOW, errors)
 
-    derived: dict[str, Any] = {}
-    if isinstance(workflow_obj, Mapping):
-        derived = _derive_from_workflow(workflow_obj)
+        if isinstance(workflow_obj, Mapping):
+            # Danbooru-Gallery's SaveImagePlus serialises only the UI graph,
+            # not ComfyUI's executable ``prompt`` object.  When its input is
+            # GenerateNAID the native NovelAI PNG chunks have already been
+            # lost at the IMAGE-tensor boundary, so the UI graph is the only
+            # surviving source for the NAI request and character structure.
+            derived = _derive_from_novelai_ui_workflow(workflow_obj)
+            if not derived:
+                derived = _derive_from_workflow(workflow_obj)
 
-    if not derived and _KEY_PARAMETERS in chunks:
-        derived = _derive_from_parameters(str(chunks[_KEY_PARAMETERS]))
+        if not derived and _KEY_PARAMETERS in chunks:
+            derived = _derive_from_parameters(str(chunks[_KEY_PARAMETERS]))
 
     has_workflow = bool(chunks.get(_KEY_WORKFLOW))
 
@@ -191,8 +212,562 @@ def read_comfy_metadata(path) -> ComfyMeta:
         has_workflow=has_workflow,
         tags=str(tags_raw) if tags_raw is not None else None,
         favorite=str(favorite_raw) if favorite_raw is not None else None,
+        generation_data_json=_str_or_none(derived.get("generation_data_json")),
         errors=tuple(errors),
     )
+
+
+def _derive_from_novelai(
+    chunks: Mapping[str, str], errors: list[str]
+) -> dict[str, Any]:
+    """Extract NovelAI API generation data, including V4/V5 characters.
+
+    NovelAI's native PNG contract differs from both ComfyUI and A1111:
+    ``Software`` identifies the producer, ``Description`` carries the visible
+    prompt, and ``Comment`` is JSON with scalar generation settings plus the
+    structured ``v4_prompt`` / ``v4_negative_prompt`` captions used by V4 and
+    V5 multi-character generation.
+    """
+    software = str(chunks.get(_KEY_NAI_SOFTWARE) or "").strip()
+    source = str(chunks.get(_KEY_NAI_SOURCE) or "").strip()
+    if "novelai" not in software.casefold() and "novelai" not in source.casefold():
+        return {}
+
+    comment: Mapping[str, Any] = {}
+    raw_comment = chunks.get(_KEY_NAI_COMMENT)
+    if raw_comment:
+        try:
+            parsed = json.loads(str(raw_comment))
+            if isinstance(parsed, Mapping):
+                comment = parsed
+            else:
+                errors.append("NovelAI Comment is not a JSON object")
+        except (TypeError, ValueError) as exc:
+            errors.append(f"NovelAI Comment is not valid JSON: {exc!s}")
+
+    positive_block = _novelai_caption_block(comment.get("v4_prompt"))
+    negative_block = _novelai_caption_block(comment.get("v4_negative_prompt"))
+    positive_caption = positive_block.get("caption") or {}
+    negative_caption = negative_block.get("caption") or {}
+
+    positive = (
+        _nonempty_text(positive_caption.get("base_caption"))
+        or _nonempty_text(comment.get("prompt"))
+        or _nonempty_text(chunks.get(_KEY_NAI_DESCRIPTION))
+    )
+    negative = (
+        _nonempty_text(negative_caption.get("base_caption"))
+        or _nonempty_text(comment.get("uc"))
+    )
+    model = _nonempty_text(comment.get("model_name")) or _novelai_model_from_source(source)
+
+    generation = {
+        "provider": "novelai",
+        "positive": {
+            "use_coords": bool(positive_block.get("use_coords", False)),
+            "use_order": bool(positive_block.get("use_order", False)),
+        },
+        "negative": {
+            "use_coords": bool(negative_block.get("use_coords", False)),
+            "use_order": bool(negative_block.get("use_order", False)),
+        },
+        "characters": _novelai_character_prompts(
+            positive_caption.get("char_captions"),
+            negative_caption.get("char_captions"),
+        ),
+    }
+
+    out: dict[str, Any] = {
+        "generation_data_json": json.dumps(
+            generation, ensure_ascii=False, separators=(",", ":")
+        )
+    }
+    for key, value in (
+        ("positive_prompt", positive),
+        ("negative_prompt", negative),
+        ("model", model),
+        ("seed", comment.get("seed")),
+        ("cfg", comment.get("scale")),
+        ("steps", comment.get("steps")),
+        ("sampler", comment.get("sampler")),
+        ("scheduler", comment.get("noise_schedule")),
+    ):
+        if value is not None and value != "":
+            out[key] = value
+    return out
+
+
+def _novelai_caption_block(value: Any) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping):
+        return {}
+    caption = value.get("caption")
+    if not isinstance(caption, Mapping):
+        caption = {}
+    return {
+        "caption": caption,
+        "use_coords": value.get("use_coords", False),
+        "use_order": value.get("use_order", False),
+    }
+
+
+def _nonempty_text(value: Any) -> Optional[str]:
+    if not isinstance(value, str):
+        return None
+    return value if value.strip() else None
+
+
+def _novelai_model_from_source(source: str) -> Optional[str]:
+    value = _nonempty_text(source)
+    if value is None:
+        return None
+    # Native Source is commonly ``NovelAI Diffusion V5 0ADF9AB7``.  The
+    # trailing eight-hex build hash is useful for integrity but not the model
+    # name shown or filtered by Gallery.
+    return re.sub(r"\s+[0-9A-Fa-f]{8}$", "", value).strip() or None
+
+
+def _novelai_character_prompts(
+    positive_value: Any, negative_value: Any
+) -> list[dict[str, Any]]:
+    positive = positive_value if isinstance(positive_value, list) else []
+    negative = negative_value if isinstance(negative_value, list) else []
+    characters: list[dict[str, Any]] = []
+    for index in range(max(len(positive), len(negative))):
+        pos = positive[index] if index < len(positive) else {}
+        neg = negative[index] if index < len(negative) else {}
+        pos = pos if isinstance(pos, Mapping) else {}
+        neg = neg if isinstance(neg, Mapping) else {}
+        pos_text = _nonempty_text(pos.get("char_caption"))
+        neg_text = _nonempty_text(neg.get("char_caption"))
+        if pos_text is None and neg_text is None:
+            continue
+        centers = _novelai_centers(pos.get("centers") or neg.get("centers"))
+        characters.append({
+            "index": index + 1,
+            "positive_prompt": pos_text,
+            "negative_prompt": neg_text,
+            "centers": centers,
+        })
+    return characters
+
+
+def _novelai_centers(value: Any) -> list[dict[str, float]]:
+    if not isinstance(value, list):
+        return []
+    centers: list[dict[str, float]] = []
+    for center in value:
+        if not isinstance(center, Mapping):
+            continue
+        x = center.get("x")
+        y = center.get("y")
+        if (
+            isinstance(x, (int, float)) and not isinstance(x, bool)
+            and isinstance(y, (int, float)) and not isinstance(y, bool)
+        ):
+            centers.append({"x": float(x), "y": float(y)})
+    return centers
+
+
+def _derive_from_novelai_ui_workflow(workflow: Mapping[str, Any]) -> dict[str, Any]:
+    """Recover NAIDGenerator data from a ComfyUI UI workflow graph.
+
+    ``ComfyUI_NAIDGenerator.GenerateNAID`` receives only strings and scalar
+    widgets, plus an ``NAID_OPTION`` chain for model and per-character data.
+    That makes the request reconstructable from a UI graph even after a
+    generic save node has decoded and re-encoded the native NovelAI PNG.
+
+    The reader deliberately recognises only this named node family.  Generic
+    UI workflows remain on the executable-prompt/A1111 paths below rather
+    than guessing values from arbitrary widget positions.
+    """
+    raw_nodes = workflow.get("nodes")
+    raw_links = workflow.get("links")
+    if not isinstance(raw_nodes, list) or not isinstance(raw_links, list):
+        return {}
+
+    nodes: dict[str, Mapping[str, Any]] = {
+        str(node.get("id")): node
+        for node in raw_nodes
+        if isinstance(node, Mapping) and node.get("id") is not None
+    }
+    generators = [
+        node for node in nodes.values()
+        if str(node.get("type") or "") == "GenerateNAID"
+    ]
+    if not generators:
+        return {}
+
+    # A saved image is normally fed by one GenerateNAID.  If a graph contains
+    # several, prefer the last visual node: ComfyUI node ids increase as nodes
+    # are created, and SaveImagePlus itself does not retain the IMAGE link in
+    # a form that can identify which generator produced a historical tensor.
+    generator = generators[-1]
+    link_sources: dict[str, tuple[str, int]] = {}
+    for link in raw_links:
+        if not isinstance(link, list) or len(link) < 5:
+            continue
+        try:
+            source_slot = int(link[2])
+        except (TypeError, ValueError):
+            source_slot = 0
+        link_sources[str(link[0])] = (str(link[1]), source_slot)
+
+    graph = _NovelAIUIGraph(nodes, link_sources)
+    widgets = _ui_widgets(generator)
+    positive = graph.input_text(generator, "positive")
+    negative = graph.input_text(generator, "negative")
+    if positive is None:
+        positive = _ui_widget_text(widgets, 3)
+    if negative is None:
+        negative = _ui_widget_text(widgets, 4)
+
+    option_source = graph.input_source(generator, "option")
+    options = graph.nai_options(option_source)
+    characters = options.get("characters")
+    if not isinstance(characters, list):
+        characters = []
+    use_coords = any(bool(char.get("use_position")) for char in characters)
+    use_order = any(bool(char.get("use_order")) for char in characters)
+
+    normalized_characters: list[dict[str, Any]] = []
+    for index, character in enumerate(characters, start=1):
+        item = {
+            "index": index,
+            "positive_prompt": character.get("positive_prompt"),
+            "negative_prompt": character.get("negative_prompt"),
+            "centers": [{
+                "x": character.get("x", 0.5),
+                "y": character.get("y", 0.5),
+            }],
+        }
+        normalized_characters.append(item)
+
+    generation = {
+        "provider": "novelai",
+        "workflow_reader_version": 2,
+        "positive": {"use_coords": use_coords, "use_order": use_order},
+        "negative": {"use_coords": use_coords, "use_order": use_order},
+        "characters": normalized_characters,
+    }
+    out: dict[str, Any] = {
+        "model": options.get("model") or "nai-diffusion-4-5-full",
+        "generation_data_json": json.dumps(
+            generation, ensure_ascii=False, separators=(",", ":")
+        ),
+    }
+    for key, value in (
+        ("positive_prompt", positive),
+        ("negative_prompt", negative),
+        ("steps", _ui_widget(widgets, 5)),
+        ("cfg", _ui_widget(widgets, 6)),
+        ("sampler", _ui_widget(widgets, 10)),
+        ("scheduler", _ui_widget(widgets, 11)),
+        ("seed", _ui_widget(widgets, 12)),
+    ):
+        if value is not None and value != "":
+            out[key] = value
+    return out
+
+
+class _NovelAIUIGraph:
+    """Small, pure resolver for the UI-graph subset feeding GenerateNAID."""
+
+    def __init__(
+        self,
+        nodes: Mapping[str, Mapping[str, Any]],
+        link_sources: Mapping[str, tuple[str, int]],
+    ) -> None:
+        self.nodes = nodes
+        self.link_sources = link_sources
+        self.set_nodes: dict[str, Mapping[str, Any]] = {}
+        for node in nodes.values():
+            if str(node.get("type") or "") != "SetNode":
+                continue
+            key = _ui_widget_text(_ui_widgets(node), 0)
+            if key is not None:
+                self.set_nodes[key] = node
+
+    def input_source(
+        self, node: Mapping[str, Any], name: str
+    ) -> Optional[tuple[Mapping[str, Any], int]]:
+        inputs = node.get("inputs")
+        if not isinstance(inputs, list):
+            return None
+        for item in inputs:
+            if not isinstance(item, Mapping) or str(item.get("name")) != name:
+                continue
+            link_id = item.get("link")
+            if link_id is None:
+                return None
+            source = self.link_sources.get(str(link_id))
+            if source is None:
+                return None
+            source_node = self.nodes.get(source[0])
+            if source_node is not None:
+                return source_node, source[1]
+        return None
+
+    def first_input_source(
+        self, node: Mapping[str, Any]
+    ) -> Optional[tuple[Mapping[str, Any], int]]:
+        inputs = node.get("inputs")
+        if not isinstance(inputs, list):
+            return None
+        for item in inputs:
+            if not isinstance(item, Mapping) or item.get("link") is None:
+                continue
+            source = self.link_sources.get(str(item.get("link")))
+            if source is None:
+                continue
+            source_node = self.nodes.get(source[0])
+            if source_node is not None:
+                return source_node, source[1]
+        return None
+
+    def alias_source(
+        self, node: Mapping[str, Any]
+    ) -> Optional[tuple[Mapping[str, Any], int]]:
+        key = _ui_widget_text(_ui_widgets(node), 0)
+        setter = self.set_nodes.get(key or "")
+        return self.first_input_source(setter) if setter is not None else None
+
+    def input_text(self, node: Mapping[str, Any], name: str) -> Optional[str]:
+        return self.text(self.input_source(node, name))
+
+    def text(
+        self,
+        source: Optional[tuple[Mapping[str, Any], int]],
+        *,
+        depth: int = 0,
+        seen: Optional[set[str]] = None,
+    ) -> Optional[str]:
+        if source is None or depth > 24:
+            return None
+        node, slot = source
+        node_id = str(node.get("id"))
+        visited = set() if seen is None else set(seen)
+        if node_id in visited:
+            return None
+        visited.add(node_id)
+        node_type = str(node.get("type") or "")
+
+        if _ui_node_is_bypassed(node):
+            return self.text(
+                self.first_input_source(node), depth=depth + 1, seen=visited
+            )
+        if node_type == "GetNode":
+            return self.text(self.alias_source(node), depth=depth + 1, seen=visited)
+        if node_type == "SetNode" or "Reroute" in node_type:
+            return self.text(
+                self.first_input_source(node), depth=depth + 1, seen=visited
+            )
+        if node_type == "PromptToNAID":
+            value = self.input_text(node, "text")
+            if value is None:
+                return None
+            widgets = _ui_widgets(node)
+            weight = _ui_widget(widgets, 0)
+            mode = _ui_widget_text(widgets, 1) or "brace"
+            try:
+                brace_weight = float(weight) if weight is not None else 0.05
+            except (TypeError, ValueError):
+                brace_weight = 0.05
+            return _prompt_to_nai(value, brace_weight, mode)
+
+        widgets = _ui_widgets(node)
+        if node_type.startswith("XYZ Prompt Library V3"):
+            return _plv3_ui_output(widgets, slot)
+        value = _ui_widget_text(widgets, 0)
+        if value is not None:
+            return value
+        return self.text(
+            self.first_input_source(node), depth=depth + 1, seen=visited
+        )
+
+    def nai_options(
+        self,
+        source: Optional[tuple[Mapping[str, Any], int]],
+        *,
+        depth: int = 0,
+        seen: Optional[set[str]] = None,
+    ) -> dict[str, Any]:
+        if source is None or depth > 32:
+            return {}
+        node, _slot = source
+        node_id = str(node.get("id"))
+        visited = set() if seen is None else set(seen)
+        if node_id in visited:
+            return {}
+        visited.add(node_id)
+        node_type = str(node.get("type") or "")
+
+        if _ui_node_is_bypassed(node):
+            # LiteGraph mode 4 preserves the visual links but ComfyUI executes
+            # the node as a transparent pass-through.  Follow its option input
+            # so upstream model/settings survive, without applying this node's
+            # own model or character payload.
+            passthrough = self.input_source(node, "option")
+            if passthrough is None:
+                passthrough = self.first_input_source(node)
+            return self.nai_options(
+                passthrough, depth=depth + 1, seen=visited
+            )
+        if node_type == "GetNode":
+            return self.nai_options(
+                self.alias_source(node), depth=depth + 1, seen=visited
+            )
+        if node_type == "SetNode" or "Reroute" in node_type:
+            return self.nai_options(
+                self.first_input_source(node), depth=depth + 1, seen=visited
+            )
+
+        upstream = self.nai_options(
+            self.input_source(node, "option"), depth=depth + 1, seen=visited
+        )
+        result = {
+            "model": upstream.get("model"),
+            "characters": list(upstream.get("characters") or []),
+        }
+        widgets = _ui_widgets(node)
+        if node_type == "ModelOptionNAID":
+            model = _ui_widget_text(widgets, 0)
+            if model:
+                result["model"] = model
+        elif node_type == "CharacterPromptOptionNAID":
+            positive = self.input_text(node, "positive")
+            negative = self.input_text(node, "negative")
+            if positive is None:
+                positive = _ui_widget_text(widgets, 0)
+            if negative is None:
+                negative = _ui_widget_text(widgets, 1)
+            result["characters"].append({
+                "positive_prompt": positive,
+                "negative_prompt": negative,
+                "use_position": bool(_ui_widget(widgets, 2)),
+                "x": _ui_number(_ui_widget(widgets, 3), 0.5),
+                "y": _ui_number(_ui_widget(widgets, 4), 0.5),
+                "use_order": bool(_ui_widget(widgets, 5)),
+            })
+        return result
+
+
+def _ui_widgets(node: Mapping[str, Any]) -> list[Any]:
+    values = node.get("widgets_values")
+    return values if isinstance(values, list) else []
+
+
+def _ui_node_is_bypassed(node: Mapping[str, Any]) -> bool:
+    try:
+        return int(node.get("mode", 0)) == 4
+    except (TypeError, ValueError):
+        return False
+
+
+def _ui_widget(values: list[Any], index: int) -> Any:
+    return values[index] if 0 <= index < len(values) else None
+
+
+def _ui_widget_text(values: list[Any], index: int) -> Optional[str]:
+    value = _ui_widget(values, index)
+    return value if isinstance(value, str) else None
+
+
+def _ui_number(value: Any, default: float) -> float:
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return default
+
+
+def _plv3_ui_output(widgets: list[Any], output_slot: int) -> str:
+    """Reproduce a PLv3 node output stored upstream of GenerateNAID.
+
+    The editor's text is source syntax, while NovelAI received the compiled
+    prompt-control string.  Compile lazily so Gallery still imports cleanly in
+    installations where the PLv3 module has been removed; the source text is a
+    safe fallback for such historical workflows.
+    """
+    text = _ui_widget_text(widgets, 0) or ""
+    seed_value = _ui_widget(widgets, 1)
+    region_mode = _ui_widget_text(widgets, 3) or "couple"
+    doc = _ui_widget_text(widgets, 4) or ""
+    try:
+        seed = int(seed_value) if seed_value is not None else 0
+    except (TypeError, ValueError):
+        seed = 0
+    try:
+        from prompt_library_v3.compile import compile_text
+        from prompt_library_v3.node import source_text
+
+        source = source_text(text, doc)
+        return compile_text(
+            source,
+            seed=seed,
+            region_mode=region_mode,
+            ignore_regions=(output_slot == 1),
+        ).text
+    except Exception:  # noqa: BLE001 - metadata extraction must stay tolerant
+        return text
+
+
+def _prompt_to_nai(prompt: str, weight_per_brace: float, syntax_mode: str) -> str:
+    """Mirror ComfyUI_NAIDGenerator's pure PromptToNAID conversion."""
+    protected = prompt.replace("\\(", "（").replace("\\)", "）")
+    result = _prompt_stack_to_nai(
+        _prompt_to_stack(protected), weight_per_brace, syntax_mode
+    )
+    return result.replace("（", "(").replace("）", ")")
+
+
+def _prompt_to_stack(sentence: str) -> list[Any]:
+    result: list[Any] = []
+    current = ""
+    stack: list[dict[str, Any]] = [{"weight": 1.0, "data": result}]
+    for char in sentence:
+        if char == "(":
+            if current:
+                stack[-1]["data"].append(current)
+            child: dict[str, Any] = {"weight": 1.0, "data": []}
+            stack[-1]["data"].append(child)
+            stack.append(child)
+            current = ""
+        elif char == ")":
+            match = re.search(r"^(.*):(-?[0-9.]+)$", current)
+            body, weight = match.groups() if match else (current, "1.1")
+            if body:
+                stack[-1]["data"].append(body)
+            stack[-1]["weight"] = float(weight)
+            if len(stack) > 1:
+                stack.pop()
+            current = ""
+        else:
+            current += char
+    if current:
+        stack[-1]["data"].append(current)
+    return result
+
+
+def _prompt_stack_to_nai(
+    values: list[Any], weight_per_brace: float, syntax_mode: str
+) -> str:
+    result = ""
+    for value in values:
+        if not isinstance(value, Mapping):
+            result += str(value)
+            continue
+        weight = _ui_number(value.get("weight"), 1.0)
+        nested = value.get("data")
+        prompt = _prompt_stack_to_nai(
+            nested if isinstance(nested, list) else [], weight_per_brace, syntax_mode
+        )
+        mode = "numeric" if weight < 0 else syntax_mode
+        if mode == "numeric":
+            result += f"{weight:g}::{prompt} ::"
+        else:
+            step = weight_per_brace if weight_per_brace > 0 else 0.05
+            count = round((weight - 1.0) / step)
+            result += "{" * count + "[" * -count + prompt + "}" * count + "]" * -count
+    return result
 
 
 def _open_video_tags(p: Path, errors: list[str]) -> Optional[dict[str, str]]:

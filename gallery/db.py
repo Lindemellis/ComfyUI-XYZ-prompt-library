@@ -340,10 +340,31 @@ def _migrate_v8(conn: sqlite3.Connection) -> None:
     )
 
 
+# -- Schema v9 — structured provider metadata (NovelAI multi-character) ----
+
+
+def _migrate_v9(conn: sqlite3.Connection) -> None:
+    """Add normalized provider-specific generation detail JSON.
+
+    Scalar fields (model, seed, sampler, prompts, etc.) continue to use their
+    indexed first-class columns.  Only structure that cannot be flattened —
+    currently NovelAI's paired per-character positive/negative captions and
+    coordinates — lives in this JSON column.
+
+    Existing rows remain NULL.  Their files are deliberately not read during
+    startup migration; Settings → Re-read missing metadata uses the normal
+    background indexer for that backfill.
+    """
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(image)")}
+    if "generation_data_json" not in columns:
+        conn.execute("ALTER TABLE image ADD COLUMN generation_data_json TEXT")
+
+
 # -- Migration framework ----------------------------------------------------
 
 # Forward-only ledger. ``6`` = word_token / image_word_token (§11 F04 word);
-# ``7`` = image.steps; ``8`` = media_kind + video columns.
+# ``7`` = image.steps; ``8`` = media_kind + video columns;
+# ``9`` = normalized provider-specific generation detail JSON.
 # FTS5 / T28 will append later steps (see module docstring).
 MIGRATIONS: Dict[int, Callable[[sqlite3.Connection], None]] = {
     1: _migrate_v1,
@@ -354,6 +375,7 @@ MIGRATIONS: Dict[int, Callable[[sqlite3.Connection], None]] = {
     6: _migrate_v6,
     7: _migrate_v7,
     8: _migrate_v8,
+    9: _migrate_v9,
 }
 
 SCHEMA_VERSION: int = max(MIGRATIONS)

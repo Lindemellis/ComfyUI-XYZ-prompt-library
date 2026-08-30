@@ -26,9 +26,9 @@ It stores `doc_json` alongside the text because the DOCUMENT is the truth: an it
 you switched off is by design nowhere in the text, so a text-only snapshot would
 silently drop every disabled item the moment it was saved.
 
-Note what is NOT here: an item's enabled flag.  "The text is the truth" (spec §5.2)
-— an item is enabled iff it appears in the document, so storing it would create a
-second source of truth, which is exactly the trap PLv2 fell into.
+Library-group items have no standalone enabled flag: preset membership and ordering
+live in the preset whitelist. Whole documents are different and keep their enabled
+state in `documents.doc_json`.
 """
 from __future__ import annotations
 

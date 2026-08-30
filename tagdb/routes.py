@@ -49,6 +49,8 @@ _maintain_stop_event: Optional[threading.Event] = None
 _maintain_log: List[str] = []
 _maintain_running: bool = False
 _maintain_mode: Optional[str] = None
+# Protects the task-state transition independently from the DB writer lock.
+_maintain_state_lock = threading.Lock()
 # Serialises any writer to the working DB (updates, related-cache refresh).
 _maintain_lock = threading.Lock()
 
@@ -353,15 +355,12 @@ async def _handle_settings_get(request: web.Request) -> web.Response:
     s = _load_settings()
     has_key = bool(s.get("danbooru_api_key"))
     has_gel_key = bool(s.get("gelbooru_api_key"))
-    # api_key is masked by default; ?reveal=1 returns the real value so the panel's
-    # "Show" button can display the user's own stored key (localhost, single user).
-    reveal = request.rel_url.query.get("reveal") in ("1", "true")
     return _ok({
         "danbooru_login":   s.get("danbooru_login", ""),
-        "danbooru_api_key": (s.get("danbooru_api_key", "") if reveal else ("***" if has_key else "")),
+        "danbooru_api_key": "***" if has_key else "",
         "has_credentials":  bool(s.get("danbooru_login") and has_key),
         "gelbooru_user_id": s.get("gelbooru_user_id", ""),
-        "gelbooru_api_key": (s.get("gelbooru_api_key", "") if reveal else ("***" if has_gel_key else "")),
+        "gelbooru_api_key": "***" if has_gel_key else "",
         "has_gelbooru_credentials": bool(s.get("gelbooru_user_id") and has_gel_key),
         "gelbooru_installed": bool(_gelbooru_active_db()),
     })
@@ -387,15 +386,33 @@ async def _handle_settings_post(request: web.Request) -> web.Response:
 
 
 def _start_maintain_thread(name: str, target, mode: Optional[str], first_log: str,
-                           stop_event: "threading.Event") -> None:
-    """Spawn the single maintenance worker thread (guarded by _maintain_running)."""
+                           stop_event: "threading.Event") -> bool:
+    """Atomically claim and spawn the single maintenance worker thread."""
     global _maintain_thread, _maintain_stop_event, _maintain_log, _maintain_running, _maintain_mode
-    _maintain_log = [first_log]
-    _maintain_running = True
-    _maintain_mode = mode
-    _maintain_stop_event = stop_event
-    _maintain_thread = threading.Thread(target=target, daemon=True, name=name)
-    _maintain_thread.start()
+    with _maintain_state_lock:
+        if _maintain_running:
+            return False
+        _maintain_log = [first_log]
+        _maintain_running = True
+        _maintain_mode = mode
+        _maintain_stop_event = stop_event
+
+    def _run_and_release() -> None:
+        global _maintain_running
+        try:
+            target()
+        finally:
+            with _maintain_state_lock:
+                _maintain_running = False
+
+    _maintain_thread = threading.Thread(target=_run_and_release, daemon=True, name=name)
+    try:
+        _maintain_thread.start()
+    except Exception:
+        with _maintain_state_lock:
+            _maintain_running = False
+        raise
+    return True
 
 
 async def _handle_maintain_start(request: web.Request) -> web.Response:
@@ -422,17 +439,15 @@ async def _handle_maintain_start(request: web.Request) -> web.Response:
     working = _working_db_path
 
     def _run() -> None:
-        global _maintain_running, _active_snapshot_path
+        global _active_snapshot_path
         from . import updater as _up
         log = _maintain_log.append
         try:
             with _maintain_lock:
-                # Incremental now refreshes post_count + artist translations.
                 if mode == "full":
                     _up.run_full_update(working, min_post_count=min_post_count,
                                         login=login, api_key=api_key,
                                         with_versions=True,
-                                        with_artist_names=True,
                                         progress_cb=log, stop_event=stop_ev)
                 else:
                     _up.run_incremental_update(working, min_post_count=min_post_count,
@@ -448,12 +463,13 @@ async def _handle_maintain_start(request: web.Request) -> web.Response:
         except Exception as exc:
             log(f"Error: {exc}")
             logger.exception("Maintain (%s) failed", mode)
-        finally:
-            _maintain_running = False
-
-    _start_maintain_thread("tagdb-maintain", _run, mode,
-                           f"[{mode}] starting (min_post_count={min_post_count}, "
-                           f"auth={'yes' if login else 'anonymous'})...", stop_ev)
+    started = _start_maintain_thread(
+        "tagdb-maintain", _run, mode,
+        f"[{mode}] starting (min_post_count={min_post_count}, "
+        f"auth={'yes' if login else 'anonymous'})...", stop_ev,
+    )
+    if not started:
+        return _err(409, "a maintenance task is already running")
     return _ok({"ok": True, "mode": mode, "message": "maintain started"})
 
 
@@ -497,7 +513,7 @@ async def _handle_reconstruct(request: web.Request) -> web.Response:
     src = _working_db_path
 
     def _run() -> None:
-        global _maintain_running, _active_snapshot_path
+        global _active_snapshot_path
         from . import updater as _up
         log = _maintain_log.append
         try:
@@ -510,12 +526,12 @@ async def _handle_reconstruct(request: web.Request) -> web.Response:
         except Exception as exc:
             log(f"Error: {exc}")
             logger.exception("Reconstruct failed")
-        finally:
-            _maintain_running = False
-
-    _start_maintain_thread("tagdb-reconstruct", _run, "reconstruct",
-                           f"[reconstruct] building vocabulary as of {date_str}...",
-                           threading.Event())
+    started = _start_maintain_thread(
+        "tagdb-reconstruct", _run, "reconstruct",
+        f"[reconstruct] building vocabulary as of {date_str}...", threading.Event(),
+    )
+    if not started:
+        return _err(409, "a maintenance task is already running")
     return _ok({"ok": True, "message": "reconstruct started"})
 
 
@@ -645,7 +661,7 @@ async def _handle_official_download(request: web.Request) -> web.Response:
     data_dir = _data_dir
 
     def _run() -> None:
-        global _maintain_running, _search_conn
+        global _search_conn
         from . import distribution as _dist
         log = _maintain_log.append
         try:
@@ -672,11 +688,12 @@ async def _handle_official_download(request: web.Request) -> web.Response:
         except Exception as exc:
             log(f"Error: {exc}")
             logger.exception("Official download failed")
-        finally:
-            _maintain_running = False
-
-    _start_maintain_thread("tagdb-download", _run, "download",
-                           "[download] fetching official dataset...", threading.Event())
+    started = _start_maintain_thread(
+        "tagdb-download", _run, "download",
+        "[download] fetching official dataset...", threading.Event(),
+    )
+    if not started:
+        return _err(409, "a maintenance task is already running")
     return _ok({"ok": True, "message": "download started"})
 
 
@@ -819,7 +836,6 @@ async def _handle_gelbooru_download(request: web.Request) -> web.Response:
     gel_path = _gelbooru_db_path
 
     def _run() -> None:
-        global _maintain_running
         from . import distribution as _dist
         log = _maintain_log.append
         try:
@@ -834,11 +850,12 @@ async def _handle_gelbooru_download(request: web.Request) -> web.Response:
         except Exception as exc:
             log(f"Error: {exc}")
             logger.exception("Gelbooru download failed")
-        finally:
-            _maintain_running = False
-
-    _start_maintain_thread("tagdb-gelbooru-download", _run, "gelbooru-download",
-                           "[gelbooru] downloading dataset...", threading.Event())
+    started = _start_maintain_thread(
+        "tagdb-gelbooru-download", _run, "gelbooru-download",
+        "[gelbooru] downloading dataset...", threading.Event(),
+    )
+    if not started:
+        return _err(409, "a maintenance task is already running")
     return _ok({"ok": True, "message": "gelbooru download started"})
 
 
@@ -864,7 +881,6 @@ async def _handle_gelbooru_build(request: web.Request) -> web.Response:
     gel_path = _gelbooru_db_path
 
     def _run() -> None:
-        global _maintain_running
         from . import snapshots as _snap
         log = _maintain_log.append
         try:
@@ -879,12 +895,12 @@ async def _handle_gelbooru_build(request: web.Request) -> web.Response:
         except Exception as exc:
             log(f"Error: {exc}")
             logger.exception("Gelbooru build failed")
-        finally:
-            _maintain_running = False
-
-    _start_maintain_thread("tagdb-gelbooru-build", _run, "gelbooru-build",
-                           f"[gelbooru] building (min_post_count={min_post_count})...",
-                           threading.Event())
+    started = _start_maintain_thread(
+        "tagdb-gelbooru-build", _run, "gelbooru-build",
+        f"[gelbooru] building (min_post_count={min_post_count})...", threading.Event(),
+    )
+    if not started:
+        return _err(409, "a maintenance task is already running")
     return _ok({"ok": True, "message": "gelbooru build started"})
 
 

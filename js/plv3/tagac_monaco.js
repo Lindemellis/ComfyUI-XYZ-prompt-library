@@ -2,13 +2,12 @@
 //
 // tagac already carries everything worth having: danbooru + gelbooru search, the D/G
 // badges that ARE the links to the wiki / posts, hover preview images, the artist's
-// recent works popup, related-tag ("联想") lookup, aliases, translations, category
+// recent works popup, related-tag ("联想") lookup, aliases, category
 // colours, the min-post-count filter, and the shared settings panel. Reimplementing
 // that on top of Monaco's suggest widget would be a worse copy — and Monaco's widget
 // cannot host an image or a clickable badge anyway.
 //
-// tagac was already written against a host ABSTRACTION (`el._xyzAcc`) so that PLv2's
-// contentEditable editor could reuse it. So all PLv3 needs is a second implementation
+// tagac is written against a host abstraction (`el._xyzAcc`). PLv3 provides an implementation
 // of that interface:
 //
 //     getValue()  getCaret()  getSelEnd()  splice(s, e, text)  caretCoords()
@@ -18,7 +17,7 @@
 // element, and a key tagac consumed (it calls preventDefault) is withheld from Monaco.
 //
 // `[` and `.set{}` completions stay with PLv3's own Monaco provider (complete.js) —
-// tagac is attached with `tagsOnly`, so it never offers PLv2's library refs here.
+// TagDB autocomplete never offers library refs; PLv3 owns its `[` completions.
 
 import { braceContextText } from './complete.js';
 
@@ -106,8 +105,8 @@ export async function attachTagAC(editor, container) {
     getDelimiter: () => ', ',
   });
 
-  // PLv3's `{ }` is a group body (prompt text — tags belong here), unlike PLv2's
-  // `{choice}`. Only a `.set{ … }` or a region container should withhold danbooru
+  // PLv3's `{ }` is a group body, so tags belong there. Only a `.set{ … }` or region
+  // container should withhold Danbooru
   // tags; the same brace-stack complete.js uses decides it, so the two never disagree.
   host._xyzSuppressTags = (text, pos) => braceContextText(text.slice(0, pos)) !== 'text';
 

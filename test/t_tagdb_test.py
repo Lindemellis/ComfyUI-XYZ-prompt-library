@@ -23,6 +23,30 @@ def _tmp_db() -> Path:
     return Path(tempfile.mkdtemp()) / "tagdb.sqlite"
 
 
+# ── HTTP session policy ──────────────────────────────────────────────────────
+
+def test_danbooru_session_uses_curl_identity_without_browser_impersonation(monkeypatch):
+    """Cloudflare currently blocks curl_cffi's browser fingerprints with 403.
+
+    The same libcurl transport succeeds when it identifies itself as curl.  Keep
+    every Danbooru caller (tag previews and the CDN proxy included) on that one
+    session policy rather than letting the hover-preview regression return.
+    """
+    captured = {}
+
+    class FakeRequests:
+        @staticmethod
+        def Session(**kwargs):
+            captured.update(kwargs)
+            return object()
+
+    monkeypatch.setattr(_sc, "_import_curl_cffi", lambda: FakeRequests)
+    _sc._make_session()
+
+    assert "impersonate" not in captured
+    assert captured["headers"]["User-Agent"].startswith("curl/")
+
+
 # ── migration ────────────────────────────────────────────────────────────────
 
 def test_migrate_v1_to_v2():
@@ -45,11 +69,56 @@ def test_migrate_v1_to_v2():
     meta = dict(conn.execute("SELECT key,value FROM meta"))
     assert meta["structure_synced_through"] == "1700000000"
     assert meta["full_count_synced_at"] == "1700000000"
-    # existing row backfilled to created_at
     pcs = conn.execute("SELECT post_count_synced_at FROM tags WHERE name='1girl'").fetchone()[0]
     assert pcs == 1700000000
-    _db.migrate(conn)  # idempotent
+    _db.migrate(conn)
     conn.close()
+
+
+def test_migrate_v4_removes_non_english_content_and_rebuilds_fts():
+    p = _tmp_db()
+    conn = _db.connect_write(p)
+    _db.migrate(conn)
+    conn.execute(
+        "INSERT INTO tags(name, category, post_count) VALUES('hatsune_miku', 4, 1000)"
+    )
+    tag_id = conn.execute(
+        "SELECT id FROM tags WHERE name='hatsune_miku'"
+    ).fetchone()[0]
+    conn.execute(
+        "INSERT INTO aliases(alias, canonical) VALUES('vocaloid_diva', 'hatsune_miku')"
+    )
+    conn.execute(
+        "INSERT INTO artist_versions(version_id, artist_id, name, other_names) "
+        "VALUES(1, 1, 'hatsune_miku', '初音未来')"
+    )
+    conn.execute(
+        "CREATE TABLE translations(tag_name TEXT, language TEXT, translation TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO translations VALUES('hatsune_miku', 'zh', '初音未来')"
+    )
+    conn.execute("INSERT INTO tags_fts(tags_fts) VALUES('delete-all')")
+    conn.execute(
+        "INSERT INTO tags_fts(rowid, name, aliases_text) VALUES(?, ?, ?)",
+        (tag_id, "hatsune_miku", "vocaloid_diva 初音未来"),
+    )
+    conn.execute("PRAGMA user_version = 3")
+
+    _db.migrate(conn)
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
+    assert conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='translations'"
+    ).fetchone() is None
+    assert conn.execute(
+        "SELECT other_names FROM artist_versions WHERE version_id=1"
+    ).fetchone()[0] is None
+    conn.close()
+
+    assert _repo.search_tags("初音未来", p, 10) == []
+    assert [r["name"] for r in _repo.search_tags("vocaloid_diva", p, 10)] == [
+        "hatsune_miku"
+    ]
 
 
 # ── full + incremental provenance ─────────────────────────────────────────────
@@ -159,19 +228,6 @@ def test_list_snapshots_kinds():
         c.close()
     kinds = {s["kind"] for s in _repo.list_snapshots(data_dir)}
     assert {"working", "official", "local"} <= kinds
-
-
-def test_translation_search():
-    from tagdb.snapshots import rebuild_fts
-    p = _tmp_db()
-    c = _db.connect_write(p); _db.migrate(c)
-    c.execute("INSERT INTO tags(name,category,post_count) VALUES('hakurei_reimu',4,500000)")
-    c.execute("INSERT INTO translations(tag,lang,text) VALUES('hakurei_reimu','other','博麗霊夢 霊夢 reimu')")
-    rebuild_fts(c); c.close()
-    for q in ["博麗霊夢", "霊夢", "reimu"]:
-        res = _repo.search_tags(q, p, limit=3)
-        assert res and res[0]["name"] == "hakurei_reimu", f"{q} -> {res}"
-        assert res[0]["translations"], "translations not returned"
 
 
 def test_reconstruct_as_of():

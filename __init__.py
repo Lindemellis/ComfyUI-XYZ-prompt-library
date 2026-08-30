@@ -1,4 +1,3 @@
-from .prompt_library_v2 import PromptLibraryV2PositiveNode, PromptLibraryV2NegativeNode
 from .prompt_library_v3 import PromptLibraryV3Node, PromptLibraryV3MonacoNode
 from .mask_nodes import XYZAttachMasks, XYZMaskEditor
 from .krita_nodes import (
@@ -14,8 +13,6 @@ from .inpaint_nodes import XYZInpaintStitchToRGBA
 
 
 NODE_CLASS_MAPPINGS = {
-    "XYZ Prompt Library V2 Positive": PromptLibraryV2PositiveNode,
-    "XYZ Prompt Library V2 Negative": PromptLibraryV2NegativeNode,
     "XYZ Prompt Library V3": PromptLibraryV3Node,
     "XYZ Prompt Library V3 Monaco": PromptLibraryV3MonacoNode,
     "XYZ Mask Editor": XYZMaskEditor,
@@ -34,8 +31,8 @@ WEB_DIRECTORY = "./js"
 __all__ = ["NODE_CLASS_MAPPINGS", "WEB_DIRECTORY"]
 
 
-# The gallery, the LLM assistant and the TagDB are all handed PromptServer.instance
-# below; the PLv2/PLv3/Krita/cache setups import it themselves.
+# The gallery and TagDB are handed PromptServer.instance below; the
+# PLv3/Krita/cache setups import it themselves.
 from server import PromptServer
 
 
@@ -46,23 +43,10 @@ except Exception as _xyz_gallery_err:
     print(f"[XYZ Gallery] setup failed, continuing without gallery: {_xyz_gallery_err!r}")
 
 try:
-    from .prompt_library_v2 import setup as _plv2_setup
-    _plv2_setup()
-except Exception as _plv2_err:
-    print(f"[PLv2] setup failed, continuing without PLv2: {_plv2_err!r}")
-
-try:
     from .prompt_library_v3 import setup as _plv3_setup
     _plv3_setup()
 except Exception as _plv3_err:
     print(f"[PLv3] setup failed, continuing without PLv3: {_plv3_err!r}")
-
-# LLM Prompt Assistant — must run AFTER PLv2 (reuses its DB + WriteQueue).
-try:
-    from .llm import setup as _llm_setup
-    _llm_setup(PromptServer.instance)
-except Exception as _llm_err:
-    print(f"[LLM] setup failed, continuing without LLM assistant: {_llm_err!r}")
 
 try:
     from .krita_nodes import setup as _krita_setup

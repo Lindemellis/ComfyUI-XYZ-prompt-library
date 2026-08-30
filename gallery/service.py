@@ -968,25 +968,28 @@ def resync_image(image_id: int, *, db_path: Path) -> _repo.ImageRecord:
 
 
 def backfill_missing_steps(*, db_path: Path) -> Dict[str, Any]:
-    """Re-read the metadata of every image that has no ``steps``.
+    """Queue a real indexer re-read for every incomplete generation record.
 
-    ``steps`` arrived in schema v7, so anything indexed before it is NULL — and the
-    value is in the PNG, not in anything the database already holds. This marks those
-    rows ``pending`` and lets the metadata sync worker do the reading: it already has
-    the retry policy, the backoff and the broadcasts, and it picks the rows up on its
-    own poll, so nothing here has to walk the disk or block the request.
+    ``steps`` arrived in schema v7 and provider structure in v9. The values live in
+    the source file, not the database, so the selected rows must pass through the
+    actual indexer with its fingerprint guard bypassed. The metadata-sync worker is
+    deliberately not used: its job is the opposite direction (DB favorite/tags → PNG).
 
     Manual on purpose (user's call, 2026-08-06): a migration must not spend minutes of
     disk re-reading a library while ComfyUI is trying to start.
     """
-    missing = _repo.count_missing_steps(db_path=db_path)
+    targets = _repo.list_missing_metadata_targets(db_path=db_path)
+    missing = len(targets)
     if missing == 0:
         return {"queued": 0, "missing": 0}
     wq = _write_queue_handle()
-    fut = wq.enqueue_write(_repo.LOW, _repo.ResyncMissingStepsOp())
-    queued = int(fut.result(timeout=60.0))
-    logger.info("backfill: marked %s image(s) for a metadata re-read", queued)
-    return {"queued": queued, "missing": missing}
+    from . import indexer as _indexer
+
+    _indexer.schedule_metadata_reread(
+        targets, db_path=db_path, write_queue=wq,
+    )
+    logger.info("backfill: queued %s image(s) for a metadata re-read", missing)
+    return {"queued": missing, "missing": missing}
 
 
 #: What "send to Krita" will convert on the way. Krita's bridge takes PNG bytes and

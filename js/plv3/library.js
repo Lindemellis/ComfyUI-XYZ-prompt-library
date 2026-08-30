@@ -20,7 +20,7 @@
 // the same editor (PromptEditor) with the same autocomplete. Two copies of that UI
 // would drift apart within a week, and the copy in here would be the worse one.
 
-import { DetailPane, notifyLibraryChanged } from './detail.js';
+import { DetailPane, normalizeGroupTag, notifyLibraryChanged } from './detail.js';
 import { PromptEditor } from './editor_core.js';
 import { settings } from './settings.js';
 import {
@@ -277,7 +277,7 @@ class LibraryWindow {
   }
 
   // --- folder tree (spec §8.4.1) ---
-  // Everything that acts on a row is in its right-click menu, as in PLv2's library
+  // Everything that acts on a row is in its right-click menu, keeping the tree compact.
   // window: "right-click the thing" beats "select it, then reach for a button up there".
   // The toolbar carries only what has no row to right-click — creating at the root, and
   // folding the whole tree.
@@ -937,7 +937,9 @@ class LibraryWindow {
         const box = input(item.text, { mono: item.kind === 'lora' });
         if (item.kind !== 'lora') attachAC(box);
         box.onchange = async () => {
-          await api.updateItem(item.id, { text: cleanItem(box.value) });
+          const text = item.kind === 'lora' ? cleanItem(box.value) : normalizeGroupTag(box.value);
+          box.value = text;
+          await api.updateItem(item.id, { text });
           await this.select(this.selected, this.preset?.id);
           this.notifyChanged(group.path);
         };
@@ -961,7 +963,9 @@ class LibraryWindow {
     const box = input('', { placeholder: 'new item — Enter to add' });
     attachAC(box);
     const commit = async () => {
-      const parts = splitItems(box.value);
+      const parts = splitItems(box.value)
+        .map((text) => text.startsWith('<lora:') ? cleanItem(text) : normalizeGroupTag(text))
+        .filter(Boolean);
       if (!parts.length) return;
       box.value = '';
       for (const text of parts) {

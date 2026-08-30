@@ -80,6 +80,7 @@ __all__ = [
     "list_images",
     "folder_tree",
     "neighbors",
+    "list_missing_metadata_targets",
     # T21 vocab read helpers
     "vocab_lookup",
     "list_models_for_vocab",
@@ -180,7 +181,8 @@ class UpsertImageOp:
                  indexed_at: int,
                  prompt_tokens: Optional[List[str]] = None,
                  word_tokens: Optional[List[str]] = None,
-                 normalized_tags: Optional[List[str]] = None):
+                 normalized_tags: Optional[List[str]] = None,
+                 generation_data_json: Optional[str] = None):
         self.path = path
         self.folder_id = folder_id
         self.root_path = root_path
@@ -210,6 +212,7 @@ class UpsertImageOp:
         self.steps = steps
         self.sampler = sampler
         self.scheduler = scheduler
+        self.generation_data_json = generation_data_json
         self.workflow_present = int(workflow_present)
         self.favorite = favorite
         self.tags_csv = tags_csv
@@ -245,6 +248,7 @@ class UpsertImageOp:
             "steps": self.steps,
             "sampler": self.sampler,
             "scheduler": self.scheduler,
+            "generation_data_json": self.generation_data_json,
             "workflow_present": self.workflow_present,
             "favorite": self.favorite,
             "tags_csv": self.tags_csv,
@@ -317,12 +321,14 @@ INSERT INTO image (
     width, height, media_kind, duration_ms, fps, has_audio, vcodec,
     file_size, mtime_ns, created_at,
     positive_prompt, negative_prompt, model, seed, cfg, steps, sampler, scheduler,
+    generation_data_json,
     workflow_present, favorite, tags_csv, indexed_at
 ) VALUES (
     :path, :folder_id, :relative_path, :filename, :filename_lc, :ext,
     :width, :height, :media_kind, :duration_ms, :fps, :has_audio, :vcodec,
     :file_size, :mtime_ns, :created_at,
     :positive_prompt, :negative_prompt, :model, :seed, :cfg, :steps, :sampler, :scheduler,
+    :generation_data_json,
     :workflow_present, :favorite, :tags_csv, :indexed_at
 )
 ON CONFLICT(path) DO UPDATE SET
@@ -349,6 +355,7 @@ ON CONFLICT(path) DO UPDATE SET
     steps            = excluded.steps,
     sampler          = excluded.sampler,
     scheduler        = excluded.scheduler,
+    generation_data_json = excluded.generation_data_json,
     workflow_present = excluded.workflow_present,
     favorite         = CASE
       WHEN image.metadata_sync_status IN ('pending', 'failed')
@@ -702,23 +709,45 @@ class ResyncMetadataOp:
 # neither, and those rows have a perfectly good ``steps`` — under the old
 # predicate they would never be revisited and would stay wrong forever.
 #
+# Native NovelAI PNGs carry neither ``workflow`` nor ``parameters``. Before
+# schema v9 they therefore landed as completely metadata-empty PNG rows. The
+# second branch lets the same explicit Settings action revisit those legacy
+# rows once the NovelAI reader exists. It is intentionally limited to PNGs
+# whose scalar generation fields are ALL empty, so ordinary partially parsed
+# A1111/ComfyUI rows do not get swept into the provider backfill.
+#
+# Workflow-derived NovelAI metadata carries a parser revision. Revision 2
+# learned that ComfyUI mode=4 nodes are bypassed: their links remain in the UI
+# workflow, but their character payload must not be displayed. The final branch
+# selects pre-v2 NovelAI rows once, even though all their scalar fields are
+# already populated. A successful re-read writes the marker and drops them from
+# this predicate.
+#
 # Re-reading a row that genuinely has no prompt is harmless (it is a manual
 # button and the read is idempotent); never revisiting one that could be fixed
 # is not.
 _NEEDS_METADATA_REREAD_SQL = (
-    "workflow_present = 1 AND ("
+    "((workflow_present = 1 AND ("
     "steps IS NULL OR model IS NULL OR seed IS NULL "
-    "OR sampler IS NULL OR positive_prompt IS NULL)"
+    "OR sampler IS NULL OR positive_prompt IS NULL)) OR ("
+    "media_kind = 'image' AND ext = 'png' "
+    "AND generation_data_json IS NULL "
+    "AND positive_prompt IS NULL AND negative_prompt IS NULL "
+    "AND model IS NULL AND seed IS NULL AND sampler IS NULL) OR ("
+    "workflow_present = 1 "
+    "AND generation_data_json LIKE '%\"provider\"%novelai%' "
+    "AND generation_data_json NOT LIKE "
+    "'%\"workflow_reader_version\"%2%'))"
 )
 
 
 class ResyncMissingStepsOp:
-    """Mark every image with derivable-but-missing metadata for a re-read.
+    """Invalidate fingerprints for derivable-but-missing metadata rows.
 
-    The values live in the file, not in anything the database already holds.
-    Rather than re-read the whole library, hand exactly those rows to the
-    metadata sync worker the same way ``/resync`` hands it one: same retry
-    policy, same backoff, same broadcasts.
+    Kept as a compatibility operation for callers that follow it with a delta
+    scan.  It must NOT set ``metadata_sync_status = 'pending'``: that status is
+    reserved for writing Gallery's favorite/tag mirrors into a PNG and does not
+    read generation metadata.
 
     ONE transaction, not one per image: a library of 20k pictures would otherwise be
     20k round trips through the write queue, and the queue is single-writer.
@@ -729,11 +758,7 @@ class ResyncMissingStepsOp:
 
     def apply(self, conn: sqlite3.Connection) -> int:
         sql = (
-            "UPDATE image SET "
-            "metadata_sync_status = 'pending', "
-            "metadata_sync_retry_count = 0, "
-            "metadata_sync_next_retry_at = NULL, "
-            "metadata_sync_last_error = NULL "
+            "UPDATE image SET mtime_ns = -1 "
             f"WHERE {_NEEDS_METADATA_REREAD_SQL}"
         )
         if self.limit > 0:
@@ -745,6 +770,26 @@ class ResyncMissingStepsOp:
         else:
             cur = conn.execute(sql)
         return int(cur.rowcount or 0)
+
+
+def list_missing_metadata_targets(*, db_path: _PathLike) -> List[Dict[str, Any]]:
+    """Rows the metadata backfill should force through the real indexer.
+
+    ``image.folder_id`` is the registered root id (subfolders are represented by
+    ``relative_path``), so the join supplies exactly the root dictionary that
+    :func:`gallery.indexer.index_one` needs.
+    """
+    conn = _db.connect_read(db_path)
+    try:
+        rows = conn.execute(
+            "SELECT image.id AS image_id, image.path AS path, "
+            "folder.id AS root_id, folder.path AS root_path, folder.kind AS root_kind "
+            "FROM image JOIN folder ON folder.id = image.folder_id "
+            f"WHERE {_NEEDS_METADATA_REREAD_SQL} ORDER BY image.id"
+        ).fetchall()
+        return [dict(row) for row in rows]
+    finally:
+        conn.close()
 
 
 def count_missing_steps(*, db_path: _PathLike) -> int:
@@ -1693,6 +1738,7 @@ class ImageRecord:
     tags: Tuple[str, ...]
     sync_status: str
     version: int
+    generation_data_json: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -1744,6 +1790,7 @@ _IMAGE_SELECT = (
     "image.media_kind, image.duration_ms, image.fps, image.has_audio, image.vcodec, "
     "image.created_at, image.positive_prompt, image.negative_prompt, "
     "image.model, image.seed, image.cfg, image.steps, image.sampler, image.scheduler, "
+    "image.generation_data_json, "
     "image.workflow_present, image.favorite, image.tags_csv, "
     "image.metadata_sync_status, image.version, "
     "folder.kind AS folder_kind, folder.display_name AS folder_display_name, "
@@ -2165,6 +2212,7 @@ def _row_to_image_record(row: sqlite3.Row) -> ImageRecord:
         steps=row["steps"],
         sampler=row["sampler"],
         scheduler=row["scheduler"],
+        generation_data_json=row["generation_data_json"],
         has_workflow=bool(row["workflow_present"]),
         favorite=bool(row["favorite"]) if row["favorite"] is not None else False,
         tags=tags,

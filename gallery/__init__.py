@@ -1,10 +1,4 @@
-"""XYZ Image Gallery — assembly entry point (T01 skeleton).
-
-This package is intentionally minimal at this stage: it only bootstraps the
-on-disk data directory layout described in ``ARCHITECTURE §1`` and exposes the
-``setup`` / ``start_background_services`` hooks that later tasks (T02+) will
-fill in. No routes, no DB schema, no background threads yet.
-"""
+"""XYZ Image Gallery — database, routes, indexers and background services."""
 
 from __future__ import annotations
 

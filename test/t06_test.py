@@ -1,60 +1,98 @@
-import tempfile
+"""T06 metadata extraction tests using only synthetic local files."""
+
+from __future__ import annotations
+
+import json
 from pathlib import Path
-
-from gallery.metadata import read_comfy_metadata, ComfyMeta
-
-# Test #1: ComfyUI-generated PNG (含 workflow + prompt 两个 chunk)
-m = read_comfy_metadata(r"E:\AI\ComfyUI-aki-v2\ComfyUI\output\2026-04-17\09-40-54-883986218932892_底图_00001_.png")
-assert m.has_workflow is True
-assert m.errors == ()
-assert m.positive_prompt and m.model and m.seed is not None
-print("T1 OK", m)
 
 from PIL import Image
 from PIL.PngImagePlugin import PngInfo
 
-info = PngInfo()
-info.add_text(
-    "parameters",
-    "beautiful sunset over the sea\n"
-    "Negative prompt: ugly, blurry\n"
-    "Steps: 20, Sampler: Euler a, CFG scale: 7, Seed: 12345, Model: sd15_foo",
-)
-with tempfile.TemporaryDirectory() as tmp:
-    tmp_path = Path(tmp)
-    a1111 = tmp_path / "a1111.png"
-    Image.new("RGB", (8, 8), "black").save(a1111, pnginfo=info)
-    m = read_comfy_metadata(str(a1111))
-    assert m.positive_prompt == "beautiful sunset over the sea"
-    assert m.negative_prompt == "ugly, blurry"
-    assert m.seed == 12345 and m.cfg == 7.0
-    assert m.sampler == "Euler a" and m.model == "sd15_foo"
-    assert m.has_workflow is False  # 只有 parameters chunk，没 workflow chunk
-    print("T2 OK", m)
+from gallery.metadata import ComfyMeta, read_comfy_metadata
 
-# Test #3a: 普通 JPG —— 不抛、errors 非空、字段全空
-m = read_comfy_metadata(r"C:\Users\XYZ\Downloads\定稿-1.jpg")
-assert isinstance(m, ComfyMeta)
-assert m.positive_prompt is None and m.has_workflow is False
-assert len(m.errors) >= 1
-print("T3a OK", m.errors)
 
-# Test #3b: 损坏 PNG (随便填几字节)
-with tempfile.TemporaryDirectory() as tmp:
-    bad = Path(tmp) / "bad.png"
-    bad.write_bytes(b"\x89PNG\r\n\x1a\n_garbage_")
-    m = read_comfy_metadata(str(bad))
-    assert m.positive_prompt is None and m.errors
-    print("T3b OK", m.errors)
+def _comfy_png(path: Path) -> None:
+    prompt = {
+        "1": {
+            "class_type": "KSampler",
+            "inputs": {
+                "seed": 12345,
+                "steps": 20,
+                "cfg": 7.0,
+                "sampler_name": "euler",
+                "scheduler": "normal",
+                "positive": ["2", 0],
+                "negative": ["3", 0],
+                "model": ["4", 0],
+            },
+        },
+        "2": {"class_type": "CLIPTextEncode", "inputs": {"text": "a cat"}},
+        "3": {"class_type": "CLIPTextEncode", "inputs": {"text": "blurry"}},
+        "4": {
+            "class_type": "CheckpointLoaderSimple",
+            "inputs": {"ckpt_name": "sd15.ckpt"},
+        },
+    }
+    info = PngInfo()
+    info.add_text("prompt", json.dumps(prompt))
+    info.add_text("workflow", json.dumps({"nodes": [], "links": []}))
+    Image.new("RGB", (8, 8), "black").save(path, pnginfo=info)
 
-# Test #3c: 不存在的路径
-m = read_comfy_metadata(r"C:\does\not\exist.png")
-assert m.errors and "file not found" in m.errors[0]
-print("T3c OK")
 
-# Test #4: 无副作用 / 多次调用结果完全一致
-p = r"E:\AI\ComfyUI-aki-v2\ComfyUI\output\2026-04-17\09-40-54-883986218932892_底图_00001_.png"
-m1 = read_comfy_metadata(p)
-m2 = read_comfy_metadata(p)
-assert m1 == m2 and hash(m1) == hash(m2)
-print("T4 OK")
+def test_comfy_png_metadata(tmp_path: Path) -> None:
+    path = tmp_path / "comfy.png"
+    _comfy_png(path)
+    meta = read_comfy_metadata(path)
+    assert meta.errors == ()
+    assert meta.has_workflow is True
+    assert meta.positive_prompt == "a cat"
+    assert meta.negative_prompt == "blurry"
+    assert meta.model == "sd15.ckpt"
+    assert meta.seed == 12345
+    assert meta.steps == 20
+
+
+def test_a1111_parameters_metadata(tmp_path: Path) -> None:
+    info = PngInfo()
+    info.add_text(
+        "parameters",
+        "beautiful sunset over the sea\n"
+        "Negative prompt: ugly, blurry\n"
+        "Steps: 20, Sampler: Euler a, CFG scale: 7, Seed: 12345, Model: sd15_foo",
+    )
+    path = tmp_path / "a1111.png"
+    Image.new("RGB", (8, 8), "black").save(path, pnginfo=info)
+    meta = read_comfy_metadata(path)
+    assert meta.positive_prompt == "beautiful sunset over the sea"
+    assert meta.negative_prompt == "ugly, blurry"
+    assert meta.seed == 12345 and meta.cfg == 7.0
+    assert meta.sampler == "Euler a" and meta.model == "sd15_foo"
+    assert meta.has_workflow is False
+
+
+def test_plain_jpeg_is_safe_and_empty(tmp_path: Path) -> None:
+    path = tmp_path / "plain.jpg"
+    Image.new("RGB", (8, 8), "white").save(path)
+    meta = read_comfy_metadata(path)
+    assert isinstance(meta, ComfyMeta)
+    assert meta.positive_prompt is None
+    assert meta.has_workflow is False
+
+
+def test_corrupt_and_missing_files_report_errors(tmp_path: Path) -> None:
+    corrupt = tmp_path / "bad.png"
+    corrupt.write_bytes(b"\x89PNG\r\n\x1a\n_garbage_")
+    assert read_comfy_metadata(corrupt).errors
+
+    missing = tmp_path / "missing.png"
+    meta = read_comfy_metadata(missing)
+    assert meta.errors and "file not found" in meta.errors[0]
+
+
+def test_metadata_read_is_deterministic(tmp_path: Path) -> None:
+    path = tmp_path / "comfy.png"
+    _comfy_png(path)
+    first = read_comfy_metadata(path)
+    second = read_comfy_metadata(path)
+    assert first == second
+    assert hash(first) == hash(second)

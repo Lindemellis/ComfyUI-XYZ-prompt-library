@@ -95,7 +95,7 @@ def search_tags_multi(
         danbooru has the tag, else the first source that has it (see gelbooru plan #3);
       - `post_count`: max across sources; `post_counts`: per-source map;
       - `is_deprecated`: the authoritative source's flag;
-      - `aliases`/`translations`: union across sources.
+      - `aliases`: union across sources.
 
     Rows are ranked by `post_count` DESC and capped to `limit` after the merge. Used
     only when ≥2 sources are active; a single source uses `search_tags` directly so the
@@ -121,7 +121,6 @@ def search_tags_multi(
                     "post_counts": {source_name: r["post_count"]},
                     "is_deprecated": r["is_deprecated"],
                     "aliases": list(r.get("aliases", [])),
-                    "translations": list(r.get("translations", [])),
                     "sources": [source_name],
                     "_authoritative": source_name,
                 }
@@ -138,13 +137,10 @@ def search_tags_multi(
                     existing["category_name"] = r["category_name"]
                     existing["is_deprecated"] = r["is_deprecated"]
                     existing["_authoritative"] = "danbooru"
-                # union aliases/translations
+                # Union English aliases.
                 for a in r.get("aliases", []):
                     if a not in existing["aliases"]:
                         existing["aliases"].append(a)
-                for t in r.get("translations", []):
-                    if t not in existing["translations"]:
-                        existing["translations"].append(t)
     out = [merged[n] for n in order]
     for row in out:
         row.pop("_authoritative", None)
@@ -159,8 +155,7 @@ def _search_fts(conn: Any, q: str, limit: int,
     cat_clause = "AND t.category = ?" if category is not None else ""
     sql = f"""
         SELECT t.name, t.category, t.post_count, t.is_deprecated,
-               COALESCE(GROUP_CONCAT(a.alias, ','), '') AS aliases,
-               (SELECT text FROM translations tr WHERE tr.tag = t.name AND tr.lang = 'artist') AS translations
+               COALESCE(GROUP_CONCAT(a.alias, ','), '') AS aliases
         FROM tags_fts f
         JOIN tags t ON t.id = f.rowid
         LEFT JOIN aliases a ON a.canonical = t.name
@@ -183,29 +178,11 @@ def _search_like(conn: Any, q: str, limit: int,
 
     Two cheap steps instead of a join+group over the whole prefix set (which would
     sort tens of thousands of rows): (1) top-N tag rows by post_count via the name
-    prefix, then (2) enrich just those few with aliases/translations. Substring and
-    translation search is handled by the FTS path for 3+ char queries.
+    prefix, then (2) enrich just those few with aliases. Substring alias search is
+    handled by the FTS path for 3+ character queries.
     """
-    # Non-ASCII (CJK/kana/hangul) short query: it can only be a translated name,
-    # which lives mid-blob in translations.text — so accept a substring scan here
-    # (these queries are less frequent and users expect a small delay).
     if not q.isascii():
-        pat = f"%{q}%"
-        cat_clause = "AND t.category = ?" if category is not None else ""
-        params: List[Any] = [pat, pat]
-        if category is not None:
-            params.append(category)
-        params.append(limit)
-        rows = conn.execute(f"""
-            SELECT t.name, t.category, t.post_count, t.is_deprecated,
-                   COALESCE(GROUP_CONCAT(a.alias, ','), '') AS aliases,
-                   (SELECT text FROM translations tr WHERE tr.tag = t.name AND tr.lang = 'artist') AS translations
-            FROM tags t
-            LEFT JOIN aliases a ON a.canonical = t.name
-            WHERE (t.name LIKE ? OR a.alias LIKE ?) {cat_clause}
-            GROUP BY t.id ORDER BY t.post_count DESC LIMIT ?
-        """, params).fetchall()
-        return [_row_to_dict(r) for r in rows]
+        return []
 
     prefix = f"{q}%"
     cat_clause = "AND category = ?" if category is not None else ""
@@ -227,14 +204,9 @@ def _search_like(conn: Any, q: str, limit: int,
         f"SELECT canonical, GROUP_CONCAT(alias, ',') FROM aliases "
         f"WHERE canonical IN ({qmarks}) GROUP BY canonical", names):
         amap[row[0]] = row[1]
-    tmap: Dict[str, str] = {}
-    for row in conn.execute(
-        f"SELECT tag, text FROM translations WHERE tag IN ({qmarks}) AND lang = 'artist'", names):
-        tmap[row[0]] = row[1]
     out: List[Dict[str, Any]] = []
     for r in base:
         aliases_raw = amap.get(r["name"], "") or ""
-        translations_raw = tmap.get(r["name"], "") or ""
         out.append({
             "name": r["name"],
             "category": r["category"],
@@ -242,14 +214,12 @@ def _search_like(conn: Any, q: str, limit: int,
             "post_count": r["post_count"],
             "is_deprecated": bool(r["is_deprecated"]),
             "aliases": [a for a in aliases_raw.split(",") if a],
-            "translations": [t for t in translations_raw.split(" ") if t],
         })
     return out
 
 
 def _row_to_dict(row: Any) -> Dict[str, Any]:
     aliases_raw = row["aliases"] or ""
-    translations_raw = (row["translations"] if "translations" in row.keys() else "") or ""
     return {
         "name": row["name"],
         "category": row["category"],
@@ -257,7 +227,6 @@ def _row_to_dict(row: Any) -> Dict[str, Any]:
         "post_count": row["post_count"],
         "is_deprecated": bool(row["is_deprecated"]),
         "aliases": [a for a in aliases_raw.split(",") if a],
-        "translations": [t for t in translations_raw.split(" ") if t],
     }
 
 

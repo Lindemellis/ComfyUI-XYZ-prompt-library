@@ -3,17 +3,21 @@
 An agent that sits in a ComfyUI sidebar, reads the graph you actually have open, and
 writes prompts for the model that graph actually runs.
 
-The chat panel and its brain are [artokun's comfyui-mcp][mcp] (MIT). This package adds
+The chat panel and its brain are maintained in the author's [comfyui-mcp fork][mcp]
+and [panel fork][panel] (upstream MIT). This package adds
 the parts that pack cannot ship: a launch button, one place for your API keys, standing
 rules the agent follows on every turn, and an **Apply** button that puts a reply into a
 node instead of letting the agent edit your canvas behind your back.
 
-[mcp]: https://github.com/artokun/comfyui-mcp
+[mcp]: https://github.com/Lindemellis/comfyui-mcp
+[panel]: https://github.com/Lindemellis/comfyui-mcp-panel
 
 ## Setup
 
-1. Install the panel (`comfyui-mcp-panel`) into `custom_nodes/`, and put the
-   orchestrator somewhere — `E:\AI\forks\comfyui-mcp` is the default guess.
+1. Install the panel fork (`comfyui-mcp-panel`) into `custom_nodes/` and build the
+   orchestrator fork. Point `XYZ_AGENT_ENTRY` at its `dist/index.js`, or configure
+   that exact file through `POST /xyz/agent/entry`. The launcher intentionally does
+   not guess machine-specific paths.
 2. Put your provider keys in **`~/.pi/agent/auth.json`**, one entry each:
 
    ```json
@@ -30,6 +34,10 @@ node instead of letting the agent edit your canvas behind your back.
 3. ComfyUI top bar → **XYZ Tools → Agent Orchestrator**, press **启动**. It waits for
    the bridge to answer, not merely for the process to exist.
 4. Sidebar → **Agent Panel → Connect**.
+
+The reviewed local revisions were `comfyui-mcp` `dd5e99e` and
+`comfyui-mcp-panel` `e032f3e`; newer revisions should be reviewed together with
+this integration before relying on unchanged behaviour.
 
 ## The launcher window
 
@@ -79,6 +87,10 @@ to pre-select one; the per-block dropdown still overrides it.
 the orchestrator log.
 
 ## Notes
+
+- All `/xyz/agent/*` control routes accept loopback requests only. Arbitrary
+  per-request environment injection is rejected, and process-control environment
+  variables such as `NODE_OPTIONS`, `PATH` and preload variables are filtered.
 
 - **Model capability is per model, and worth checking.** Vision and tool-calling do not
   come together: `qwen-vl-max` sees but cannot call tools; `qwen3.7-max` refuses images;

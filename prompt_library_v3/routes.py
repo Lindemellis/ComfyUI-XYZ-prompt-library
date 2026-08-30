@@ -331,12 +331,16 @@ async def _get_group_items(request):
 async def _post_item(request):
     gid = int(request.match_info["id"])
     body = await request.json()
+    kind = body.get("kind") or "prompt"
+    text = body.get("text") or ""
+    if kind == "prompt":
+        text = library.normalize_group_tag(text)
     try:
         item_id = repo.write(
             repo.AddItemOp(
                 group_id=gid,
-                kind=body.get("kind") or "prompt",
-                text=body.get("text") or "",
+                kind=kind,
+                text=text,
                 ref_group_id=body.get("ref_group_id"),
                 weight=body.get("weight"),
             )
@@ -349,10 +353,16 @@ async def _post_item(request):
 
 async def _patch_item(request):
     body = await request.json()
+    item_id = int(request.match_info["id"])
+    text = body.get("text")
+    if text is not None:
+        item = repo.get_item(item_id)
+        if not item or item["kind"] == "prompt":
+            text = library.normalize_group_tag(text)
     repo.write(
         repo.UpdateItemOp(
-            item_id=int(request.match_info["id"]),
-            text=body.get("text"),
+            item_id=item_id,
+            text=text,
             weight=body.get("weight"),
             sort_index=body.get("sort_index"),
         )

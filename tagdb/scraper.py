@@ -4,16 +4,13 @@ Usage (standalone test):
     python -m tagdb.scraper --min-count 100 --limit 50
     python -m tagdb.scraper --login myuser --api-key abc123 --min-count 100 --limit 50
 
-Cloudflare / TLS-fingerprint notes:
-  - Danbooru sits behind Cloudflare, which serves a "Just a moment..." JS challenge
-    to any client whose TLS handshake (JA3/JA4) does not look like a real browser.
-    This is NOT an IP ban — a normal browser on the same IP works fine.
-  - Python's urllib and the `requests` library both use the stock OpenSSL/Schannel
-    handshake, so CF blocks them with HTTP 403 regardless of User-Agent or login.
-    (The challenge happens before the app ever sees the auth query params, so
-    credentials alone do not help.)
-  - Fix: we use `curl_cffi` with `impersonate="chrome"`, which reproduces Chrome's
-    TLS + HTTP/2 fingerprint and passes the challenge. No proxy is needed.
+Cloudflare / transport notes:
+  - Danbooru sits behind Cloudflare. In August 2026 it began rejecting curl_cffi's
+    Chrome/Firefox/Safari impersonation profiles with a JS challenge (HTTP 403),
+    while the same libcurl transport succeeds under its honest ``curl/<version>``
+    identity. Do NOT restore browser impersonation without a live differential test.
+  - Python's urllib and the `requests` library have also been blocked historically,
+    so curl_cffi remains the shared transport for API and CDN requests.
   - login + api_key are still appended when provided — they raise the API rate limit
     and unlock restricted tags, but are optional for basic scraping.
   - Gelbooru requires api_key + user_id (free account). Without them gelbooru
@@ -29,7 +26,7 @@ import re
 import time
 import urllib.parse
 from datetime import datetime, timezone
-from typing import Any, Dict, Generator, Iterable, List, Optional
+from typing import Any, Dict, Generator, List, Optional
 
 from .db import unescape_html_entities
 
@@ -40,10 +37,6 @@ DEFAULT_RATE_DELAY = 1.0
 DEFAULT_MIN_POST_COUNT = 5
 DEFAULT_PAGE_LIMIT = 1000
 
-# Browser fingerprint to impersonate. curl_cffi reproduces this client's full
-# TLS/HTTP2 fingerprint, which is what actually gets us past Cloudflare.
-_IMPERSONATE = "chrome"
-
 _HEADERS = {
     "Accept": "application/json, text/plain, */*",
     "Accept-Language": "en-US,en;q=0.9",
@@ -51,8 +44,7 @@ _HEADERS = {
 }
 
 _INSTALL_HINT = (
-    "curl_cffi is required to scrape danbooru (it impersonates a browser TLS "
-    "fingerprint to pass Cloudflare). Install it with: pip install curl_cffi"
+    "curl_cffi is required to scrape danbooru. Install it with: pip install curl_cffi"
 )
 
 
@@ -70,9 +62,24 @@ def _import_curl_cffi():
 
 
 def _make_session():
-    """Create a curl_cffi Session that impersonates Chrome (reuses connection)."""
+    """Create the shared curl_cffi session using libcurl's own identity.
+
+    Cloudflare currently challenges curl_cffi's browser impersonation profiles,
+    but accepts the same transport when its User-Agent accurately identifies it
+    as curl. Derive the version so the header stays truthful across bundled
+    ComfyUI updates.
+    """
     cffi_requests = _import_curl_cffi()
-    return cffi_requests.Session(impersonate=_IMPERSONATE, headers=_HEADERS)
+    headers = dict(_HEADERS)
+    try:
+        import curl_cffi  # noqa: PLC0415
+
+        match = re.search(r"\blibcurl/([0-9.]+)", curl_cffi.__curl_version__)
+        version = match.group(1) if match else "8.0.0"
+    except (AttributeError, ImportError):
+        version = "8.0.0"
+    headers["User-Agent"] = f"curl/{version}"
+    return cffi_requests.Session(headers=headers)
 
 
 def _build_auth_params(login: Optional[str], api_key: Optional[str]) -> str:
@@ -307,19 +314,17 @@ def scrape_artist_versions_since(
     api_key: Optional[str] = None,
     stop_event=None,
 ) -> Generator[Dict[str, Any], None, None]:
-    """Yield artist_version events (name/other_names changes) at/after `after_epoch`."""
+    """Yield artist-version events at/after `after_epoch`."""
     import json as _json
     base = f"{_created_at_filter(after_epoch)}{_build_auth_params(login, api_key)}"
     session = _make_session()
     for v in _paginate(session, "artist_versions.json", base, "artist versions",
                       page_limit, rate_delay, stop_event):
-        other = v.get("other_names")
         urls = v.get("urls")
         yield {
             "version_id": int(v["id"]),
             "artist_id": int(v["artist_id"]),
             "name": v.get("name", ""),
-            "other_names": _json.dumps(other) if other is not None else None,
             "group_name": v.get("group_name"),
             "urls": _json.dumps(urls) if urls is not None else None,
             "is_banned": int(bool(v.get("is_banned", False))),
@@ -424,87 +429,6 @@ def fetch_artist_posts(
                 "rating": p.get("rating"),
             })
     return out
-
-
-def scrape_artist_other_names(
-    page_limit: int = DEFAULT_PAGE_LIMIT,
-    rate_delay: float = DEFAULT_RATE_DELAY,
-    login: Optional[str] = None,
-    api_key: Optional[str] = None,
-    stop_event=None,
-) -> Generator[Dict[str, Any], None, None]:
-    """Yield {tag, other_names:[...]} from danbooru artist entries (artist-category tags).
-
-    artist other_names are the artist's handles on other sites + FORMER danbooru
-    names (e.g. bunchi → [..., 'o_(jshn3457)', 'otintin', ...]). Distinct from wiki
-    other_names (translations). Lets users find an artist by any former/alt name.
-    """
-    base = f"&search[any_other_name_matches]=*{_build_auth_params(login, api_key)}"
-    session = _make_session()
-    for a in _paginate(session, "artists.json", base, "artist other_names",
-                      page_limit, rate_delay, stop_event):
-        names = a.get("other_names") or []
-        name = a.get("name")
-        if name and names:
-            yield {"tag": name, "other_names": names}
-
-
-def scrape_artist_other_names_for(
-    names: Iterable[str],
-    rate_delay: float = DEFAULT_RATE_DELAY,
-    login: Optional[str] = None,
-    api_key: Optional[str] = None,
-    stop_event=None,
-) -> Generator[Dict[str, Any], None, None]:
-    """Yield {tag, other_names:[...]} for specific artists by name.
-
-    Fetches individual artist entries via ``artists.json?search[name]=...``,
-    one request per artist. Much cheaper than ``scrape_artist_other_names``
-    (which scans ALL artists), useful for refreshing translations of only the
-    artists that were affected by an incremental update.
-    """
-    auth = _build_auth_params(login, api_key)
-    session = _make_session()
-    for name in names:
-        if stop_event and stop_event.is_set():
-            break
-        url = f"{_BASE}/artists.json?search[name]={urllib.parse.quote(name)}{auth}"
-        try:
-            resp = session.get(url, timeout=30)
-            resp.raise_for_status()
-            data = resp.json()
-        except Exception:
-            continue
-        if not isinstance(data, list) or len(data) == 0:
-            continue
-        a = data[0]
-        other = a.get("other_names") or []
-        if other:
-            yield {"tag": a.get("name", name), "other_names": other}
-        time.sleep(rate_delay)
-
-
-def scrape_wiki_other_names(
-    page_limit: int = DEFAULT_PAGE_LIMIT,
-    rate_delay: float = DEFAULT_RATE_DELAY,
-    login: Optional[str] = None,
-    api_key: Optional[str] = None,
-    stop_event=None,
-) -> Generator[Dict[str, Any], None, None]:
-    """Yield {tag, other_names:[...]} from danbooru wiki pages that have other_names.
-
-    other_names are alternate / translated names (Japanese, Chinese, romaji, …),
-    e.g. aris_(blue_archive) → ['天童アリス', 'Tendou_Aris', ...]. Used to make tags
-    searchable by their translations.
-    """
-    base = f"&search[other_names_present]=true{_build_auth_params(login, api_key)}"
-    session = _make_session()
-    for w in _paginate(session, "wiki_pages.json", base, "wiki other_names",
-                      page_limit, rate_delay, stop_event):
-        names = w.get("other_names") or []
-        title = w.get("title")
-        if title and names:
-            yield {"tag": title, "other_names": names}
 
 
 # ---------------------------------------------------------------------------

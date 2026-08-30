@@ -140,10 +140,9 @@ def backfill_artist_versions(
     """Scrape the entire artist_versions event log into `conn` (large: ~millions).
 
     Enables exact artist rename timelines + multi-level name rollback in date
-    reconstruction. Stores ONLY name-change events (not url/other-name edits) with
+    reconstruction. Stores only name-change events (not URL/alternate-name edits) with
     the heavy JSON columns left NULL — the full log is ~2.7M rows / 2 GB, but the
-    rename timeline is ~700k rows. Current other_names (for search) come from the
-    separate artist-other_names scrape. Versions arrive in version_id (chronological)
+    rename timeline is ~700k rows. Versions arrive in version_id (chronological)
     order, so a per-artist last-name map detects changes in one pass.
     """
     now = _now()
@@ -181,7 +180,6 @@ def run_full_update(
     login: Optional[str] = None,
     api_key: Optional[str] = None,
     with_versions: bool = False,
-    with_artist_names: bool = False,
     with_artist_versions: bool = False,
     progress_cb: Optional[Callable[[str], None]] = None,
     stop_event=None,
@@ -198,9 +196,6 @@ def run_full_update(
     conn = _db.connect_write(db_path)
     try:
         _db.migrate(conn)
-
-        # Purge wiki translations — no longer scraped, ensure clean state on rebuild
-        conn.execute("DELETE FROM translations WHERE lang = 'other'")
 
         _progress(progress_cb, f"[Full] Scraping tags (post_count>={min_post_count})...")
         tag_count = 0
@@ -236,27 +231,6 @@ def run_full_update(
                 conn.execute("COMMIT"); conn.execute("BEGIN")
         conn.execute("COMMIT")
         _progress(progress_cb, f"[Full] Aliases done: {alias_count:,}")
-
-        if with_artist_names:
-            _progress(progress_cb, "[Full] Scraping artist other_names (handles / former names)...")
-            an_count = 0
-            conn.execute("BEGIN")
-            for a in _sc.scrape_artist_other_names(login=login, api_key=api_key,
-                                                   stop_event=stop_event):
-                if stop_event and stop_event.is_set():
-                    conn.execute("ROLLBACK")
-                    _progress(progress_cb, "[Full] Cancelled during artist names scrape")
-                    return {"mode": "full", "cancelled": True}
-                conn.execute(
-                    "INSERT OR REPLACE INTO translations(tag, lang, text) VALUES (?, 'artist', ?)",
-                    (a["tag"], " ".join(a["other_names"])),
-                )
-                an_count += 1
-                if an_count % _BATCH == 0:
-                    conn.execute("COMMIT"); conn.execute("BEGIN")
-                    _progress(progress_cb, f"[Full] Artist names: {an_count:,}")
-            conn.execute("COMMIT")
-            _progress(progress_cb, f"[Full] Artist names done: {an_count:,}")
 
         if with_versions:
             _progress(progress_cb, "[Full] Backfilling tag_versions event log...")
@@ -430,15 +404,6 @@ def reconstruct_as_of(
             )
         out.execute("COMMIT")
 
-        # Carry over translations as-is (other_names aren't time-stamped).
-        out.execute("BEGIN")
-        for tr in src.execute("SELECT tag, lang, text FROM translations").fetchall():
-            out.execute(
-                "INSERT OR REPLACE INTO translations(tag, lang, text) VALUES (?,?,?)",
-                (tr["tag"], tr["lang"], tr["text"]),
-            )
-        out.execute("COMMIT")
-
         _progress(progress_cb, "[Recon] Rebuilding FTS index...")
         rebuild_fts(out)
 
@@ -476,10 +441,9 @@ def run_incremental_update(
 ) -> Dict[str, Any]:
     """Apply events created since the structure watermark + refresh post_count.
 
-    Refreshs post_count of ALL tags (full tag scrape, ~2 min) and updates artist
-    other_names for any artist tags touched by the delta. Structure watermarks
-    advance only to the max event time actually consumed; a cancelled run leaves
-    them untouched so it is safe to re-run.
+    Refreshes post_count of all tags (full tag scrape, ~2 min). Structure
+    watermarks advance only to the max event time actually consumed; a cancelled
+    run leaves them untouched so it is safe to re-run.
     """
     db_path = Path(db_path)
     now = _now()
@@ -560,7 +524,7 @@ def run_incremental_update(
                 "INSERT OR IGNORE INTO artist_versions(version_id, artist_id, name, "
                 "other_names, group_name, urls, is_banned, is_deleted, created_at, synced_at) "
                 "VALUES (?,?,?,?,?,?,?,?,?,?)",
-                (av["version_id"], av["artist_id"], av["name"], av["other_names"],
+                (av["version_id"], av["artist_id"], av["name"], None,
                  av["group_name"], av["urls"], av["is_banned"], av["is_deleted"],
                  av["created_at"], now),
             )
@@ -603,41 +567,11 @@ def run_incremental_update(
         conn.execute("COMMIT")
         _progress(progress_cb, f"[Incr] post_count refreshed for {count_refreshed:,} tags")
 
-        # 6) Refresh artist translations (other_names) for affected artists.
-        # Collect artist-tag names that were touched by the incremental delta
-        # (new tags, structure changes, or artist-version events).
-        tr_refreshed = 0
-        artist_names_to_refresh: set[str] = set()
-        for n in affected_names:
-            row = conn.execute("SELECT category FROM tags WHERE name=?", (n,)).fetchone()
-            if row and row[0] == 1:  # category 1 = artist
-                artist_names_to_refresh.add(n)
-        if artist_names_to_refresh:
-            _progress(progress_cb,
-                      f"[Incr] Refreshing artist other_names for {len(artist_names_to_refresh)} artists...")
-            tr_refreshed = 0
-            conn.execute("BEGIN")
-            for a in _sc.scrape_artist_other_names_for(artist_names_to_refresh,
-                                                       login=login, api_key=api_key,
-                                                       stop_event=stop_event):
-                if stop_event and stop_event.is_set():
-                    conn.execute("ROLLBACK")
-                    _progress(progress_cb, "[Incr] Cancelled during artist translations refresh")
-                    return {"mode": "incremental", "cancelled": True}
-                conn.execute(
-                    "INSERT OR REPLACE INTO translations(tag, lang, text) VALUES (?, 'artist', ?)",
-                    (a["tag"], " ".join(a["other_names"])),
-                )
-                tr_refreshed += 1
-            conn.execute("COMMIT")
-            _progress(progress_cb, f"[Incr] Artist other_names refreshed: {tr_refreshed:,}")
-            affected_names.update(artist_names_to_refresh)
-
-        # 7) Rebuild FTS if tag names, aliases, or artist translations changed.
+        # 6) Rebuild FTS if tag names or aliases changed.
         if affected_names:
             rebuild_fts(conn)
 
-        # 8) Advance watermarks. full_count_synced_at = now because we refresh
+        # 7) Advance watermarks. full_count_synced_at = now because we refresh
         # post_count of ALL tags in every incremental run.
         new_wm = min(now, max(wm, max_event))
         conn.execute("BEGIN")
@@ -654,7 +588,7 @@ def run_incremental_update(
             progress_cb,
             f"[Incr] Done. Structure + post_count current to {_sc.epoch_to_iso(new_wm)}. "
             f"Tags: {count_refreshed:,}, new_tags: {new_tags}, tag_versions: {versions}, "
-            f"artist_versions: {artists}, aliases: {aliases}, artist_translations: {tr_refreshed}",
+            f"artist_versions: {artists}, aliases: {aliases}",
         )
         return {
             "mode": "incremental", "new_tags": new_tags, "tag_versions": versions,

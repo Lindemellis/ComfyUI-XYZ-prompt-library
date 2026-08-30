@@ -2,9 +2,8 @@
 
 A prompt language, an editor for it, and a library that feeds it.
 
-PLv3 replaces [Prompt Library V2](../prompt_library_v2/README.md). Both can be installed at
-the same time — they are separate nodes and separate databases — but a document written in
-one means nothing to the other. There is a [migration tool](#migrating-from-v2).
+PLv3 replaces the retired Prompt Library V2 runtime. Existing V2 personal data is left
+untouched, and a [one-shot migration tool](#migrating-from-v2) remains available.
 
 **Requires [comfyui-prompt-control](https://github.com/asagi4/comfyui-prompt-control)**: PLv3
 does not talk to CLIP itself. It compiles your text into prompt-control's syntax and hands it
@@ -14,14 +13,16 @@ over as a string.
 
 ## The one idea
 
-**The text is the truth.**
+**The document is the truth.**
 
-A PLv3 document is a piece of text, and everything else — the detail page with its switches
-and sliders, the library, the presets — is a view onto it. Nothing is stored twice. Turning a
-switch off does not set an `enabled = false` somewhere; it deletes the item from the text.
-Compilation is a pure function of `(text, seed, region_mode)` and **never reads the library**:
-a workflow you send to someone else carries everything it needs, and it will render the same
-image on their machine, with no database of yours.
+A PLv3 document is a stable tree with an id and an enabled flag on every node. The visible
+text is exactly what its enabled nodes render to; disabled content stays in the document so a
+switch can restore it in place. The hidden document JSON is saved with the workflow, while old
+workflows that only contain text still run through the compatibility fallback.
+
+The library remains a creation-time aid, never an execution dependency. Compilation never
+looks up a library group: expanded blocks already carry their content, so a workflow you send
+to someone else renders the same without your database.
 
 That is the whole design. Most of what follows is a consequence of it.
 
@@ -116,6 +117,10 @@ A group is `{ … }`, and `.set{ … }` gives it settings:
 
 Groups nest. Randomness is seeded per group by its position in the tree, so an unrelated edit
 elsewhere in the document does not reshuffle it.
+
+`format` is applied to an item's body while preserving that item's own weight wrapper. For
+example, a group with `format: "@$p"` containing `(tag:0.8)` renders as `(@tag:0.8)`, not
+`@(tag:0.8)`.
 
 ### Schedules
 
@@ -242,7 +247,11 @@ survives to the sampler unchanged.
 
 ## The editor
 
-Three panes, all resizable, all in a floating ComfyUI window.
+Three panes, all resizable, all in a floating ComfyUI window. The activity bar on the far
+left toggles the **Node list**, **Outline**, and **prompt details** independently. The Monaco
+editor keeps its width: closing a column shrinks the floating window by that column's width,
+and opening it grows the window by the same amount. The choice is remembered. The Node list
+can be sorted by numeric node ID or by name (A–Z), also remembered.
 
 **Node list · Editor + Preview · Detail page**
 
@@ -269,22 +278,20 @@ Switch one off and it **leaves the prompt but keeps its place** — it disappear
 when you switch it on again. Nothing around it moves, and no other item is renumbered, so a
 region's `imask` indices stay put.
 
-That works because the text is not the whole story any more: the node also carries a
-**document** — the same tree, plus a stable id and an on/off flag per item — in a hidden widget
-that is saved with your workflow. The text is what the document's *enabled* items render to, and
-it is still the thing that compiles, so a document you never touched is byte-for-byte the text
-you typed.
+The node carries that **document** in a hidden widget saved with the workflow. The text is the
+document's enabled projection. When the hidden document is present, execution compiles it;
+when it is absent, execution falls back to the text so old workflows remain compatible. A
+document created from untouched text renders that text byte for byte.
 
 > **Library blocks are the exception**, on purpose. An item inside a `[path]: { … }` block is
 > enabled by *being in the block*, so its switch still removes it from the block and drops it
 > into the group's disabled list at the bottom (§5.2). That is the behaviour described under
 > [The library](#the-library), and it is unchanged.
 
-**A broken document still works.** The editor parses in recovering mode: an unclosed brace is
-reported (E03, with a squiggle and a glyph in the margin) and *skipped*, and everything around
-it still compiles and still shows up in the detail page and the preview. The node, on the other
-hand, parses strictly and refuses to run — silently rendering an image from a document nobody
-could read is the one outcome worse than an error.
+**Broken text remains editable, but it does not execute.** The editor parses in recovering
+mode: an unclosed brace is reported (E03, with a squiggle and a glyph in the margin) and skipped,
+so valid content around it can still be inspected. The node parses strictly and refuses to run
+until the document is valid.
 
 ---
 
@@ -344,6 +351,11 @@ back at the library. `Ctrl+Z` undoes the replacement.
 If what you selected is exactly one group with settings — `{ closed eyes, smile }.set{schedule:
 {0, 0.5}}` — the new group **keeps those settings**, region and schedule included. Select a bare
 list of tags and you get a bare group.
+
+When a tag is copied into, added to, or edited in a library group, its library form is normalized:
+unescaped underscores become spaces, and parentheses outside the outer `(tag:weight)` wrapper are
+escaped as `\(` and `\)`. For example, `blue_hair_(foo_bar)` becomes `blue hair \(foo bar\)`;
+`(red_hair:0.8)` keeps its weight as the item's `0.8` weight. LoRA entries are left unchanged.
 
 What it cannot do faithfully: a group is a flat list of items, and a `[@region]` or `[@schedule]`
 block is a tree. One of those inside the selection is stored as a **single item whose text is the

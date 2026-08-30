@@ -46,12 +46,6 @@ ACTIVE_UNLOCK = DATA_DIR / "unlock_active.md"
 BRIDGE_HOST = "127.0.0.1"
 BRIDGE_PORT = int(os.getenv("COMFYUI_MCP_BRIDGE_PORT", "9180"))
 
-#: Where a patched fork usually sits, if settings say nothing.
-ENTRY_GUESSES = [
-    r"E:\AI\forks\comfyui-mcp\dist\index.js",
-]
-
-
 class OrchestratorNotFound(Exception):
     """No entry point to run. The user has to point us at one."""
 
@@ -175,9 +169,9 @@ def _write_active_unlock() -> Path | None:
 
 
 def set_entry(path: str) -> str:
-    entry = Path(path).expanduser()
-    if not entry.is_file():
-        raise OrchestratorNotFound(f"{entry} is not a file")
+    entry = Path(path).expanduser().resolve()
+    if not _is_valid_entry(entry):
+        raise OrchestratorNotFound("the orchestrator entry must be a dist/index.js file")
     settings = _load()
     settings["entry"] = str(entry)
     _save(settings)
@@ -185,19 +179,25 @@ def set_entry(path: str) -> str:
 
 
 def find_entry() -> str | None:
-    """A saved path, then the environment, then the usual place."""
+    """A saved path, then the explicit environment override."""
     saved = _load().get("entry")
-    if saved and Path(saved).is_file():
-        return saved
+    if saved and _is_valid_entry(Path(saved)):
+        return str(Path(saved).resolve())
 
     env = os.getenv("XYZ_AGENT_ENTRY")
-    if env and Path(env).is_file():
-        return env
+    if env and _is_valid_entry(Path(env)):
+        return str(Path(env).expanduser().resolve())
 
-    for guess in ENTRY_GUESSES:
-        if Path(guess).is_file():
-            return guess
     return None
+
+
+def _is_valid_entry(path: Path) -> bool:
+    path = path.expanduser()
+    return (
+        path.is_file()
+        and path.name.lower() == "index.js"
+        and path.parent.name.lower() == "dist"
+    )
 
 
 def find_node() -> str | None:
@@ -225,7 +225,7 @@ def wait_for_bridge(timeout: float = 60.0) -> bool:
     return False
 
 
-def _env_for_child(overrides: dict | None = None) -> dict:
+def _env_for_child() -> dict:
     """The orchestrator reads its whole configuration from the environment.
 
     Anything already set in ComfyUI's environment wins, so a user who exports
@@ -311,16 +311,22 @@ def _env_for_child(overrides: dict | None = None) -> dict:
     # this the only way to set one is to export it in whatever shell started
     # ComfyUI, which does not survive a reboot or a desktop launcher.
     #
-    # Applied BEFORE the per-call overrides so a route can still win, and it
-    # deliberately overwrites rather than defaulting: a value the user wrote
-    # here is a decision, not a fallback.
+    # These values deliberately overwrite inherited provider settings, but may
+    # not replace process-control variables or paths that enforce our safety boundary.
+    blocked = {
+        "NODE_OPTIONS", "NODE_PATH", "PATH", "PATHEXT", "COMSPEC",
+        "PYTHONPATH", "PYTHONHOME", "LD_PRELOAD", "LD_LIBRARY_PATH",
+        "DYLD_INSERT_LIBRARIES", "DYLD_LIBRARY_PATH",
+        "COMFYUI_PATH", "COMFYUI_URL", "COMFYUI_MCP_HOUSE_RULES_FILE",
+        "COMFYUI_MCP_UNLOCK_FILE",
+    }
     for key, value in (settings.get("env") or {}).items():
+        name = str(key).strip()
+        upper = name.upper()
+        if not name or upper in blocked or upper.startswith("DYLD_"):
+            continue
         if value:
-            env[str(key)] = str(value)
-
-    for key, value in (overrides or {}).items():
-        if value:
-            env[str(key)] = str(value)
+            env[name] = str(value)
     return env
 
 
@@ -598,7 +604,7 @@ def _pi_key(settings: dict) -> str | None:
     return record.get("key") if isinstance(record, dict) else None
 
 
-def launch(wait: bool = True, timeout: float = 60.0, env_overrides: dict | None = None) -> dict:
+def launch(wait: bool = True, timeout: float = 60.0) -> dict:
     """Start the orchestrator if the bridge is not already up, then wait for it."""
     already = is_running()
     if already:
@@ -630,7 +636,7 @@ def launch(wait: bool = True, timeout: float = 60.0, env_overrides: dict | None 
         stdin=subprocess.DEVNULL,
         close_fds=True,
         creationflags=creationflags,
-        env=_env_for_child(env_overrides),
+        env=_env_for_child(),
     )
 
     if not wait:

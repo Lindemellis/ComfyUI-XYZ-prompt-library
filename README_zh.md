@@ -2,106 +2,57 @@
 
 [English](README.md) | **中文**
 
-一个 ComfyUI 自定义节点包，包含四个较大的工具——**Danbooru（+ 可选 Gelbooru）标签自动补全**、**分层提示词库（V2）**、**LLM 提示词助手**（多家模型可选，带本地 tag 验真）、**图片画廊**。
+一个围绕提示词创作、图片管理和 Krita 工作流整理过的 ComfyUI 自定义节点包。
 
-每个工具都有独立手册：
-
-- 📖 [标签自动补全与数据集](tagdb/README_zh.md)
-- 📖 [提示词库 V2](prompt_library_v2/README_zh.md)
-- 📖 [LLM 提示词助手](llm/README_zh.md)
-- 📖 [图片画廊](gallery/README_zh.md)
-- 📖 [遮罩节点](mask_nodes/README_zh.md) —— 给 PLv3 的 region 用的矩形遮罩
-- 📖 [Krita 联动](krita_nodes/README_zh.md) —— 从运行中的 Krita 拉图层和遮罩
-- 📖 [Cache Slot](cache_nodes/README_zh.md) —— 跨运行的图片交接
-
-## 安装
-
-1. 进入 ComfyUI 的 `custom_nodes` 目录：
-   ```bash
-   cd ComfyUI/custom_nodes/
-   ```
-2. 克隆本仓库：
-   ```bash
-   git clone https://github.com/Lindemellis/ComfyUI-XYZ-prompt-library.git
-   ```
-3. *（可选）* 安装 `curl_cffi`——**仅当**你想自己从 Danbooru 抓取/更新标签数据集时才需要。下载预构建数据集不需要它：
-   ```bash
-   pip install curl_cffi>=0.7.0
-   ```
-4. 重启 ComfyUI。
-
-**首次运行**时，会在后台自动下载预构建的 Danbooru 标签数据集（约 66 MB，约 11.8 万个 post_count ≥ 50 的标签）。下载完成后标签自动补全即可用。不会自动抓取——如果下载失败（离线等），可在「标签数据集」面板手动重试。
-
-## 功能
+## 现有功能
 
 | 工具 | 作用 | 手册 |
 |---|---|---|
-| **标签自动补全** | 在任意提示词框输入时给出 Danbooru 标签建议；带有版本化的本地数据集、增量/全量更新、快照，以及按日期回溯的「时间机器」重建。 | [tagdb](tagdb/README_zh.md) |
-| **提示词库 V2** | 基于 SQLite 的分层提示词库，支持 `[ref]` 引用、触发别名、权重、随机模式，以及浮动文本编辑器。由两个节点在执行时解析。 | [plv2](prompt_library_v2/README_zh.md) |
-| **LLM 提示词助手** | 一个浮动窗口，用大模型（DeepSeek / OpenAI / Claude / Grok / 自定义）生成或优化文生图提示词，并把 danbooru tag 拿到本地数据集验真，保证 tag 真实存在。 | [llm](llm/README_zh.md) |
-| **图片画廊** | 浏览与管理 ComfyUI 的 output/input 图片**和视频**——筛选、标签、批量操作、元数据查看、视频播放。 | [gallery](gallery/README_zh.md) |
-| **遮罩节点** | 在画布上画矩形遮罩并挂到 CLIP 上，让 PLv3 的 `imask: i` region 有东西可指。 | [masks](mask_nodes/README_zh.md) |
-| **Krita 联动** | 一个 Krita 插件 + 四个节点：从运行中的 Krita 拉图层/遮罩、把 flat color 图层拆成任意形状的区域遮罩、把结果推回去当新图层。ComfyUI 仍是主工作台，Krita 只当画板。 | [krita](krita_nodes/README_zh.md) |
-| **Cache Slot** | 把图片存进命名的槽，下次运行取出来——不经过 Krita 的跨运行交接。 | [cache](cache_nodes/README_zh.md) |
+| **Prompt Library V3** | 提示词语言、嵌套组、时间调度、区域、预设、已保存文档、Monaco 编辑器和实时详情控制，最终编译为 [comfyui-prompt-control](https://github.com/asagi4/comfyui-prompt-control) 语法。 | [PLv3](prompt_library_v3/README.md) |
+| **标签自动补全** | 仅英文的 Danbooru 标签和可选 Gelbooru 标签；本地数据集支持更新、快照和按日期回溯。 | [TagDB](tagdb/README_zh.md) |
+| **XYZ Gallery** | 浏览和管理 ComfyUI 图片与视频，查看元数据、筛选、打标签、下载不同净化版本，并发送到 Krita。 | [画廊](gallery/README_zh.md) |
+| **遮罩节点** | 画矩形遮罩并挂到 CLIP，供 PLv3 的 `imask: i` 区域使用。 | [遮罩](mask_nodes/README_zh.md) |
+| **Krita 联动** | 从 Krita 获取图片或遮罩、拆分颜色区域、打开文件，以及把生成结果作为图层或文档送回 Krita。 | [Krita](krita_nodes/README_zh.md) |
+| **Cache Slot** | 把图片写入命名槽，在之后的运行中读取。 | [Cache](cache_nodes/README_zh.md) |
+| **Inpaint RGBA** | 把 Inpaint Crop and Stitch 的结果变成位置正确的透明 RGBA 图层。 | [源码](inpaint_nodes/) |
+| **ComfyUI Agent 联动** | 为独立的 comfyui-mcp 面板/编排器提供本地启动器和安全边界。 | [Agent](agent_nodes/README.md) |
 
-## 入口在哪里
+Prompt Library V2 和早期原创 LLM 提示词助手已经退役。个人 PLv2 数据目录不会被删除；[一次性 V2 → V3 迁移工具](prompt_library_v3/README.md#migrating-from-v2)继续保留。
 
-重启 ComfyUI 后，顶栏会出现两个按钮：
+向 PLv3 库组复制、新增或编辑标签时，未转义的下划线会转换为空格，权重语法之外的括号会
+自动转义；外层 `(tag:weight)` 会保留其权重。
 
-- **Open XYZ Gallery**（图片图标）——打开画廊。
-- **XYZ Tools**（菜单）——打开：
-  - *Prompt Library V2 — Library*（库）
-  - *Prompt Library V2 — Text Editor*（文本编辑器）
-  - *Prompt Library V2 — LLM Prompt*（LLM 提示词助手）
-  - *XYZ Prompt Tools Settings*（设置）
+## 安装
 
-**设置窗口**（也可从 ComfyUI 命令面板的 *"Open XYZ Prompt Tools settings"* 打开）包含以下标签页：
+1. 把本仓库克隆到 `ComfyUI/custom_nodes/`。
+2. 使用 PLv3 时安装 [comfyui-prompt-control](https://github.com/asagi4/comfyui-prompt-control)。
+3. 只有在你要自行抓取或更新 Danbooru 时，才需要额外安装 `curl_cffi>=0.7.0`；下载预构建数据集不需要。
+4. 重启 ComfyUI。
 
-| 标签页 | 控制项 |
-|---|---|
-| Autocomplete | 总开关、最大建议条数、隐藏冷门标签、**Danbooru / Gelbooru 来源** |
-| Insertion | 下划线→空格、自动逗号、转义括号、全角→半角 |
-| Library | 把你的提示词库作为补全来源；条目引用建议 |
-| Related | 点击标签查相关标签 + 缓存有效期 |
-| Preview | 悬停显示画师作品 / 标签预览图（默认均**关闭**） |
-| Tag dataset | **Danbooru / Gelbooru 两个分页**：凭据、预构建数据集、更新、快照、重建 |
-| LLM | **提供方**（DeepSeek / OpenAI / Claude / Grok / 自定义）、API key、模型、**Test connection**、temperature/top_p、查表来源 |
-| About | 版本 / 信息 |
-
-每个 Prompt Library V2 节点上也有各自的 **Library / Editor / Preview / LLM** 按钮。
+首次运行时，预构建 Danbooru 数据集会在后台下载。下载完成后自动补全即可使用。数据集只保存和搜索英文规范名与英文别名；不保存日文、中文 wiki 翻译，这是明确的设计选择。
 
 ## 节点
 
 | 节点 | 分类 | 用途 |
 |---|---|---|
-| XYZ Prompt Library V2 Positive | `XYZNodes/Prompt` | 针对库解析正向提示词模板 |
-| XYZ Prompt Library V2 Negative | `XYZNodes/Prompt` | 针对库解析负向提示词模板 |
-| XYZ Mask Editor | `XYZNodes/Mask` | 画矩形遮罩；每个矩形一个 `MASK` 输出（[手册](mask_nodes/README_zh.md)） |
-| XYZ Attach Masks | `XYZNodes/Mask` | 把遮罩挂到 `CLIP` 上，供 `IMASK(i)` / PLv3 的 `imask: i` 引用 |
-| XYZ Krita Fetch Image | `XYZNodes/Krita` | Krita 图层（或整个文档）→ `IMAGE`（[手册](krita_nodes/README_zh.md)） |
-| XYZ Krita Fetch Mask | `XYZNodes/Krita` | Krita 图层 → `MASK`；遮罩类直读，绘画图层取 alpha |
-| XYZ Krita Fetch Color Masks | `XYZNodes/Krita` | 一个 flat color 图层 → N 张任意形状的遮罩 |
-| XYZ Krita Send To Krita | `XYZNodes/Krita` | `IMAGE` → Krita 新图层或新文档；可以连带放大整个文档 |
-| XYZ Krita Open File | `XYZNodes/Krita` | 在 Krita 里打开硬盘上的文件——`.kra` 保留所有图层 |
-| XYZ Cache Slot Write / Read | `XYZNodes/Cache` | 把图片存起来供下次运行取用（[手册](cache_nodes/README_zh.md)） |
+| XYZ Prompt Library V3 | `XYZNodes/Prompt` | 用普通文本框编辑并编译 PLv3 文档 |
+| XYZ Prompt Library V3 Monaco | `XYZNodes/Prompt` | 同一编译器，节点内嵌完整编辑器 |
+| XYZ Mask Editor | `XYZNodes/Mask` | 画矩形并输出 base、fill 和逐矩形遮罩 |
+| XYZ Attach Masks | `XYZNodes/Mask` | 按 PLv3 IMASK 顺序把遮罩挂到 CLIP |
+| XYZ Krita Fetch Image | `XYZNodes/Krita` | 把 Krita 图层或文档取为 `IMAGE` |
+| XYZ Krita Fetch Mask | `XYZNodes/Krita` | 把遮罩图层或绘画图层 alpha 取为 `MASK` |
+| XYZ Krita Fetch Color Masks | `XYZNodes/Krita` | 把纯色区域拆成动态遮罩输出 |
+| XYZ Krita Send To Krita | `XYZNodes/Krita` | 把图片发送为 Krita 新图层或新文档 |
+| XYZ Krita Open File | `XYZNodes/Krita` | 在 Krita 打开图片或 `.kra` 文件 |
+| XYZ Cache Slot Write / Read | `XYZNodes/Cache` | 在不同运行间保存和读取图片 |
+| XYZ Inpaint Stitch To RGBA | `XYZNodes/Inpaint` | 输出位置正确的透明修补图层 |
 
-## 常见问题
+## 界面入口
 
-**输入日文/中文找不到标签？**
-数据集不包含 wiki 翻译。搜索只匹配英文标签名和画师曾用名。
+顶栏提供 XYZ Gallery，以及 **XYZ Tools** 菜单中的 PLv3 编辑器/库、TagDB 维护、设置、Krita 和可选 Agent 启动器。设置页只保留自动补全、插入、相关标签、预览、PLv3、数据集和常规信息。
 
-**需要 Danbooru 账号吗？**
-下载预构建数据集不需要。只有自己跑增量/全量更新或构建数据集时，才需要（免费的登录名 + API key）。
+## 数据与隐私
 
-**标签数量和 Release 写的对不上？**
-Release 以 `min_post_count = 50` 构建。如果你用更低阈值自己更新，会得到更多标签。
+运行数据位于已被 Git 忽略的 `tagdb_data/`、`prompt_library_v3_data/`、`gallery_data/`、`krita_data/`、`agent_data/`、`output/` 等目录。已退役的 `prompt_library_v2_data/` 同样保持忽略并原样保留，仅用于迁移已有个人数据。
 
-**标签数量突然变少？**
-可能是切换了活动快照。在 *Tag dataset → Snapshots* 里，点工作库（`danbooru.sqlite`）那一行的 **Use** 切回去。
-
-**Gelbooru 来源是什么？**
-可选的第二套标签集。在 *设置 → Autocomplete → Gelbooru tags* 启用，在 *Tag dataset → Gelbooru* 安装数据集。两个来源都开启时，建议会合并去重，每行显示可点击的 **D**/**G** 角标（Danbooru wiki / Gelbooru 帖子）。冲突时以 Danbooru 为准；Gelbooru 仅当前快照（无时间回溯）。详见[标签手册](tagdb/README_zh.md#gelbooru第二来源)。
-
----
-
-数据目录（`tagdb_data/`、`prompt_library_v2_data/`、`prompt_library_v3_data/`、`gallery_data/`、`krita_data/`）在运行时创建，且已被 gitignore。
+TagDB 接口不会把已保存 API key 返回给浏览器；Agent 控制接口只接受本机回环地址请求。

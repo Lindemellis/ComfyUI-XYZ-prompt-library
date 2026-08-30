@@ -6,7 +6,7 @@
  * shows a dropdown at the caret position.
  *
  * Guard flag: element._xyzTagACHooked — prevents double-attachment alongside
- * the PLv2 hook (_plv2Hooked) or other extensions.
+ * other extensions that may decorate the same prompt field.
  *
  * Category colors (danbooru convention):
  *   0 general → #aaddff   1 artist  → #ffaacc
@@ -53,11 +53,6 @@ const settings = {
   showTagPreview: false,    // show preview image for any tag on hover
   previewCount: 1,          // how many preview images to show (1–10)
   halfwidth: false,        // full-width （） → half-width on insert
-  // Prompt Library sources
-  useLibrary: true,        // suggest prompts from the Prompt Library (tag mode)
-  maxLibrary: 10,          // cap on library suggestions shown
-  useRefs: true,           // suggest entry/trigger refs after "[" or "/"
-  maxRefs: 10,             // cap on ref suggestions
   // Dataset
   scrapeMin: 50,           // default scrape threshold (count >= N)
   // Tag sources feeding autocomplete (gelbooru only contributes if installed).
@@ -162,169 +157,6 @@ function _applyMinCount(results) {
   return results.filter((r) => (r.post_count ?? Infinity) >= settings.minPostCount);
 }
 
-// Library prompts matching q → candidates {kind:'library', name, entry}.
-// Pure [ref] entries (e.g. "[toki.official_custome]") are filtered out —
-// ref autocomplete is only shown after typing "[" or "/".
-async function fetchLibraryPrompts(q, limit) {
-  try {
-    const r = await fetch(`/xyz/plv2/ac/prompts?q=${encodeURIComponent(q)}&limit=${limit}`);
-    if (!r.ok) return [];
-    const data = await r.json();
-    const pureRef = /^\[[^\]]+\]$/;
-    return (data.prompts || [])
-      .filter((p) => !pureRef.test((p.content || '').trim()))
-      .map((p) => ({
-        kind: 'library', name: p.content, entry: p.entry_name || p.full_path || '',
-      }));
-  } catch { return []; }
-}
-
-// Entry/trigger refs matching q.
-// Entry names and their alias triggers are merged into one option per entry.
-// Each merged candidate has {kind:'ref', refKind, names:[...], selIdx, definition}.
-async function fetchRefs(q, limit, refKind) {
-  try {
-    const r = await fetch(`/xyz/plv2/ac/refs?q=${encodeURIComponent(q)}&limit=${limit}`);
-    if (!r.ok) return [];
-    const data = await r.json();
-    const raw = (data.refs || []);
-
-    // Group triggers by their owning entry's full_path
-    const triggersByEntry = new Map();
-    const entries = [];
-
-    // Track node ID and auto_trigger per full_path
-    const idByPath = new Map();
-    const autoByPath = new Map();
-
-    for (const x of raw) {
-      if (x.kind === 'entry') {
-        entries.push({ name: x.name, definition: x.definition, id: x.id, auto_trigger: x.auto_trigger });
-        if (x.id != null) idByPath.set(x.name, x.id);
-        if (x.auto_trigger) autoByPath.set(x.name, x.auto_trigger);
-      } else {
-        const fp = x.definition;
-        if (!triggersByEntry.has(fp)) triggersByEntry.set(fp, []);
-        triggersByEntry.get(fp).push(x.name);
-        if (x.id != null && !idByPath.has(fp)) idByPath.set(fp, x.id);
-      }
-    }
-
-    // Merge: each entry + its triggers into one row.
-    const merged = [];
-    const seenPaths = new Set();
-
-    for (const e of entries) {
-      const fp = e.name;
-      if (seenPaths.has(fp)) continue;
-      seenPaths.add(fp);
-      const trigs = triggersByEntry.get(fp) || [];
-      const allNames = [fp];
-      for (const t of trigs) { if (!allNames.includes(t)) allNames.push(t); }
-      const auto = e.auto_trigger || autoByPath.get(fp) || null;
-      merged.push({
-        kind: 'ref', refKind,
-        names: allNames,
-        definition: e.definition,
-        auto_trigger: auto,
-        id: e.id || idByPath.get(fp) || null,
-      });
-    }
-
-    // Orphan triggers (entry not in results)
-    for (const [fp, trigs] of triggersByEntry) {
-      if (!seenPaths.has(fp) && trigs.length) {
-        seenPaths.add(fp);
-        merged.push({
-          kind: 'ref', refKind,
-          names: trigs,
-          definition: fp,
-          auto_trigger: autoByPath.get(fp) || null,
-          id: idByPath.get(fp) || null,
-        });
-      }
-    }
-
-    return merged.slice(0, limit);
-  } catch { return []; }
-}
-
-// Resolve an entry ref to its shallow text (for "/entry" insertion).
-async function resolveShallow(ref) {
-  try {
-    const r = await fetch('/xyz/plv2/resolve_shallow', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ref }),
-    });
-    if (!r.ok) return null;
-    const d = await r.json();
-    return d.found ? (d.text || '') : null;
-  } catch { return null; }
-}
-
-// Entries whose prompts contain q → {id, name, full_path, pos_neg, delimiter, auto_trigger}.
-async function fetchEntriesByPrompt(q, limit) {
-  try {
-    const r = await fetch(`/xyz/plv2/ac/entries_by_prompt?q=${encodeURIComponent(q)}&limit=${limit}`);
-    if (!r.ok) return [];
-    const data = await r.json();
-    return (data.entries || []).map((e) => ({
-      kind: 'plv2_entry',
-      id: e.id,
-      name: e.name,
-      full_path: e.full_path,
-      pos_neg: e.pos_neg,
-      delimiter: e.delimiter,
-      auto_trigger: e.auto_trigger,
-      has_prompts: true,
-    }));
-  } catch { return []; }
-}
-
-// Fetch an entry's prompt text for preview.
-async function fetchEntryPreview(nodeId) {
-  try {
-    const r = await fetch(`/xyz/plv2/nodes/${nodeId}/preview`, {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ seed: 0 }),
-    });
-    if (!r.ok) return null;
-    const d = await r.json();
-    return d.text || '';
-  } catch { return null; }
-}
-
-// Resolve a ref and return the entry node.
-async function resolveRefEntry(refInner) {
-  try {
-    const r = await fetch('/xyz/plv2/resolve_ref', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ ref: refInner }),
-    });
-    if (!r.ok) return null;
-    const d = await r.json();
-    return d.node || null;
-  } catch { return null; }
-}
-
-// A bracket expression containing ':' or '|' is prompt scheduling / alternation
-// syntax ([red:blue:0.5], [cat|dog:0.1]) for downstream nodes, NOT a PLv2 [entry]
-// reference (paths/trigger names never contain either). Don't treat it as a ref.
-function _isScheduleSyntax(inner) {
-  return inner != null && (inner.indexOf(':') !== -1 || inner.indexOf('|') !== -1);
-}
-
-// Extract the inner text of a [ref] at caret position.
-function _refAtCaret(text, pos) {
-  const re = /\[([^\[\]\n]*)\]/g;
-  let m;
-  while ((m = re.exec(text)) !== null) {
-    if (_isScheduleSyntax(m[1])) continue;   // schedule syntax, not a ref
-    if (pos >= m.index && pos <= m.index + m[0].length) return m[1];
-  }
-  return null;
-}
-
 // Normalise a prompt/tag name to canonical underscore form for dedup comparison.
 // Strips backslash escapes and weight parens, then spaces → underscores.
 function _canonicalName(name) {
@@ -334,16 +166,6 @@ function _canonicalName(name) {
     .trim()
     .replace(/\s+/g, '_')
     .toLowerCase();
-}
-
-// Merge tag + library candidates for tag mode: library first, drop a library prompt
-// whose text matches a danbooru tag (canonical underscore form comparison).
-function _mergeTagSources(tags, library) {
-  const tagNames = new Set(tags.map((t) => _canonicalName(t.name)));
-  const lib = library
-    .filter((p) => !tagNames.has(_canonicalName(p.name)))
-    .slice(0, settings.maxLibrary);
-  return [...lib, ...tags];
 }
 
 // ─── Artist works popup ─────────────────────────────────────────────────────────
@@ -577,8 +399,7 @@ function _tokenStart(text, pos) {
   // Braces are boundaries too. No tag contains one, and in PLv3 a group body opens
   // inline — `0.3 - 1: { open eyes, looking at viewer }` — so without this the FIRST
   // item of every `{ }` swallows the brace and the entry head before it, and the last
-  // one swallows the closing brace. (PLv2's `{a|b}` only benefits: the token stops
-  // being the whole choice construct.)
+  // one swallows the closing brace.
   const lastOpenBrace  = text.lastIndexOf('{', pos - 1);
   const lastCloseBrace = text.lastIndexOf('}', pos - 1);
   let start = Math.max(lastComma, lastNewline, lastOpenBrace, lastCloseBrace) + 1;
@@ -614,7 +435,7 @@ function getPartialTag(el) {
     if (/^\d*\.?\d+$/.test(after.trim())) return '';
   }
 
-  // Don't trigger inside [ref] brackets (PLv2 references)
+  // Don't trigger inside bracketed library paths or region headers.
   const lastOpen  = text.lastIndexOf('[', pos - 1);
   const lastClose = text.lastIndexOf(']', pos - 1);
   if (lastOpen > lastClose) return '';
@@ -622,7 +443,7 @@ function getPartialTag(el) {
   // Where tags are unwelcome inside braces. A host can override the rule: PLv3 uses
   // `{ }` for group bodies (prompt text, tags welcome) and only wants tags withheld
   // inside `.set{ }` / a region container, so it supplies its own predicate. Without
-  // one, the default is PLv2's: any open `{` is a `{choice|choice}` and suppresses.
+  // one, the conservative default suppresses tags inside any open brace.
   if (el._xyzSuppressTags) {
     if (el._xyzSuppressTags(text, pos)) return '';
   } else {
@@ -685,42 +506,12 @@ function getTokenEnd(el) {
   return _tokenEnd(text, pos);
 }
 
-// ─── Token mode analysis ────────────────────────────────────────────────────
-// Decides tag mode vs ref mode from the current token's leading char.
-//   unclosed "[…"  → ref/bracket (insert [name])
-//   "/…" at token start → ref/slash (insert resolved text)
-//   otherwise       → tag mode (tags + library prompts)
+// ─── Token analysis ──────────────────────────────────────────────────────────
 
 function _analyzeToken(el) {
   const text = _acVal(el);
-  const pos  = _acCaret(el);
-
-  // A tags-only host (PLv3's Monaco editor) has its OWN `[` and `/` syntax and its own
-  // completion for it. Offering PLv2 library refs there would be answering a question
-  // nobody asked, in another library's vocabulary.
-  if (el._xyzTagsOnly) {
-    return { mode: 'tag', query: getPartialTag(el), rangeStart: _tokenStart(text, pos) };
-  }
-
-  const lastOpen  = text.lastIndexOf('[', pos - 1);
-  const lastClose = text.lastIndexOf(']', pos - 1);
-  if (lastOpen > lastClose) {
-    const inner = text.substring(lastOpen + 1, pos);
-    // Inside prompt scheduling/alternation syntax ([red:blue:0.5], [cat|dog:0.1]):
-    // not a PLv2 [ref], so don't offer library-entry suggestions — fall through.
-    if (!_isScheduleSyntax(inner)) {
-      return { mode: 'ref', refKind: 'bracket',
-               query: inner.trim(), rangeStart: lastOpen };
-    }
-  }
-  const start = _tokenStart(text, pos);
-  const seg = text.substring(start, pos);
-  const sm = seg.match(/^(\s*)\/(.*)$/);
-  if (sm) {
-    return { mode: 'ref', refKind: 'slash',
-             query: sm[2].trim(), rangeStart: start + sm[1].length };
-  }
-  return { mode: 'tag', query: getPartialTag(el), rangeStart: start };
+  const pos = _acCaret(el);
+  return { query: getPartialTag(el), rangeStart: _tokenStart(text, pos) };
 }
 
 // ─── Insertion text builders ──────────────────────────────────────────────────
@@ -807,34 +598,21 @@ class TagAutocompleteUI {
     return this._root.style.display !== 'none';
   }
 
-  // Tag mode: danbooru/gelbooru tags + library prompts (library first, deduped).
+  // Tag mode: Danbooru/Gelbooru tags only.
   async showTags(el, info) {
     this._isRelated = false;
-    this._isInfo    = false;
+    this._isInfo = false;
     this._lastQuery = info.query || '';
-    // Anima "@artist" syntax: "@xxx" → real tags containing the literal "@xxx" PLUS
-    // artist tags matching "xxx" (inserted with the "@").
     if (settings.animaArtist && (info.query || '').startsWith('@')) {
       return this._showAtTags(el, info);
     }
-    // A tags-only host has its own library (PLv3's), reached through its own `[`
-    // completion. Mixing PLv2's library prompts into its dropdown would be answering
-    // in the wrong library's vocabulary.
-    const useLib = settings.useLibrary && !el._xyzTagsOnly;
-    const [tagsRaw, libRaw] = await Promise.all([
-      searchTags(info.query, settings.maxSuggestions),
-      useLib ? fetchLibraryPrompts(info.query, settings.maxLibrary) : [],
-    ]);
-    const tags = _applyMinCount(tagsRaw).map((t) => ({ ...t, kind: 'tag' }));
-    const results = _mergeTagSources(tags, libRaw);
+    const tagsRaw = await searchTags(info.query, settings.maxSuggestions);
+    const results = _applyMinCount(tagsRaw).map((tag) => ({ ...tag, kind: 'tag' }));
     if (!results.length) { this.hide(); return; }
-    // Exact match first: if a candidate's name equals what the user typed, surface
-    // it as the top option (e.g. typing "iumu" puts the "iumu" tag first, ahead of
-    // higher-post-count tags like "maki_(natoriumu)" that merely contain it).
-    const qc = _canonicalName(info.query);
-    if (qc) {
-      const i = results.findIndex((c) => _canonicalName(c.name) === qc);
-      if (i > 0) results.unshift(results.splice(i, 1)[0]);
+    const query = _canonicalName(info.query);
+    if (query) {
+      const exact = results.findIndex((candidate) => _canonicalName(candidate.name) === query);
+      if (exact > 0) results.unshift(results.splice(exact, 1)[0]);
     }
     this._open(el, results, info.rangeStart);
   }
@@ -855,36 +633,6 @@ class TagAutocompleteUI {
     // Dedupe an artist that already appears as a literal "@name" tag (compare inserted form).
     const seen = new Set(literal.map((t) => _canonicalName(t.name)));
     const results = [...artists.filter((a) => !seen.has(_canonicalName('@' + a.name))), ...literal];
-    if (!results.length) { this.hide(); return; }
-    this._open(el, results, info.rangeStart);
-  }
-
-  // Local [this.<subentry>] candidates matching `query` by substring (so they show
-  // for "[thi", "[this", "[qual", …). Entry text box only (#3).
-  _buildThisRefs(el, query) {
-    let names = [];
-    try { names = [...new Set(el._xyzGetThisRefs() || [])]; } catch {}
-    const q = (query || '').toLowerCase();
-    return names
-      .filter((n) => n)
-      .map((n) => `this.${n}`)
-      .filter((r) => !q || r.toLowerCase().includes(q))
-      .slice(0, settings.maxRefs)
-      .map((r) => ({ kind: 'ref', refKind: 'bracket', names: [r],
-                     definition: r, auto_trigger: r, id: null, _thisRef: true }));
-  }
-
-  // Ref mode: [this.<subentry>] candidates (entry box) + library entry/trigger refs,
-  // merged into one dropdown.
-  async showRefs(el, info) {
-    this._isRelated = false;
-    this._isInfo    = false;
-    this._lastQuery = info.query || '';
-    const thisResults = (info.refKind === 'bracket' && typeof el._xyzGetThisRefs === 'function')
-      ? this._buildThisRefs(el, info.query) : [];
-    const libResults = (settings.useRefs && info.query !== null)
-      ? await fetchRefs(info.query, settings.maxRefs, info.refKind) : [];
-    const results = [...thisResults, ...libResults];
     if (!results.length) { this.hide(); return; }
     this._open(el, results, info.rangeStart);
   }
@@ -977,64 +725,27 @@ class TagAutocompleteUI {
     return DEFAULT_DELIM;
   }
 
-  // Insert a candidate by kind: tag/library → normalized text + delim; ref/bracket
-  // → [name]; ref/slash → the entry's resolved-shallow text.
+  // Insert a tag candidate, preserving the host delimiter and undo behaviour.
   async _insert(el, cand) {
     const text = _acVal(el);
     const delim = this._getDelimiter();
-    let core;
-
-    if (cand.kind === 'ref' && cand.refKind === 'slash') {
-      const refName = (cand.names && cand.names[0]) || cand.definition || cand.name;
-      const resolved = await resolveShallow(refName);
-      if (resolved == null) { this.hide(); return; }
-      core = resolved;
-    } else if (cand.kind === 'ref') {
-      const refName = (cand.names && cand.names[0]) || cand.definition || cand.name;
-      core = `[${refName}]`;
-    } else if (cand.kind === 'library') {
-      core = cand.name;
-    } else if (cand.kind === 'plv2_entry') {
-      const ref = cand.auto_trigger || cand.full_path || cand.name;
-      core = `[${ref}]`;
-    } else {
-      core = _normalizeTagInsert(cand.name);
-      if (cand._atArtist) core = '@' + core;   // Anima artist syntax: insert as "@name"
-    }
-
-    // Textarea: the execCommand splice fires a trusted `input` event; tell the handler
-    // to ignore that one so the dropdown doesn't reopen on what we just inserted. The
-    // contentEditable adapter's splice fires no input event, so don't arm the flag there
-    // (it would otherwise swallow the user's next real keystroke).
+    let core = _normalizeTagInsert(cand.name);
+    if (cand._atArtist) core = '@' + core;
     if (this._handler && !el._xyzAcc) this._handler._suppressInput = true;
 
-    if (this._isRelated && cand.kind === 'tag' && !cand._isSelf) {
-      // Related-tag insertion: insert AFTER the original clicked token.
+    if (this._isRelated && !cand._isSelf) {
       const end = this._rangeStart;
       const after = text.substring(end, end + delim.length);
       const before = text.substring(Math.max(0, end - delim.length), end);
-      const needLeading  = before !== delim && end > 0 && before[before.length - 1] !== ',';
+      const needLeading = before !== delim && end > 0 && before[before.length - 1] !== ',';
       const needTrailing = after !== delim && end < text.length && after[0] !== ',' && after[0] !== '\n';
-      const toInsert = (needLeading ? delim : '') + core + (needTrailing ? delim : '');
-      _spliceInsert(el, end, end, toInsert);
+      _spliceInsert(el, end, end, (needLeading ? delim : '') + core + (needTrailing ? delim : ''));
     } else {
       const start = this._rangeStart;
       const pos = _acCaret(el);
       const afterCursor = text[pos];
-      const beforeStart = text[start - 1];
-      let toInsert;
-      if (cand.kind === 'ref' && cand.refKind === 'bracket') {
-        const wantComma = settings.autoInsertComma
-          && afterCursor !== ',' && afterCursor !== ':' && afterCursor !== ']';
-        toInsert = core + (wantComma ? delim : '');
-      } else if (cand.kind === 'ref' && cand.refKind === 'slash') {
-        toInsert = core + (settings.autoInsertComma && afterCursor !== ',' ? delim : '');
-      } else {
-        const wantComma = settings.autoInsertComma && afterCursor !== ',' && afterCursor !== ':';
-        toInsert = core + (wantComma ? delim : '');
-      }
-      // If the char just before start is already a delimiter, prepend a space
-      if (beforeStart === ',') toInsert = ' ' + toInsert;
+      let toInsert = core + (settings.autoInsertComma && afterCursor !== ',' && afterCursor !== ':' ? delim : '');
+      if (text[start - 1] === ',') toInsert = ' ' + toInsert;
       _spliceInsert(el, start, pos, toInsert);
     }
     this.hide();
@@ -1051,10 +762,7 @@ class TagAutocompleteUI {
         display: 'flex', alignItems: 'center', padding: '4px 8px',
         cursor: 'pointer', gap: '6px', borderBottom: '1px solid #2a2a3e',
       });
-      if (cand.kind === 'ref') this._fillRefRow(row, cand);
-      else if (cand.kind === 'library') this._fillLibraryRow(row, cand);
-      else if (cand.kind === 'plv2_entry') this._fillEntryRow(row, cand);
-      else if (cand.kind === 'note') this._fillNoteRow(row, cand);
+      if (cand.kind === 'note') this._fillNoteRow(row, cand);
       else this._fillTagRow(row, cand);
       frag.appendChild(row);
     }
@@ -1123,28 +831,21 @@ class TagAutocompleteUI {
         color: '#888', fontSize: '13px', flexShrink: '0', maxWidth: '120px',
         overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
       });
-      // The FTS index folds in aliases/translations, so a tag can be in the list because
-      // an ALIAS matched the query, not its name (e.g. typing "indoor", `nude` matched via
-      // its `indoor_nudity` alias). Showing aliases[0] ("naked") is then baffling. When the
-      // name itself doesn't contain the query, surface the alias/translation that DID match.
-      const norm = (s) => (s || '').replace(/_/g, ' ').toLowerCase();
-      const q = norm(this._lastQuery).trim();
-      const nameMatches = !q || norm(tag.name).includes(q);
-      let matched = null;
-      if (q && !this._isRelated && !nameMatches) {
-        matched = (tag.aliases || []).find((a) => norm(a).includes(q))
-               || (tag.translations || []).find((t) => norm(t).includes(q));
-      }
+      // Surface the alias that matched when the canonical English name did not.
+      const norm = (value) => (value || '').replace(/_/g, ' ').toLowerCase();
+      const query = norm(this._lastQuery).trim();
+      const nameMatches = !query || norm(tag.name).includes(query);
+      const matched = query && !this._isRelated && !nameMatches
+        ? (tag.aliases || []).find((alias) => norm(alias).includes(query))
+        : null;
       if (matched) {
         aliasSpan.textContent = matched;
         aliasSpan.title = `matched alias: ${matched}` +
-          (tag.aliases && tag.aliases.length ? `\nall: ${tag.aliases.join(', ')}` : '');
+          (tag.aliases?.length ? `\nall: ${tag.aliases.join(', ')}` : '');
         aliasSpan.style.color = '#a6c98f';
-      } else if (tag.aliases && tag.aliases.length) {
-        aliasSpan.textContent = tag.aliases[0]; aliasSpan.title = tag.aliases.join(', ');
-      } else if (tag.translations && tag.translations.length) {
-        aliasSpan.textContent = tag.translations[0]; aliasSpan.title = tag.translations.join(', ');
-        aliasSpan.style.color = '#caa';
+      } else if (tag.aliases?.length) {
+        aliasSpan.textContent = tag.aliases[0];
+        aliasSpan.title = tag.aliases.join(', ');
       }
       row.appendChild(aliasSpan);
     }
@@ -1211,207 +912,6 @@ class TagAutocompleteUI {
         row.appendChild(pvIcon);
       }
     }
-  }
-
-  _fillLibraryRow(row, cand) {
-    row.appendChild(this._badge('library', '#ffd479'));
-    row.appendChild(this._nameSpan(cand.name));
-    if (cand.entry) {
-      const src = document.createElement('span');
-      Object.assign(src.style, { color: '#888', fontSize: '12px', flexShrink: '0', maxWidth: '160px',
-        overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' });
-      src.textContent = cand.entry; src.title = 'from entry: ' + cand.entry;
-      row.appendChild(src);
-    }
-  }
-
-  _fillRefRow(row, cand) {
-    const names = cand.names || [cand.name || ''];
-    const def = cand.definition || names[0] || '';
-    const auto = cand.auto_trigger || def;
-    const q = this._lastQuery || '';
-    const ql = q.toLowerCase();
-
-    row.appendChild(this._badge(cand._thisRef ? 'this' : 'entry', cand._thisRef ? '#cba6f7' : '#ffd479'));
-
-    // Primary name: default trigger name (auto_trigger), fallback to definition
-    const nameEl = document.createElement('span');
-    nameEl.style.cssText = 'flex:1;color:#e0e0e0;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
-    nameEl.innerHTML = _highlightMatch(auto, q);
-    nameEl.title = `[${auto}] — ${names.join(', ')}`;
-    row.appendChild(nameEl);
-
-    // Show alias if: query matched the definition but we're showing auto_trigger, OR matched a custom trigger
-    const autoMatched = auto.toLowerCase().includes(ql);
-    if (!autoMatched) {
-      const matched = names.find(n => n !== auto && n.toLowerCase().includes(ql));
-      if (matched) {
-        const aliasSpan = document.createElement('span');
-        aliasSpan.style.cssText = 'color:#888;font-size:13px;flex-shrink:0;max-width:120px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
-        aliasSpan.textContent = matched;
-        aliasSpan.title = names.join(', ');
-        row.appendChild(aliasSpan);
-      }
-    }
-
-    // ℹ info icon — hover to preview prompt text
-    const info = document.createElement('span');
-    info.textContent = 'ℹ';
-    info.style.cssText = 'color:#89b4fa;font-size:14px;cursor:help;flex-shrink:0;padding:0 2px;';
-    let _previewPop = null;
-    let _previewTimer = null;
-    const nodeId = cand.id;
-    info.addEventListener('mouseenter', async () => {
-      if (!nodeId) return;
-      if (_previewPop && _previewPop.isConnected) { _previewPop.style.display = 'block'; return; }
-      if (_previewPop) _previewPop = null;  // was removed from DOM
-      _previewPop = document.createElement('div');
-      _previewPop.className = 'xyz-tagac-preview-pop';
-      Object.assign(_previewPop.style, {
-        position: 'fixed', zIndex: '100020', maxWidth: '420px', maxHeight: '200px',
-        overflowY: 'auto', background: '#1e1e2e', border: '1px solid #45475a',
-        borderRadius: '6px', boxShadow: '0 4px 16px rgba(0,0,0,.6)',
-        padding: '8px 10px', fontSize: '12px', color: '#cdd6f4',
-        fontFamily: '"Fira Code",Consolas,monospace', whiteSpace: 'pre-wrap',
-        wordBreak: 'break-word', lineHeight: '1.5', scrollbarWidth: 'thin',
-        scrollbarColor: '#45475a transparent',
-      });
-      _previewPop.textContent = 'Loading…';
-      document.body.appendChild(_previewPop);
-      const text = await fetchEntryPreview(nodeId);
-      _previewPop.textContent = (text || '').trim() || '(empty)';
-      const r = info.getBoundingClientRect();
-      _previewPop.style.top = Math.max(4, r.top) + 'px';
-      _previewPop.style.left = Math.min(r.right + 6, window.innerWidth - 434) + 'px';
-    });
-    info.addEventListener('mouseleave', () => {
-      clearTimeout(_previewTimer);
-      _previewTimer = setTimeout(() => { if (_previewPop && _previewPop.isConnected) { _previewPop.style.display = 'none'; } }, 150);
-    });
-    row.appendChild(info);
-
-    // 📂 open in entry detail button
-    if (nodeId) {
-      const openBtn = document.createElement('span');
-      openBtn.textContent = '📂';
-      openBtn.style.cssText = 'color:#a6e3a1;font-size:14px;cursor:pointer;flex-shrink:0;padding:0 2px;';
-      openBtn.title = 'Open in entry detail';
-      openBtn.addEventListener('mousedown', (e) => {
-        e.preventDefault(); e.stopPropagation();
-        const node = { id: nodeId, name: def, full_path: names[0] || def, has_prompts: true };
-        document.dispatchEvent(new CustomEvent('plv2:open-entry', { detail: { node } }));
-        this.hide();
-      });
-      row.appendChild(openBtn);
-    }
-  }
-
-  _fillEntryRow(row, cand) {
-    // Badge
-    row.appendChild(this._badge('entry', '#ffd479'));
-
-    // Entry definition name (full_path) — click to insert [ref]
-    const nameEl = document.createElement('span');
-    nameEl.style.cssText = 'flex:1;color:#e0e0e0;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;';
-    const q = this._lastQuery || '';
-    nameEl.innerHTML = _highlightMatch(cand.full_path || cand.name, q);
-    nameEl.title = cand.full_path || cand.name;
-    row.appendChild(nameEl);
-
-    // ℹ info icon — hover to preview prompt text
-    const info = document.createElement('span');
-    info.textContent = 'ℹ';
-    info.style.cssText = 'color:#89b4fa;font-size:14px;cursor:help;flex-shrink:0;padding:0 2px;';
-    let _previewPop = null;
-    let _previewTimer = null;
-    info.addEventListener('mouseenter', async () => {
-      if (_previewPop && _previewPop.isConnected) { _previewPop.style.display = 'block'; return; }
-      if (_previewPop) _previewPop = null;  // was removed from DOM
-      _previewPop = document.createElement('div');
-      _previewPop.className = 'xyz-tagac-preview-pop';
-      Object.assign(_previewPop.style, {
-        position: 'fixed', zIndex: '100020', maxWidth: '420px', maxHeight: '200px',
-        overflowY: 'auto', background: '#1e1e2e', border: '1px solid #45475a',
-        borderRadius: '6px', boxShadow: '0 4px 16px rgba(0,0,0,.6)',
-        padding: '8px 10px', fontSize: '12px', color: '#cdd6f4',
-        fontFamily: '"Fira Code",Consolas,monospace', whiteSpace: 'pre-wrap',
-        wordBreak: 'break-word', lineHeight: '1.5', scrollbarWidth: 'thin',
-        scrollbarColor: '#45475a transparent',
-      });
-      _previewPop.textContent = 'Loading…';
-      document.body.appendChild(_previewPop);
-      const text = await fetchEntryPreview(cand.id);
-      _previewPop.textContent = (text || '').trim() || '(empty)';
-      const r = info.getBoundingClientRect();
-      _previewPop.style.top = Math.max(4, r.top) + 'px';
-      _previewPop.style.left = Math.min(r.right + 6, window.innerWidth - 434) + 'px';
-    });
-    info.addEventListener('mouseleave', () => {
-      clearTimeout(_previewTimer);
-      _previewTimer = setTimeout(() => { if (_previewPop && _previewPop.isConnected) { _previewPop.style.display = 'none'; } }, 150);
-    });
-    row.appendChild(info);
-
-    // 📂 open in entry detail button
-    const openBtn = document.createElement('span');
-    openBtn.textContent = '📂';
-    openBtn.style.cssText = 'color:#a6e3a1;font-size:14px;cursor:pointer;flex-shrink:0;padding:0 2px;';
-    openBtn.title = 'Open in entry detail';
-    openBtn.addEventListener('mousedown', (e) => {
-      e.preventDefault(); e.stopPropagation();
-      // Ensure the candidate has has_prompts so the event listener accepts it
-      const node = { ...cand, has_prompts: true };
-      document.dispatchEvent(new CustomEvent('plv2:open-entry', { detail: { node } }));
-      this.hide();
-    });
-    row.appendChild(openBtn);
-  }
-
-  // Show the resolved entry for a clicked [ref].
-  async showEntryForRef(el, refInner) {
-    const node = await resolveRefEntry(refInner);
-    if (!node) { this.hide(); return; }
-    const candidate = {
-      kind: 'plv2_entry',
-      id: node.id,
-      name: node.name,
-      full_path: node.full_path,
-      pos_neg: node.pos_neg,
-      delimiter: node.delimiter,
-      has_prompts: true,
-      _isSelf: true,   // entry itself is a header, not selectable for insertion
-    };
-    this._isRelated = false;
-    this._isInfo    = true;
-    this._lastQuery = refInner;
-    this._open(el, [candidate], _acCaret(el));
-  }
-
-  // Show entries whose prompts contain the clicked token text.
-  // If the token is also a danbooru tag, prefer related tags over library entries.
-  async showEntriesByPrompt(el, name) {
-    // Check if this token exists in the tag dataset — if so, go to related tags.
-    if (settings.enableRelated) {
-      const tagResults = await searchTags(name, 1);
-      if (tagResults.some(t => t.name === name)) {
-        this.showRelatedFor(el, name);
-        return;
-      }
-    }
-    const entries = await fetchEntriesByPrompt(name, settings.maxSuggestions);
-    if (!entries.length) {
-      // Fallback: try related tags if enabled
-      if (settings.enableRelated) {
-        this.showRelatedFor(el, name);
-      } else {
-        this.hide();
-      }
-      return;
-    }
-    this._isRelated = false;
-    this._isInfo    = true;
-    this._lastQuery = name;
-    this._open(el, entries, _acCaret(el));
   }
 
   // Open the dropdown showing related tags for a clicked token in the textarea.
@@ -1494,7 +994,7 @@ class TagAutocompleteUI {
 
   // Position the dropdown.
   // Autocomplete mode: below the textarea (near where the user is typing).
-  // Info mode (related/entries/ref): to the right/left of the textarea.
+  // Related-tag info mode: to the right/left of the textarea.
   //
   // IMPORTANT: ComfyUI's canvas applies a CSS transform scale on the node container.
   // getBoundingClientRect() already accounts for this transform (viewport coords),
@@ -1503,9 +1003,8 @@ class TagAutocompleteUI {
   // the local caret offset to match the viewport – otherwise the dropdown drifts
   // and covers the text being typed when the canvas is zoomed in/out.
   //
-  // But not every host textarea lives inside the zoomed canvas: the PLv2 Text
-  // Editor is a standalone floating window that is NOT affected by the canvas
-  // transform. Using the global canvas zoom there would re-introduce the drift.
+  // Not every host textarea lives inside the zoomed canvas: floating windows are
+  // not affected by the canvas transform. Using global zoom there would drift.
   // So derive the *effective* transform scale from the element itself — the ratio
   // of its rendered (viewport) width to its layout (local/unscaled) width. This is
   // ~canvas-scale for in-canvas widgets and exactly 1 for an un-transformed window.
@@ -1589,17 +1088,8 @@ class TagACHandler {
     this._timer = setTimeout(async () => {
       if (!settings.enabled) return;
       const info = _analyzeToken(el);
-      if (info.mode === 'ref') {
-        // Library refs (if enabled) AND, in the entry text box, [this.<subentry>]
-        // candidates — merged into ONE dropdown by showRefs (#3).
-        const wantThis = info.refKind === 'bracket' && typeof el._xyzGetThisRefs === 'function';
-        if (info.query !== null && (settings.useRefs || wantThis)) await this.ui.showRefs(el, info);
-        else this.ui.hide();
-      } else if (info.query.length >= 1) {
-        await this.ui.showTags(el, info);
-      } else {
-        this.ui.hide();
-      }
+      if (info.query.length >= 1) await this.ui.showTags(el, info);
+      else this.ui.hide();
     }, DEBOUNCE_MS);
   }
 
@@ -1620,41 +1110,16 @@ class TagACHandler {
     this._debounce(e.currentTarget);
   }
 
-  // Click a token in the host (textarea or contentEditable). `currentTarget` is the
-  // attached host (the contentEditable root, not the inner span the click landed on).
-  // Priority: [ref] → show entry info → entries by prompt → related tags.
+  // Clicking a known English tag opens its related-tag panel.
   handleClick(e) {
-    if (!settings.enabled) return;
+    if (!settings.enabled || !settings.enableRelated) return;
     const el = e.currentTarget;
-    const tagsOnly = !!el._xyzTagsOnly;
-
-    // 1) A PLv2 [ref] at the click position. A tags-only host has its own bracket
-    //    syntax — `[demo.quality.scores]` there is a PLv3 library block, and looking
-    //    it up in PLv2's library answers a question nobody asked.
-    if (!tagsOnly) {
-      const refInner = _refAtCaret(_acVal(el), _acCaret(el));
-      if (refInner) {
-        this.ui.showEntryForRef(el, refInner);
-        return;
-      }
-    }
-
-    // 2) Check for token
     const name = getTokenAtCaret(el);
     if (!name || name.length < 2) {
-      // Clicked empty area / non-triggering position — dismiss info panel
       if (this.ui.isVisible() && this.ui._isInfo) this.ui.hide();
       return;
     }
-
-    // 3) Entries by prompt (PLv2 library) → related tags (danbooru). On a tags-only
-    //    host there is no PLv2 library to consult, so a click means RELATED — which
-    //    is the whole point of clicking a tag.
-    if (settings.useLibrary && !tagsOnly) {
-      this.ui.showEntriesByPrompt(el, name);
-    } else if (settings.enableRelated) {
-      this.ui.showRelatedFor(el, name);
-    }
+    this.ui.showRelatedFor(el, name);
   }
 
   handleKeyDown(e) {
@@ -1664,7 +1129,7 @@ class TagACHandler {
     if (!this.ui.isVisible()) return;
 
     // A MODIFIED arrow (Ctrl/Alt/Cmd + ↑/↓) is an editor shortcut — weight nudging in the
-    // PLv3 Monaco editor and the PLv2 rich editor — not dropdown navigation. Let it through
+    // PLv3 editors — not dropdown navigation. Let it through
     // (don't preventDefault), or the open suggestion/related list swallows it and the weight
     // never changes.
     if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && (e.ctrlKey || e.altKey || e.metaKey)) {
@@ -1750,18 +1215,14 @@ document.addEventListener('mousedown', (e) => {
   ui.hide();
 });
 
-// opts.related  — this textarea supports click-a-token → related tags
-// opts.getDelimiter — function returning the delimiter to use for insertions
+// opts.related — this host supports click-a-token related lookup
+// opts.getDelimiter — function returning the insertion delimiter
+// opts.adapter — value/caret adapter used by Monaco and contentEditable hosts
 function attachTo(el, opts = {}) {
   if (opts.related) el._xyzRelated = true;
   if (typeof opts.getDelimiter === 'function') el._xyzGetDelimiter = opts.getDelimiter;
-  // Entry text box only: provider of sub-entry names for [this.<name>] refs (#3).
-  if (typeof opts.getThisRefs === 'function') el._xyzGetThisRefs = opts.getThisRefs;
-  // Rich contentEditable host: an adapter that abstracts value/caret/splice/caret-coords
-  // so the same AC code drives a contentEditable editor (see js/plv2_richedit adapter).
+  // The adapter is also used by the PLv3 Monaco bridge.
   if (opts.adapter) el._xyzAcc = opts.adapter;
-  // Tags only — no PLv2 `[ref]` / `/ref` modes (see _analyzeToken).
-  if (opts.tagsOnly) el._xyzTagsOnly = true;
   // This host cannot produce trusted DOM events; it synthesises them (see handleInput).
   if (opts.synthetic) el._xyzSynthetic = true;
   if (el._xyzTagACHooked) return;
@@ -1774,7 +1235,7 @@ function attachTo(el, opts = {}) {
   el.addEventListener('click',   (e) => handler.handleClick(e));
 }
 
-// Public API so PLv2 windows can attach their bespoke textareas.
+// Public API used by ordinary prompt fields and the PLv3 Monaco bridge.
 window.xyzTagAC = { attach: attachTo };
 
 app.registerExtension({
