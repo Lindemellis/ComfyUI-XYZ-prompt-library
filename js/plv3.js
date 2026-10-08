@@ -172,6 +172,7 @@ async function mountEditor(node) {
   sizeEditor(node);
   pe.relayout();
   node.setDirtyCanvas(true, true);
+  window.plv4?.connectNode(node)?.catch(err => console.error('[PLv4] embedded session failed', err));
 }
 
 app.registerExtension({
@@ -191,7 +192,7 @@ app.registerExtension({
       // Without this the window's async failures become silent unhandled rejections
       // and the button simply does nothing. Report on the button itself — never
       // alert(), which blocks ComfyUI's whole main thread.
-      plv3Window.toggle(node).catch((err) => {
+      (window.plv4?.window || plv3Window).toggle(node).catch((err) => {
         console.error('[PLv3] could not open the editor', err);
         edit.textContent = 'Editor failed — see console';
         setTimeout(() => (edit.textContent = 'Editor'), 4000);
@@ -260,8 +261,7 @@ app.registerExtension({
         const emb = this.__plv3Embed;
         if (emb) {
           document.removeEventListener('plv3:node-edited', emb.onExternalEdit);
-          emb.pe.editor?.dispose();
-          emb.pe.editor = null;
+          emb.pe.dispose();
           releaseNodeModel(this.id);
           this.__plv3Embed = null;
         }

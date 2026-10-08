@@ -81,6 +81,10 @@ function createDropdownButton() {
     });
 
     const items = [
+    {
+      label: 'Prompt Library V4 — Editor',
+      action: () => window.plv4?.window?.toggle(null)?.catch?.(err => console.error('[PLv4]', err)),
+    },
       // PLv3 windows open with no node selected: the editor lists whatever PLv3 nodes are
       // in the graph, and the library does not need one at all.
       { label: 'Prompt Library V3 — Editor',

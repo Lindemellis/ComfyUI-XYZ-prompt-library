@@ -142,7 +142,7 @@ def _item_text(item: dict, weight_override=None) -> str:
 
 
 def expand(group_id: int, preset_id: int | None = None, body: dict | None = None,
-           indent: str = "", stack: tuple[int, ...] = ()) -> str:
+           indent: str = "", stack: tuple[int, ...] = (), reader=None) -> str:
     """Render a library group as a `[path]: { ... }` block, refs expanded inline.
 
     `body` is a preset body applied directly — that is how §5.4's *embedded*
@@ -153,15 +153,16 @@ def expand(group_id: int, preset_id: int | None = None, body: dict | None = None
     if len(stack) >= MAX_EXPAND_DEPTH:
         raise PLv3Error(E02, "library references nested too deep")
 
-    group = repo.get_group(group_id)
+    reader = reader or repo
+    group = reader.get_group(group_id)
     if group is None:
         raise ValueError(f"no such group: {group_id}")
-    path = repo.group_path(group_id)
-    items = repo.list_items(group_id)
+    path = reader.group_path(group_id)
+    items = reader.list_items(group_id)
     settings = dict(group["settings"])
 
     if body is None and preset_id is not None:
-        preset = repo.get_preset(preset_id)
+        preset = reader.get_preset(preset_id)
         if preset and int(preset["group_id"]) == group_id:
             body = preset["body"]
 
@@ -202,6 +203,7 @@ def expand(group_id: int, preset_id: int | None = None, body: dict | None = None
                     body=child if mode == "snapshot" else None,
                     indent=inner,
                     stack=stack + (group_id,),
+                    reader=reader,
                 )
             )
         else:

@@ -2,6 +2,8 @@
 
 A prompt language, an editor for it, and a library that feeds it.
 
+For the current Blocks / Source / Preview editor and Folder pools, see [Prompt Library V4](../prompt_library_v4/README.md) ([中文](../prompt_library_v4/README_zh.md)). V3 nodes, language and original Library remain supported. The node Editor button opens V4; the original V3 window is available in XYZ Tools. V4 Library migration is explicit and preserves V3 data.
+
 PLv3 replaces the retired Prompt Library V2 runtime. Existing V2 personal data is left
 untouched, and a [one-shot migration tool](#migrating-from-v2) remains available.
 
@@ -39,7 +41,17 @@ Both nodes compile identically — pick the one whose editor you prefer. There i
 positive/negative split: a document renders the same either way. **Regions are for the
 positive prompt only** — a region has no meaning on the negative side, and nothing stops
 you writing one there, so just don't. Wire each node's output to the matching
-(positive / negative) `PC: Schedule Prompt`.
+(positive / negative) `PC: Schedule Prompt`. To load or schedule LoRAs, also send
+the **same compiled output** to `PC: Schedule LoRAs`; use that node's `model` for
+the sampler and its `clip` for `PC: Schedule Prompt`.
+
+On older ComfyUI builds, scheduled LoRAs on INT8 / mixed-precision models hit a
+core WeightHook bug. XYZNodes installs a guarded compatibility fix at startup:
+quantized weights are replaced and restored with their scale metadata intact.
+It skips the hook fix once ComfyUI no longer uses the unsafe in-place setter. This applies to
+prompt-control schedules and other ComfyUI WeightHook users. The compatibility
+layer caches complete quantized weights so repeated hook switches do not
+recalculate the LoRA every step.
 
 Widgets: `text` (the document), `seed` (the random source for `shuffle` / `random_select` /
 `dropout`), `region_mode` (`couple` or `mask` — see [Regions](#regions)).
@@ -136,6 +148,23 @@ example, a group with `format: "@$p"` containing `(tag:0.8)` renders as `(@tag:0
 An entry's content may be a bare item or a whole group. **The number between two entries is
 one boundary**: each entry's start wins, and the previous entry's end is rewritten to match it,
 so gaps and overlaps cannot exist. The editor's slider moves both sides at once.
+
+### LoRA schedules
+
+A bare `<lora:detail:0.8>` is active for the whole run. Put it in a scheduled
+group to use it only during part of sampling:
+
+```
+1girl, { <lora:detail:0.8> }.set{schedule: {0.2, 0.7}}
+```
+
+This activates the LoRA from 20% to 70% of sampling. A `[@schedule]` entry can
+hold a LoRA too. Send the **same V3 output** to both `PC: Schedule LoRAs` and
+`PC: Schedule Prompt`; the latter handles the prompt text, while the former
+builds the LoRA schedule and supplies the model and CLIP used downstream.
+Without `PC: Schedule LoRAs`, the LoRA expression has no effect on the model.
+LoRA scheduling is global to the model at each time step, even if the expression
+was written inside one region.
 
 ### Regions
 

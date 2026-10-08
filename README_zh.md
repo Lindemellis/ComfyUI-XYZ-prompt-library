@@ -8,6 +8,7 @@
 
 | 工具 | 作用 | 手册 |
 |---|---|---|
+| **Prompt Library V4** | 用 Blocks / Source / Preview 编辑嵌套 Block，复用保存的组合，把标签收录进 Folder 池；沿用 PLv3 语言和 prompt-control 编译器。 | [PLv4](prompt_library_v4/README_zh.md) |
 | **Prompt Library V3** | 提示词语言、嵌套组、时间调度、区域、预设、已保存文档、Monaco 编辑器和实时详情控制，最终编译为 [comfyui-prompt-control](https://github.com/asagi4/comfyui-prompt-control) 语法。 | [PLv3](prompt_library_v3/README.md) |
 | **标签自动补全** | 仅英文的 Danbooru 标签和可选 Gelbooru 标签；本地数据集支持更新、快照和按日期回溯。 | [TagDB](tagdb/README_zh.md) |
 | **XYZ Gallery** | 浏览和管理 ComfyUI 图片与视频，查看元数据、筛选、打标签、下载不同净化版本，并发送到 Krita。 | [画廊](gallery/README_zh.md) |
@@ -25,7 +26,7 @@ Prompt Library V2 和早期原创 LLM 提示词助手已经退役。个人 PLv2 
 ## 安装
 
 1. 把本仓库克隆到 `ComfyUI/custom_nodes/`。
-2. 使用 PLv3 时安装 [comfyui-prompt-control](https://github.com/asagi4/comfyui-prompt-control)。
+2. 使用 PLv3 或 PLv4 时安装 [comfyui-prompt-control](https://github.com/asagi4/comfyui-prompt-control)。
 3. 只有在你要自行抓取或更新 Danbooru 时，才需要额外安装 `curl_cffi>=0.7.0`；下载预构建数据集不需要。
 4. 重启 ComfyUI。
 
@@ -35,6 +36,8 @@ Prompt Library V2 和早期原创 LLM 提示词助手已经退役。个人 PLv2 
 
 | 节点 | 分类 | 用途 |
 |---|---|---|
+| XYZ Prompt Library V4 | `XYZNodes/Prompt` | 编辑 Block 和 Folder 池，编译为 prompt / plain 输出 |
+| XYZ Prompt Library V4 Monaco | `XYZNodes/Prompt` | 同一 V4 编译器，节点内嵌源码编辑器 |
 | XYZ Prompt Library V3 | `XYZNodes/Prompt` | 用普通文本框编辑并编译 PLv3 文档 |
 | XYZ Prompt Library V3 Monaco | `XYZNodes/Prompt` | 同一编译器，节点内嵌完整编辑器 |
 | XYZ Mask Editor | `XYZNodes/Mask` | 画矩形并输出 base、fill 和逐矩形遮罩 |
@@ -49,10 +52,12 @@ Prompt Library V2 和早期原创 LLM 提示词助手已经退役。个人 PLv2 
 
 ## 界面入口
 
-顶栏提供 XYZ Gallery，以及 **XYZ Tools** 菜单中的 PLv3 编辑器/库、TagDB 维护、设置、Krita 和可选 Agent 启动器。设置页只保留自动补全、插入、相关标签、预览、PLv3、数据集和常规信息。
+顶栏提供 XYZ Gallery，以及 **XYZ Tools** 菜单中的 V4 编辑器、原 V3 编辑器/库、TagDB 维护、设置、Krita 和可选 Agent 启动器。提示词节点的 **Editor** 按钮打开 V4 窗口，V3 节点继续兼容。
+
+V4 将有序 **Content** 和可选 **Pool** 候选分开：用 **+** 添加，在 Content 编辑或关闭，显式保存常用 Block。单击 Library 浏览共用一个临时标签；编辑或双击后常驻。拖拽、搜索、Region / Schedule 设置和迁移见 [V4 手册](prompt_library_v4/README_zh.md)。
 
 ## 数据与隐私
 
-运行数据位于已被 Git 忽略的 `tagdb_data/`、`prompt_library_v3_data/`、`gallery_data/`、`krita_data/`、`agent_data/`、`output/` 等目录。已退役的 `prompt_library_v2_data/` 同样保持忽略并原样保留，仅用于迁移已有个人数据。
+运行数据位于 Git 忽略的 `tagdb_data/`、`prompt_library_v3_data/`、`prompt_library_v4_data/`、`gallery_data/`、`krita_data/`、`agent_data/`、`output/` 等目录。V4 使用独立 `plv4-pools.db`，不自动迁移个人 V3 数据；Library 迁移命令先备份，再导入，不替换原库。退役的 `prompt_library_v2_data/` 同样原样保留，用于迁移。
 
 TagDB 接口不会把已保存 API key 返回给浏览器；Agent 控制接口只接受本机回环地址请求。

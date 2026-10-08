@@ -97,7 +97,8 @@ def search_tags_multi(
       - `is_deprecated`: the authoritative source's flag;
       - `aliases`: union across sources.
 
-    Rows are ranked by `post_count` DESC and capped to `limit` after the merge. Used
+    Exact canonical-name matches rank first, then by `post_count` DESC; results are
+    capped to `limit` after the merge. Used
     only when ≥2 sources are active; a single source uses `search_tags` directly so the
     legacy payload shape is unchanged.
     """
@@ -144,7 +145,11 @@ def search_tags_multi(
     out = [merged[n] for n in order]
     for row in out:
         row.pop("_authoritative", None)
-    out.sort(key=lambda r: r["post_count"], reverse=True)
+    q_fold = q.casefold()
+    out.sort(key=lambda r: (
+        0 if r["name"].casefold() == q_fold else 1,
+        -r["post_count"],
+    ))
     return out[:limit]
 
 
@@ -161,12 +166,14 @@ def _search_fts(conn: Any, q: str, limit: int,
         LEFT JOIN aliases a ON a.canonical = t.name
         WHERE tags_fts MATCH ? {cat_clause}
         GROUP BY t.id
-        ORDER BY t.post_count DESC
+        ORDER BY CASE WHEN t.name COLLATE NOCASE = ? THEN 0 ELSE 1 END,
+                 t.post_count DESC
         LIMIT ?
     """
     params: List[Any] = [f'"{escaped}"']
     if category is not None:
         params.append(category)
+    params.append(q)
     params.append(limit)
     rows = conn.execute(sql, params).fetchall()
     return [_row_to_dict(r) for r in rows]
@@ -189,10 +196,13 @@ def _search_like(conn: Any, q: str, limit: int,
     params = [prefix]
     if category is not None:
         params.append(category)
+    params.append(q)
     params.append(limit)
     base = conn.execute(
         "SELECT name, category, post_count, is_deprecated FROM tags "
-        f"WHERE name LIKE ? {cat_clause} ORDER BY post_count DESC LIMIT ?",
+        f"WHERE name LIKE ? {cat_clause} "
+        "ORDER BY CASE WHEN name COLLATE NOCASE = ? THEN 0 ELSE 1 END, "
+        "post_count DESC LIMIT ?",
         params,
     ).fetchall()
     if not base:

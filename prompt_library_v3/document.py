@@ -36,11 +36,12 @@ for the matching rules and why they fail open.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from copy import deepcopy
 from typing import Any, Iterator
 
 from .parser import Group, Item, Lora, Text, parse
 
-DOC_VERSION = 1
+DOC_VERSION = 2
 
 #: Node kinds, mirroring the AST.  A `group` is the only one with children.
 LEAF_KINDS = ("text", "lora", "item")
@@ -71,6 +72,9 @@ class DocNode:
     # Carried through for the frontend: it needs to know a library block from a
     # region segment without re-parsing.
     header: str | None = None
+    # Editor-only metadata and syntax shape; neither changes compilation.
+    meta: dict[str, Any] = field(default_factory=dict)
+    form: str | None = None
 
     # --- serialisation ------------------------------------------------------
 
@@ -84,6 +88,10 @@ class DocNode:
         }
         if self.header is not None:
             out["header"] = self.header
+        if self.meta:
+            out["meta"] = deepcopy(self.meta)
+        if self.form is not None:
+            out["form"] = self.form
         if self.kind == "group":
             out["opaque"] = self.opaque
             if not self.opaque:
@@ -106,6 +114,8 @@ class DocNode:
             lead=str(data.get("lead", "")),
             close=str(data.get("close", "")),
             header=data.get("header"),
+            meta=deepcopy(data.get("meta", {})),
+            form=data.get("form"),
         )
         node.children = [cls.from_json(c) for c in data.get("children", [])]
         return node
@@ -125,16 +135,26 @@ class Document:
     root: DocNode
     next_id: int = 1
     version: int = DOC_VERSION
+    # A temporarily invalid editor draft is saved too. Execution renders this
+    # exact source and still parses strictly, rather than executing an older tree.
+    draft: str | None = None
 
     def to_json(self) -> dict[str, Any]:
-        return {"version": self.version, "next_id": self.next_id, "root": self.root.to_json()}
+        out = {"version": self.version, "next_id": self.next_id, "root": self.root.to_json()}
+        if self.draft is not None:
+            out["draft"] = self.draft
+        return out
 
     @classmethod
     def from_json(cls, data: dict[str, Any]) -> "Document":
+        version = int(data.get("version", 1))
+        if version not in (1, DOC_VERSION):
+            raise ValueError(f"unsupported document version: {version}")
         return cls(
             root=DocNode.from_json(data["root"]),
             next_id=int(data.get("next_id", 1)),
-            version=int(data.get("version", DOC_VERSION)),
+            version=DOC_VERSION,
+            draft=data.get("draft"),
         )
 
     def find(self, node_id: str) -> DocNode | None:
@@ -191,11 +211,22 @@ class _Builder:
         if kind != "group":
             return doc
 
+        if node.spans.schedule_form == "block":
+            doc.form = "schedule_entry"
+        elif node.spans.region_form == "block":
+            doc.form = "region_entry"
+        elif self.src[pos:end].lstrip().startswith("[@schedule]"):
+            doc.form = "schedule"
+        elif self.src[pos:end].lstrip().startswith("[@region]"):
+            doc.form = "region"
+        else:
+            doc.form = "implicit" if node.implicit else "paren" if node.paren else "brace"
+
         content = getattr(node.spans, "content", None)
         # No content span: an implicit group (`0.3 - 1: open eyes` has no braces of
         # its own) or something the recovering parser patched up. Keep it whole —
         # there is no interior we could safely cut children out of.
-        if content is None or not node.children:
+        if content is None:
             doc.opaque = not node.children
             if doc.opaque:
                 return doc
@@ -205,6 +236,10 @@ class _Builder:
         doc.opaque = False
         doc.open = self.src[pos:c_start]
         doc.close = self.src[c_end:end]
+
+        if not node.children:
+            doc.lead = self.src[c_start:c_end]
+            return doc
 
         kids = list(node.children)
         # A child's slice must start at its HEAD, not at `spans.node`. A region
@@ -218,6 +253,15 @@ class _Builder:
         cursor = c_start
         for child in kids:
             child_pos, child_end = _bounds(child)
+            # A parameter comma INSIDE the external head is not a sibling
+            # separator. Use its recorded span before looking at the gap.
+            if isinstance(child, Group):
+                if child.spans.region_decl is not None:
+                    child_pos = min(child_pos, child.spans.region_decl[0])
+                if child.spans.schedule_form == "block":
+                    head_span = child.spans.fields.get("schedule", {}).get("value")
+                    if head_span is not None:
+                        child_pos = min(child_pos, head_span[0])
             # The gap is `[blank] , [blank] head`. Everything up to and including the
             # separating comma is the PREVIOUS child's; the head is what follows it.
             # The first comma in the gap is always the separator: the part before it
@@ -253,6 +297,7 @@ def from_ast(src: str, root: Group) -> Document:
     # separator of its own.
     doc_root.sep = ""
     doc_root.enabled = True
+    doc_root.form = "root"
     return Document(root=doc_root, next_id=builder.counter + 1)
 
 
@@ -271,6 +316,8 @@ def render(doc: Document | DocNode) -> str:
     A disabled node contributes nothing at all — not a marker, not a blank line —
     which is the whole point: the text never shows that it is there.
     """
+    if isinstance(doc, Document) and doc.draft is not None:
+        return doc.draft
     root = doc.root if isinstance(doc, Document) else doc
     return _render_node(root, top=True)
 
@@ -386,6 +433,7 @@ def _max_id(node: DocNode) -> int:
 def _merge(old: DocNode, new: DocNode, counter: _Counter) -> DocNode:
     """`new` is freshly parsed (all enabled, fresh ids); `old` holds ids + state."""
     new.id = old.id
+    new.meta = deepcopy(old.meta)
     new.enabled = True  # it is in the text, so it is on
     if new.kind != "group" or new.opaque or old.kind != "group" or old.opaque:
         return new
@@ -399,7 +447,7 @@ def _merge(old: DocNode, new: DocNode, counter: _Counter) -> DocNode:
     # Pass 1 — identical source.
     by_raw: dict[tuple[str, str], list[int]] = {}
     for i, child in enumerate(old_enabled):
-        by_raw.setdefault((child.kind, child.raw), []).append(i)
+        by_raw.setdefault((child.kind, render(child)), []).append(i)
     for j, child in enumerate(new.children):
         bucket = by_raw.get((child.kind, child.raw))
         while bucket:
@@ -433,7 +481,7 @@ def _merge(old: DocNode, new: DocNode, counter: _Counter) -> DocNode:
 
     # Pass 3 — the disabled nodes, back at the index they were remembered at.
     for index, node in disabled:
-        children.insert(min(index, len(children)), node)
+        children.insert(min(index, len(children)), deepcopy(node))
 
     new.children = children
     return new

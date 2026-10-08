@@ -20,22 +20,9 @@
 // TagDB autocomplete never offers library refs; PLv3 owns its `[` completions.
 
 import { braceContextText } from './complete.js';
+import { tagacReady } from '../tagac_host.js';
 
 const NAV_KEYS = new Set(['ArrowDown', 'ArrowUp', 'Enter', 'Tab', 'Escape']);
-
-/** Wait for tagac to have registered itself (it is a separate ComfyUI extension). */
-function tagacReady(timeoutMs = 8000) {
-  if (window.xyzTagAC) return Promise.resolve(window.xyzTagAC);
-  return new Promise((resolve) => {
-    const started = Date.now();
-    const tick = () => {
-      if (window.xyzTagAC) return resolve(window.xyzTagAC);
-      if (Date.now() - started > timeoutMs) return resolve(null);
-      setTimeout(tick, 50);
-    };
-    tick();
-  });
-}
 
 export async function attachTagAC(editor, container) {
   const api = await tagacReady();
@@ -109,6 +96,7 @@ export async function attachTagAC(editor, container) {
   // container should withhold Danbooru
   // tags; the same brace-stack complete.js uses decides it, so the two never disagree.
   host._xyzSuppressTags = (text, pos) => braceContextText(text.slice(0, pos)) !== 'text';
+  host._xyzPoolSuggestions = query => window.xyzPLv4Suggestions?.(query, editor) || [];
 
   // --- events -------------------------------------------------------------
   //
@@ -119,6 +107,7 @@ export async function attachTagAC(editor, container) {
 
   editor.onDidChangeModelContent(() => {
     if (suppressNext) { suppressNext = false; return; }
+    if (!editor.hasTextFocus()) return;
     host.dispatchEvent(new Event('input'));
   });
 

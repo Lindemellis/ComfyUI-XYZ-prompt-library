@@ -159,7 +159,7 @@ function modal(build) {
     const box = div(`position:fixed;z-index:${Z + 50};left:50%;top:38%;transform:translate(-50%,-50%);
       background:${C.panel};border:1px solid ${C.edge};border-radius:6px;padding:14px 16px;
       box-shadow:0 4px 20px rgba(0,0,0,.7);display:flex;flex-direction:column;gap:10px;
-      min-width:300px;max-width:460px;font-family:ui-sans-serif,system-ui,sans-serif;color:${C.text};`);
+      min-width:300px;max-width:460px;max-height:70vh;overflow:auto;font-family:ui-sans-serif,system-ui,sans-serif;color:${C.text};`);
 
     let done = false;
     const finish = (v) => {
@@ -231,6 +231,13 @@ export function showForm(message, fields, { okLabel = 'OK' } = {}) {
       // known list, and typing a path into a text box would only invent a way to get it
       // wrong.
       const input = f.options ? el('select', style) : el('input', style);
+      if (f.type === 'checkbox') {
+        input.type = 'checkbox'; input.checked = !!f.value; input.style.cssText = 'width:auto;flex:none';
+        row.style.flexDirection = 'row'; row.style.alignItems = 'center';
+        input.id = `xyz-form-${crypto.randomUUID()}`;
+        const label = el('label', 'font-size:12px;cursor:pointer;flex:1', f.label); label.htmlFor = input.id;
+        row.replaceChildren(input, label); box.append(row); inputs[f.key] = input; continue;
+      }
       if (f.options) {
         for (const o of f.options) {
           const opt = el('option', '', o.label);
@@ -246,7 +253,7 @@ export function showForm(message, fields, { okLabel = 'OK' } = {}) {
     }
     const submit = (f) => {
       const out = {};
-      for (const [k, i] of Object.entries(inputs)) out[k] = i.value;
+      for (const [k, i] of Object.entries(inputs)) out[k] = i.type === 'checkbox' ? i.checked : i.value;
       f(out);
     };
     buttons(box, finish, { okLabel, onOk: submit });

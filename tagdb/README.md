@@ -2,7 +2,7 @@
 
 **English** | [中文](README_zh.md) · [← Back to main README](../README.md)
 
-Danbooru tag autocomplete backed by a versioned local SQLite dataset. As you type in any prompt box you get tag suggestions ordered by post count; the dataset is downloaded prebuilt and can be updated, snapshotted, and rolled back to a past date.
+Danbooru tag autocomplete backed by a versioned local SQLite dataset. Exact canonical-name matches appear first, followed by other suggestions ordered by post count. The dataset is downloaded prebuilt and can be updated, snapshotted, and rolled back to a past date.
 
 ## Getting a dataset
 
@@ -25,6 +25,7 @@ tagdb_data/
 ## Using autocomplete
 
 - Type in any ComfyUI prompt textarea (and in the Prompt Library editors). Use ↑/↓ to move, Enter/Tab to accept, Esc to dismiss.
+- V4 Blocks, Source and prompt settings share autocomplete preferences and lookup behavior. Enabled Folder pools contribute their recursively collected tags; saved blocks are inserted through Library rather than as single tag suggestions. See the [V4 manual](../prompt_library_v4/README.md).
 - Tag names are stored with underscores; with **Replace `_` with space** on, they are inserted with spaces.
 - Suggestions also match a tag's **aliases**. When a row matched via an alias (not its name), that matching alias is shown on the row, so it's clear why the tag appears (e.g. typing `indoor` surfaces `nude` via its `indoor_nudity` alias).
 - **Anima `@artist` syntax** (opt-in, *Autocomplete → Anima "@artist" syntax*): typing `@name` suggests **artist** tags matching `name` by name / alias / old-name (inserted as `@name`), alongside any real tag that literally contains `@name`. Clicking an `@name` prompt shows that artist's detail + related tags — and if the whole `@name` is itself a real tag, that tag is shown instead. Weight/wrapper syntax is handled too, so clicking `(@wlop:1.1)` resolves to artist `wlop`.

@@ -211,6 +211,7 @@ export class PromptEditor {
         const target = _focused;
         if (!target) return;
         try {
+          if (typeof groupId === 'object' && window.xyzPLv4ExpandReference && target.editSession) return await window.xyzPLv4ExpandReference(target, groupId);
           const { text } = await post('library/expand', {
             group_id: groupId,
             preset_id: presetId || null,
@@ -242,12 +243,17 @@ export class PromptEditor {
       autoIndent: 'full',
       scrollBeyondLastLine: false,
       renderWhitespace: 'none',
+      // Monaco 0.52's cross-editor occurrence worker reports uncaught
+      // cancellations when models are switched/disposed. Prompt occurrences
+      // have instance IDs in the detail UI; no language highlight worker needed.
+      occurrencesHighlight: 'off',
       tabSize: 4,
       ...this.options,
     });
 
     // The shared Danbooru autocomplete — wiki links, preview images, artist
     // works, related tags — driven straight from this editor (see tagac_monaco.js).
+    this.editor.__plv4Pane = this;
     attachTagAC(this.editor, this.container).catch((err) =>
       console.warn('[PLv3] could not attach the tag autocomplete', err));
 
@@ -255,12 +261,13 @@ export class PromptEditor {
 
     // A settings change must land without a reload: the panel is a floating window and
     // "restart ComfyUI to see the new font size" is not an acceptable answer.
-    document.addEventListener('plv3:settings-changed', () => {
+    this._onSettingsChanged = () => {
       this.editor?.updateOptions({
         fontSize: settings().fontSize,
         wordWrap: settings().wordWrap ? 'on' : 'off',
       });
-    });
+    };
+    document.addEventListener('plv3:settings-changed', this._onSettingsChanged);
     this.editor.onDidBlurEditorText(() => {
       this.onBlur();
       if (this.syncOnBlur) this.syncLibrary();
@@ -288,6 +295,20 @@ export class PromptEditor {
       contextMenuGroupId: 'modification',
       run: () => this.promptReplaceInTags(),
     });
+    for (const [id, label, action] of [['plv3.findText', 'Find', 'actions.find'], ['plv3.replaceText', 'Find and replace', 'editor.action.startFindReplaceAction']]) {
+      this.editor.addAction({ id, label, contextMenuGroupId: 'modification',
+        run: () => this.onFindText ? this.onFindText(id === 'plv3.replaceText') : this.editor.getAction(action).run() });
+    }
+    this.editor.addAction({ id: 'plv3.createAsBlock', label: 'Create as block', contextMenuGroupId: 'modification', contextMenuOrder: 1,
+      run: () => {
+        if (this.onCreateBlock) return this.onCreateBlock();
+        const selected = this.editor.getSelection();
+        const range = selected && !selected.isEmpty() ? selected : this.weightTarget(); if (!range) return;
+        const body = this.model().getValueInRange(range);
+        this.editor.pushUndoStop();
+        this.editor.executeEdits('plv3-create-block', [{ range, text: `{\n    ${body}\n}` }]);
+        this.editor.pushUndoStop(); this.onEdited();
+      } });
 
     // Ctrl+↑ / Ctrl+↓ — adjust the weight of the selection (or the tag at the cursor),
     // like ComfyUI's prompt boxes: `tag` -> `(tag:1.05)` -> `(tag:1.1)` …, back to bare
@@ -413,6 +434,20 @@ export class PromptEditor {
 
   model() {
     return this.editor?.getModel() ?? null;
+  }
+
+  /** Release editor-owned listeners/timers; shared model ownership stays with
+   * acquireNodeModel/releaseNodeModel callers. */
+  dispose() {
+    clearTimeout(this._lintTimer);
+    clearTimeout(this._viewTimer);
+    cancelAnimationFrame(this._relayoutRaf);
+    document.removeEventListener('plv3:settings-changed', this._onSettingsChanged);
+    if (_focused === this) _focused = null;
+    const model = this.model();
+    this.editor?.dispose(); this.editor = null;
+    // Monaco's automatically created untitled model belongs to this editor.
+    if (model?.uri?.scheme === 'inmemory' && ![..._nodeModels.values()].some(entry => entry.model === model)) model.dispose();
   }
 
   text() {
@@ -609,6 +644,32 @@ export class PromptEditor {
     const model = this.model();
     if (!model) return;
 
+    // Optional PLv4 binding supplies the authoritative document and history.
+    // The same PromptEditor still owns Monaco, language, tagAC and shortcuts.
+    if (this.editSession) {
+      const session = this.editSession;
+      await session.whenIdle();
+      if (this.editSession !== session || this.model() !== model || model.getValue() !== session.text) return;
+      const version = model.getVersionId();
+      const revision = session.revision;
+      const mapping = session.projection;
+      let result = { ok: false, text: '', plain: '', diagnostics: mapping.diagnostics };
+      if (session.valid && this.lintCompile !== false) {
+        try {
+          const output = await session.compile(await this.params());
+          result = { ok: true, ...output, text: output.prompt, diagnostics: mapping.diagnostics };
+        } catch (err) {
+          console.warn('[PLv4] preview failed', err);
+        }
+      }
+      if (this.editSession !== session || this.model() !== model || model.getVersionId() !== version || session.revision !== revision) return;
+      this.setMarkers(model, mapping.diagnostics);
+      this.onCompiled(result);
+      this.onAst({ ok: session.valid, ast: mapping.tree?.ast ?? mapping.ast, diagnostics: mapping.diagnostics },
+        { version, text: session.text, doc: session.state.doc, revision, projection: mapping });
+      return;
+    }
+
     const text = model.getValue();
     const version = model.getVersionId();
     const body = { text, ...this.params() };
@@ -629,7 +690,7 @@ export class PromptEditor {
       console.warn('[PLv3] lint failed', err);
       return;
     }
-    if (this.model() !== model) return; // the user switched documents mid-flight
+    if (this.editSession || this.model() !== model || model.isDisposed() || model.getVersionId() !== version) return;
 
     if (sync?.doc) this.setDoc(sync.doc);
     this.setMarkers(model, result.diagnostics || []);

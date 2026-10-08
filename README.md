@@ -8,6 +8,7 @@ A focused ComfyUI custom-node pack for prompt authoring, image management and Kr
 
 | Tool | What it does | Manual |
 |---|---|---|
+| **Prompt Library V4** | Edit nested blocks through Blocks / Source / Preview, reuse saved combinations, and collect tags into Folder pools. Uses the PLv3 language and prompt-control compiler. | [PLv4](prompt_library_v4/README.md) |
 | **Prompt Library V3** | A prompt language with nested groups, schedules, regions, presets, saved documents, a Monaco editor and live detail controls. It compiles to [comfyui-prompt-control](https://github.com/asagi4/comfyui-prompt-control). | [PLv3](prompt_library_v3/README.md) |
 | **Tag autocomplete** | English-only Danbooru tags plus optional Gelbooru tags, backed by a local versioned dataset with updates, snapshots and date reconstruction. | [TagDB](tagdb/README.md) |
 | **XYZ Gallery** | Browse and manage ComfyUI images and videos, inspect metadata, filter and tag files, download variants, and send images to Krita. | [Gallery](gallery/README.md) |
@@ -25,7 +26,7 @@ parentheses are escaped; an outer `(tag:weight)` wrapper keeps its weight.
 ## Installation
 
 1. Clone this repository into `ComfyUI/custom_nodes/`.
-2. Install [comfyui-prompt-control](https://github.com/asagi4/comfyui-prompt-control) if you use PLv3.
+2. Install [comfyui-prompt-control](https://github.com/asagi4/comfyui-prompt-control) if you use PLv3 or PLv4.
 3. Optionally install `curl_cffi>=0.7.0` if you want to scrape or update Danbooru yourself. Downloading the prebuilt dataset does not require it.
 4. Restart ComfyUI.
 
@@ -35,6 +36,8 @@ On first run, the prebuilt Danbooru dataset downloads in the background. Autocom
 
 | Node | Category | Purpose |
 |---|---|---|
+| XYZ Prompt Library V4 | `XYZNodes/Prompt` | Edit blocks and Folder pools, compile to prompt / plain outputs |
+| XYZ Prompt Library V4 Monaco | `XYZNodes/Prompt` | The same V4 compiler with an embedded source editor |
 | XYZ Prompt Library V3 | `XYZNodes/Prompt` | Compile a PLv3 document using the standard text widget |
 | XYZ Prompt Library V3 Monaco | `XYZNodes/Prompt` | The same compiler with the full editor embedded in the node |
 | XYZ Mask Editor | `XYZNodes/Mask` | Draw rectangles and emit base, fill and per-rectangle masks |
@@ -49,10 +52,12 @@ On first run, the prebuilt Danbooru dataset downloads in the background. Autocom
 
 ## User interface
 
-The top bar exposes the XYZ Gallery and an **XYZ Tools** menu for the PLv3 editor/library, TagDB maintenance, settings, Krita and the optional agent launcher. Settings cover autocomplete, insertion, related tags, previews, PLv3, datasets and general information.
+The top bar exposes XYZ Gallery and **XYZ Tools**, including the V4 editor, original V3 editor/Library, TagDB maintenance, settings, Krita and the optional agent launcher. Prompt nodes' **Editor** button opens the V4 window; V3 nodes remain supported.
+
+V4 separates a block's ordered **Content** from optional **Pool** candidates. Add candidates with **+**, edit or disable them in Content, and explicitly save reusable blocks. Single-click Library browsing uses one temporary tab; editing or double-clicking pins it. See the [V4 manual](prompt_library_v4/README.md) for dragging, search, Region/Schedule controls and migration.
 
 ## Data and privacy
 
-Runtime data is stored in gitignored directories such as `tagdb_data/`, `prompt_library_v3_data/`, `gallery_data/`, `krita_data/`, `agent_data/` and `output/`. The retired `prompt_library_v2_data/` directory is also ignored and preserved solely so existing personal data can be migrated.
+Runtime data is stored in gitignored directories such as `tagdb_data/`, `prompt_library_v3_data/`, `prompt_library_v4_data/`, `gallery_data/`, `krita_data/`, `agent_data/` and `output/`. V4 uses its own `plv4-pools.db`; personal V3 data is not migrated automatically. The Library migration command backs up and imports V3 without replacing it. The retired `prompt_library_v2_data/` is also ignored and preserved for migration.
 
 TagDB credential endpoints never return a saved API key to the browser. Agent control routes accept loopback requests only.

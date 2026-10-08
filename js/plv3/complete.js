@@ -255,7 +255,7 @@ export async function provideCompletions(monaco, model, position, { onInsertBloc
       }
       return { suggestions: specialBlocks(monaco, model, position, range, needle, brace) };
     }
-    const groups = await libraryPaths();
+    const groups = [...await libraryPaths(), ...await (window.xyzPLv4LibraryPaths?.(model) || [])];
     return {
       suggestions: [
         // `[` opens three different things, and until now it only offered one of them.
@@ -268,7 +268,7 @@ export async function provideCompletions(monaco, model, position, { onInsertBloc
         .map((g) => ({
           label: g.preset ? `${g.path} ▸ ${g.preset.name}` : g.path,
           kind: monaco.languages.CompletionItemKind.Module,
-          detail: g.preset ? 'library preset' : 'library group',
+          detail: g.v4 ? `Library ${g.assetKind} · ${g.path}` : g.preset ? 'library preset' : 'library group',
           // The whole group sorts above its own presets — it is the common case, and
           // otherwise a group with ten presets buries every other group in the list.
           sortText: `1${g.path}${g.preset ? `~${g.preset.name}` : ''}`,
@@ -289,7 +289,7 @@ export async function provideCompletions(monaco, model, position, { onInsertBloc
           command: onInsertBlock && {
             id: 'plv3.expandLibraryBlock',
             title: 'expand',
-            arguments: [g.id, g.preset ? g.preset.id : null],
+            arguments: [g.v4 ? { id: g.id, kind: g.assetKind, path: g.path } : g.id, g.preset ? g.preset.id : null],
           },
         })),
       ],

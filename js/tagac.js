@@ -600,14 +600,22 @@ class TagAutocompleteUI {
 
   // Tag mode: Danbooru/Gelbooru tags only.
   async showTags(el, info) {
+    const requestId = this._tagRequest = (this._tagRequest || 0) + 1;
+    const originalValue = _acVal(el), originalCaret = _acCaret(el);
     this._isRelated = false;
     this._isInfo = false;
     this._lastQuery = info.query || '';
     if (settings.animaArtist && (info.query || '').startsWith('@')) {
       return this._showAtTags(el, info);
     }
-    const tagsRaw = await searchTags(info.query, settings.maxSuggestions);
-    const results = _applyMinCount(tagsRaw).map((tag) => ({ ...tag, kind: 'tag' }));
+    const [tagsRaw, library] = await Promise.all([
+      settings.enabled ? searchTags(info.query, settings.maxSuggestions) : [],
+      el._xyzPoolSuggestions?.(info.query) || [],
+    ]);
+    // An older request must not reopen the list under a moved caret/new draft.
+    if (requestId !== this._tagRequest || _acVal(el) !== originalValue || _acCaret(el) !== originalCaret) return;
+    const names = new Set(library.filter(item => item.kind === 'poolTag').map(item => _canonicalName(item.name)));
+    const results = [...library, ..._applyMinCount(tagsRaw).filter(tag => !names.has(_canonicalName(tag.name))).map((tag) => ({ ...tag, kind: 'tag' }))];
     if (!results.length) { this.hide(); return; }
     const query = _canonicalName(info.query);
     if (query) {
@@ -638,6 +646,7 @@ class TagAutocompleteUI {
   }
 
   _open(el, candidates, rangeStart) {
+    this._tagRequest = (this._tagRequest || 0) + 1;
     this._target = el;
     this._candidates = candidates;
     this._hasNavigated = false;
@@ -653,6 +662,7 @@ class TagAutocompleteUI {
   }
 
   hide() {
+    this._tagRequest = (this._tagRequest || 0) + 1;
     // Remove all popups (they'll be recreated on next render)
     document.querySelectorAll('.xyz-tagac-preview-pop').forEach(p => p.remove());
     _tagPvPop = null;
@@ -727,6 +737,11 @@ class TagAutocompleteUI {
 
   // Insert a tag candidate, preserving the host delimiter and undo behaviour.
   async _insert(el, cand) {
+    if (cand.insert) {
+      const start = this._rangeStart, end = _acCaret(el); this.hide();
+      try { await cand.insert(start, end); } catch (error) { console.error('[PLv4 completion]', error); window.app?.extensionManager?.toast?.add?.({ severity: 'error', summary: 'Library', detail: error.message }); }
+      return;
+    }
     const text = _acVal(el);
     const delim = this._getDelimiter();
     let core = _normalizeTagInsert(cand.name);
@@ -762,7 +777,11 @@ class TagAutocompleteUI {
         display: 'flex', alignItems: 'center', padding: '4px 8px',
         cursor: 'pointer', gap: '6px', borderBottom: '1px solid #2a2a3e',
       });
-      if (cand.kind === 'note') this._fillNoteRow(row, cand);
+      if (cand.kind === 'poolTag' || cand.kind === 'poolBlock') {
+        row.append(this._badge(cand.kind === 'poolBlock' ? 'Block' : 'Pool', '#b89bde'), this._nameSpan(cand.name));
+        const path = document.createElement('span'); path.textContent = cand.path; path.style.cssText = 'color:#888;font-size:11px;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'; row.append(path);
+      }
+      else if (cand.kind === 'note') this._fillNoteRow(row, cand);
       else this._fillTagRow(row, cand);
       frag.appendChild(row);
     }
@@ -1086,7 +1105,7 @@ class TagACHandler {
   _debounce(el) {
     clearTimeout(this._timer);
     this._timer = setTimeout(async () => {
-      if (!settings.enabled) return;
+      if (!settings.enabled && !el._xyzPoolSuggestions) return;
       const info = _analyzeToken(el);
       if (info.query.length >= 1) await this.ui.showTags(el, info);
       else this.ui.hide();
@@ -1094,7 +1113,7 @@ class TagACHandler {
   }
 
   handleInput(e) {
-    if (!settings.enabled) return;
+    if (!settings.enabled && !e.currentTarget?._xyzPoolSuggestions) return;
     // Trusted events only — EXCEPT for a host that has no real input events of its
     // own to give. PLv3's Monaco editor types into its own hidden textarea, so the
     // bridge synthesises them (see js/plv3/tagac_monaco.js); dropping those would
@@ -1123,7 +1142,7 @@ class TagACHandler {
   }
 
   handleKeyDown(e) {
-    if (!settings.enabled) return;
+    if (!settings.enabled && !e.currentTarget?._xyzPoolSuggestions) return;
     this._keyMods.set(e.key.toLowerCase(), e.ctrlKey || e.altKey || e.metaKey);
 
     if (!this.ui.isVisible()) return;
@@ -1166,7 +1185,7 @@ class TagACHandler {
   }
 
   handleKeyUp(e) {
-    if (!settings.enabled) return;
+    if (!settings.enabled && !e.currentTarget?._xyzPoolSuggestions) return;
 
     const key = e.key.toLowerCase();
     if (this._keyMods.get(key)) { this._keyMods.delete(key); return; }

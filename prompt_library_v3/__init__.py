@@ -53,6 +53,11 @@ def setup() -> None:
         from .routes import register
 
         register(PromptServer.instance)
+        if '.' in __package__:
+            from ..prompt_library_v4.setup import setup as setup_v4
+        else:
+            from prompt_library_v4.setup import setup as setup_v4
+        setup_v4(PromptServer.instance)
         print("[PLv3] routes registered")
     except Exception as exc:  # pragma: no cover - ComfyUI not running
         print(f"[PLv3] route registration skipped: {exc}")

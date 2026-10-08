@@ -1,4 +1,5 @@
 from .prompt_library_v3 import PromptLibraryV3Node, PromptLibraryV3MonacoNode
+from .prompt_library_v4.node import PromptLibraryV4Node, PromptLibraryV4MonacoNode
 from .mask_nodes import XYZAttachMasks, XYZMaskEditor
 from .krita_nodes import (
     XYZKritaFetchColorMasks,
@@ -10,11 +11,22 @@ from .krita_nodes import (
 from .cache_nodes import XYZCacheSlotRead, XYZCacheSlotWrite
 from .inpaint_nodes import XYZInpaintStitchToRGBA
 
+# ComfyUI's scheduled WeightHooks need full parameter replacement on quantized
+# models. Install the guarded compatibility shim at node-pack startup.
+try:
+    from .quantized_hook_compat import install as _install_quantized_hook_compat
+    _install_quantized_hook_compat()
+except Exception as _quantized_hook_err:
+    import logging
+    logging.warning("[XYZ] quantized WeightHook compatibility unavailable: %r", _quantized_hook_err)
+
 
 
 NODE_CLASS_MAPPINGS = {
     "XYZ Prompt Library V3": PromptLibraryV3Node,
     "XYZ Prompt Library V3 Monaco": PromptLibraryV3MonacoNode,
+    "XYZ Prompt Library V4": PromptLibraryV4Node,
+    "XYZ Prompt Library V4 Monaco": PromptLibraryV4MonacoNode,
     "XYZ Mask Editor": XYZMaskEditor,
     "XYZ Attach Masks": XYZAttachMasks,
     "XYZ Krita Fetch Image": XYZKritaFetchImage,

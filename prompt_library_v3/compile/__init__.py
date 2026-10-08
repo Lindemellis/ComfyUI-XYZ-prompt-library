@@ -12,7 +12,7 @@ from dataclasses import dataclass, field
 
 from ..diagnostics import Diag, Diagnostics
 from ..ir import Segment, build_segments
-from ..parser import Group, parse
+from ..parser import Group, Item, parse
 from ..validate import validate
 from . import couple as couple_backend
 from . import mask as mask_backend
@@ -63,6 +63,7 @@ def compile_text(
     polarity: str = "positive",
     recover: bool = False,
     ignore_regions: bool = False,
+    ignore_group_seeds: bool = False,
 ) -> CompileResult:
     """Compile PLv3 source into a prompt-control string.
 
@@ -86,6 +87,18 @@ def compile_text(
         return CompileResult("", diags.items, [], None)
 
     root, diags = parse(text, diags, recover=recover)
+    if ignore_group_seeds:
+        # PLv4 uses the ComfyUI node's seed input for every group. Keep legacy
+        # source unchanged while ignoring local overrides, including Item atoms.
+        def clear_seed(node):
+            if isinstance(node, Group):
+                node.settings.seed = None
+                for child in node.children:
+                    clear_seed(child)
+            elif isinstance(node, Item):
+                for atom in node.atoms:
+                    clear_seed(atom)
+        clear_seed(root)
     if ignore_regions:
         strip_regions(root)
     validate(root, diags, allow_region=(polarity != "negative"), src=text)

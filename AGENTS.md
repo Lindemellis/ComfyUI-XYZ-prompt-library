@@ -2,17 +2,33 @@
 
 This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
 
-> **Start here:** read `HANDOFF.md` (repo root) for current state, hard-won gotchas
+> **Start here:** read `prompt_library_v4/DEVELOPMENT.md` and local `HANDOFF.md` (if present) for current state, hard-won gotchas
 > (curl_cffi/Cloudflare, contentless-FTS5 delete, cursor pagination, etc.), how to test
 > cheaply, and the likely-untested areas. Respond to the user in 简体中文.
 
 ## Project Overview
 
-ComfyUI-XYZNodes is a ComfyUI custom node pack built around **Prompt Library V3**, rectangle masks, a Krita bridge, cache slots, inpaint RGBA, an image/video gallery, English-only Danbooru/Gelbooru tag autocomplete, and a local comfyui-mcp agent integration.
+ComfyUI-XYZNodes is a ComfyUI custom node pack built around **Prompt Library V4** (PLv3 language/compiler and V3 compatibility), rectangle masks, a Krita bridge, cache slots, inpaint RGBA, an image/video gallery, English-only Danbooru/Gelbooru tag autocomplete, and a local comfyui-mcp agent integration.
 
 > **PLv1 is gone.** The legacy JSON prompt library (`prompt_library_node.py`, its two windows, its five `/xyz/prompt_library/*` routes and the `prompt_library/` data dir) was deleted. Only `node.py`'s `ByPassTypeTuple` survives from it, and that is now a shared helper the mask and Krita nodes depend on for their variadic outputs.
 
-## Prompt Library V3 (`prompt_library_v3/` + `js/plv3/`) — the current prompt system
+## Prompt Library V4 (`prompt_library_v4/` + `js/plv4/`) — current editor and Library
+
+Stage closed by the user on **2026-10-08**. Read `prompt_library_v4/README_zh.md` for user behavior and `prompt_library_v4/DEVELOPMENT.md` for architecture, migration and validation. `plv4.md`'s final "新的block架构设定" and later explicit corrections supersede earlier Class designs; `plv4_plan.md` records the completed implementation. Historical local prototypes are not runtime contracts.
+
+- **Tag / Block / Folder pool only.** No runtime Class, attribute, belong/load, dummy, class instance, shared Library block pointers, auto-persisted internal blocks or cross-type reference cycles. Documents have a separate save/load entry.
+- **Document v2 is truth.** Stable IDs, enabled flags, metadata and invalid drafts survive editing. Source/Blocks/Preview share history. Compilation uses PLv3 and never reads Library. V4 uses node seed for all random choices, ignoring group overrides; untouched V3 documents retain V3 policy.
+- **One meta.pool per block**, without candidate inheritance. Collect tags after completed edits; traverse unbound descendants, stop at independently bound children. Deduplicate against the whole pool subtree, including saved blocks. Opening/restoring workflows establishes baselines and must not re-add manually deleted pool tags.
+- Loose tags cannot repeat on an ancestor chain; classify ancestor tags downward, reject parent additions when descendants contain them, allow sibling duplicates. Saved block tags are exempt. Sibling Folder/block/subblock names must be unique; stable source IDs and versions support explicit update/overwrite.
+- **Content and Pool stay separate.** Content follows actual order, edits descendants and retains disabled rows in place. Pool uses + to append, marks added regardless of enabled, offers independent type/unused filters and fold controls. Existing candidates are not re-enabled, reordered or made the active detail target.
+- Folder pages edit loose tags recursively; Library blocks reuse Node Blocks UI. One temporary italic Library tab is replaced during browsing and pinned by editing/double-click. Folder insertion uses a dedicated handle to create an empty bound block; dropping does not change an existing block's binding.
+- model.py/commands.py own stateless POST /xyz/plv4/document/{open,command,compile}. assets.py/hierarchy.py own single-writer snapshots and /xyz/plv4/library/{read,mutate,migrate}. document_session.js owns queue/history; host_sessions.js keys nodes by object identity, not numeric ID.
+- Reuse js/plv3/editor_core.js PromptEditor and text_editing.js; do not fork Monaco/TagAC/grammar. Native TextRun excludes noneditable decorations and trailing visual BRs. Toggles preserve user blank lines; structural formatting is local.
+- Blocks Find borrows the same Monaco widget, removing/restoring Source overlay registration. block_find.js scopes to displayed prompt characters, excluding configuration. Enter and arrows use identical editor actions; CSS Custom Highlight keeps matches visible while search retains focus. Clear state on close/tab/view/dispose. Check private Monaco APIs on upgrade.
+- New DB: prompt_library_v4_data/plv4-pools.db. Never silently upgrade plv4.db. V3 group→Folder, preset→saved block, child group→subfolder; backup import leaves source intact. Experimental V4 conversion requires a nonexistent new target. Personal migration needs a specific user request.
+- Tests t70–t79 include offline Node suites through t72; t46–t62 protect PLv3. Recent work is offline only; old browser counts are not current verification. Preserve untracked local prototypes, personal data and the user's persistent test instance.
+
+## Prompt Library V3 (`prompt_library_v3/` + `js/plv3/`) — language/compiler and compatibility
 
 **Read `prompt_library_v3/README.md` first** (user-facing), then `prompt_library_v3_design.md`
 (the locked spec, 36 recorded decisions — it is authoritative; do NOT infer semantics from PLv2,
@@ -31,8 +47,8 @@ so switching it back on restores it *in place* and nothing else moves. Guarantee
 test (`test/t59`, `t60`): `render(from_text(t)) == t` byte for byte; any single toggle still
 parses; the document's enabled children pair up 1:1 with a reparse of the rendered text (that
 pairing is what `indexDocument` in `detail.js` hangs every switch on).
-**Library-block items keep the old model** (enabled *iff* in the text, disabled ones sorted to
-the bottom) — deliberately unchanged.
+**Original V3 Library-block items keep the old model** (enabled *iff* in the text, disabled ones sorted to
+the bottom). This applies to the V3 window only; V4 Content retains actual order and Pool is a separate candidate view.
 The node has a hidden `doc` STRING widget carrying the JSON; `execute` compiles the document
 when it is there and falls back to `text` when it is not, so an old workflow still runs.
 `compile_text(text, seed, region_mode, polarity)` is still a **pure function** of text and never
@@ -157,7 +173,8 @@ because `UNIQUE(group_id, text)` is an item's identity). Tests: `test/t62_plv3_s
 > **removed**; only `ByPassTypeTuple` (the variadic-output helper) survives there.
 
 - **XYZ Mask Editor / XYZ Attach Masks** (`mask_nodes/nodes.py`) — see the Mask Nodes section below
-- **XYZ Prompt Library V3 / V3 Monaco** (`prompt_library_v3/node.py`) — **the current system**: compiles a PLv3 document to comfyui-prompt-control syntax. **Two outputs**: `prompt` (regions compiled) and `plain` (`compile_text(..., ignore_regions=True)` — `strip_regions` drops every region declaration before validate, so base + every region + fill land in ONE prompt in document order, schedules/weights/loras intact). Both use the same seed, so a shuffle draws once. The two nodes differ ONLY in their editor (plain textarea vs embedded Monaco, a frontend concern in `js/plv3.js`); the backend is identical. **No positive/negative split any more** — both compile the same, `polarity` is dropped from the nodes (regions are always kept; a region must simply not be wired to a negative conditioning — documented in the README, not enforced). `compile_text` still accepts a `polarity` arg for the pure-function/validate tests. Never reads the library. See the PLv3 section above.
+- **XYZ Prompt Library V4 / V4 Monaco** (`prompt_library_v4/node.py`) — current Blocks/Source/Preview editor, Folder pools, node-seed policy and pure PLv3 compiler; same prompt/plain sockets.
+- **XYZ Prompt Library V3 / V3 Monaco** (`prompt_library_v3/node.py`) — compatibility nodes: compiles a PLv3 document to comfyui-prompt-control syntax. **Two outputs**: `prompt` (regions compiled) and `plain` (`compile_text(..., ignore_regions=True)` — `strip_regions` drops every region declaration before validate, so base + every region + fill land in ONE prompt in document order, schedules/weights/loras intact). Both use the same seed, so a shuffle draws once. The two nodes differ ONLY in their editor (plain textarea vs embedded Monaco, a frontend concern in `js/plv3.js`); the backend is identical. **No positive/negative split any more** — both compile the same, `polarity` is dropped from the nodes (regions are always kept; a region must simply not be wired to a negative conditioning — documented in the README, not enforced). `compile_text` still accepts a `polarity` arg for the pure-function/validate tests. Never reads the library. See the PLv3 section above.
 
 ## Mask Nodes (`mask_nodes/` + `js/xyz_mask_editor.js`, `js/xyz_attach_masks.js`)
 

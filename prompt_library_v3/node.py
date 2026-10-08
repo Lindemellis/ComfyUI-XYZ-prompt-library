@@ -22,7 +22,8 @@ from .compile import REGION_MODES, compile_text
 
 _USAGE = (
     "Compiles PLv3 text into comfyui-prompt-control syntax.\n"
-    "Feed the output to 'PC: Schedule Prompt' / 'PC: Schedule LoRAs' — "
+    "Feed the output to 'PC: Schedule Prompt'; for LoRA scheduling, also feed "
+    "the same output to 'PC: Schedule LoRAs' and use its model/clip outputs. "
     "'PCTextEncode' does not support schedule syntax.\n"
     "Regions are for the positive prompt only; don't put one in a negative prompt."
 )
@@ -50,6 +51,18 @@ def source_text(text: str, doc: str) -> str:
     except Exception as exc:  # noqa: BLE001 - a bad doc must never block a render
         print(f"[PLv3] document unreadable, compiling the text instead: {exc}")
         return text
+
+
+def uses_node_seed(doc: str) -> bool:
+    """PLv4-tagged workflow snapshots use only the resolved node seed.
+
+    The editor tag travels with the document. Older V3 workflows retain their
+    existing compilation policy; execution never queries the Library.
+    """
+    try:
+        return json.loads(doc).get("root", {}).get("meta", {}).get("compiler") == "plv4"
+    except (ValueError, TypeError, AttributeError):
+        return False
 
 
 class _PLv3Base:
@@ -108,19 +121,20 @@ class _PLv3Base:
         # Key on what is COMPILED, not on the raw widgets: flipping an item off
         # changes the document but leaves `text` alone for one beat, and two
         # documents that render the same text must not re-run.
-        key = f"{source_text(text, doc)}\x00{seed}\x00{region_mode}"
+        key = f"{source_text(text, doc)}\x00{seed}\x00{region_mode}\x00{uses_node_seed(doc)}"
         return hashlib.sha256(key.encode("utf-8")).hexdigest()
 
     def execute(self, text: str = "", seed: int = 0, region_mode: str = "couple",
                 doc: str = "", **_):
         source = source_text(text, doc)
-        result = compile_text(source, seed=seed, region_mode=region_mode)
+        options = dict(seed=seed, region_mode=region_mode, ignore_group_seeds=uses_node_seed(doc))
+        result = compile_text(source, **options)
         for diag in result.diagnostics:
             print(f"[PLv3] {diag}")
         # The SAME seed, so a shuffle / random_select picks the same words in both
         # outputs — they are two renderings of one document, not two draws.
         plain = compile_text(
-            source, seed=seed, region_mode=region_mode, ignore_regions=True
+            source, ignore_regions=True, **options
         )
         return (result.text, plain.text)
 

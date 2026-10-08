@@ -297,6 +297,32 @@ def _build_source_db(path: Path, source: str, rows) -> Path:
     return path
 
 
+def test_search_prioritizes_exact_name_over_popular_substrings():
+    d = Path(tempfile.mkdtemp())
+    db_path = _build_source_db(d / "dan.sqlite", "danbooru", [
+        ("jima", 1, 207, 0),
+        ("himejima_gyoumei", 4, 50000, 0),
+        ("fujimaru_ritsuka", 4, 100000, 0),
+    ])
+
+    assert [r["name"] for r in _repo.search_tags("jima", db_path, limit=1)] == ["jima"]
+
+
+def test_merged_search_keeps_exact_name_first():
+    d = Path(tempfile.mkdtemp())
+    dan = _build_source_db(d / "dan.sqlite", "danbooru", [
+        ("jima", 1, 207, 0),
+        ("himejima_gyoumei", 4, 50000, 0),
+    ])
+    gel = _build_source_db(d / "gel.sqlite", "gelbooru", [
+        ("jima", 1, 128, 0),
+        ("fujimaru_ritsuka", 4, 100000, 0),
+    ])
+    sources = [("danbooru", dan, None), ("gelbooru", gel, None)]
+
+    assert [r["name"] for r in _repo.search_tags_multi(sources, "jima", limit=1)] == ["jima"]
+
+
 def test_gelbooru_category_map_and_deprecated():
     # 0/1/3/4/5 map 1:1; type 6 → general(0) + is_deprecated=1.
     assert _sc._map_gelbooru_tag({"name": "wlop", "count": 5, "type": 1})["category"] == 1

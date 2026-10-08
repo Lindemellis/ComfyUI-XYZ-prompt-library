@@ -207,11 +207,11 @@ function dualCss() {
     .plv3-dual .plv3-dual-fill {
       position: absolute; top: 8px; height: 4px; border-radius: 2px; pointer-events: none;
     }
-    .plv3-dual .plv3-dual-track { left: 0; right: 0; background: ${T.bg4}; }
+    .plv3-dual .plv3-dual-track { left: 6.5px; right: 6.5px; background: ${T.bg4}; }
     .plv3-dual .plv3-dual-fill  { background: var(--plv3-dual-color); }
     .plv3-dual input[type=range] {
       position: absolute; top: 0; left: 0; width: 100%; height: 20px; margin: 0;
-      -webkit-appearance: none; appearance: none; background: transparent;
+      -webkit-appearance: none; appearance: none; background: transparent; padding: 0; border: 0; box-sizing: border-box;
       pointer-events: none; outline: none;
     }
     .plv3-dual input[type=range]::-webkit-slider-runnable-track {
@@ -219,7 +219,7 @@ function dualCss() {
     }
     .plv3-dual input[type=range]::-webkit-slider-thumb {
       -webkit-appearance: none; pointer-events: auto; cursor: grab;
-      width: 13px; height: 13px; margin-top: 3px; border-radius: 50%;
+      width: 13px; height: 13px; margin-top: 3.5px; border-radius: 50%; box-sizing: border-box;
       background: var(--plv3-dual-color); border: 2px solid ${T.bg0};
       box-shadow: 0 1px 3px rgba(0,0,0,.5);
     }
@@ -227,7 +227,7 @@ function dualCss() {
     .plv3-dual input[type=range]::-moz-range-track { height: 20px; background: transparent; }
     .plv3-dual input[type=range]::-moz-range-thumb {
       pointer-events: auto; cursor: grab;
-      width: 13px; height: 13px; border-radius: 50%;
+      width: 13px; height: 13px; border-radius: 50%; box-sizing: border-box;
       background: var(--plv3-dual-color); border: 2px solid ${T.bg0};
     }
   `;
@@ -266,8 +266,11 @@ export function dualSlider([a, b], onCommit, { color = T.accent, step = 0.05, mi
     let x = Number(lo.value);
     let y = Number(hi.value);
     if (x > y) [x, y] = [y, x];
-    fillEl.style.left = `${((x - min) / span) * 100}%`;
-    fillEl.style.width = `${((y - x) / span) * 100}%`;
+    // Native thumb centres travel from half a thumb to width minus half a thumb.
+    // Match that travel for both the fixed rail and the selected interval.
+    const start = (x - min) / span, length = (y - x) / span;
+    fillEl.style.left = `calc(${start * 100}% + ${6.5 - start * 13}px)`;
+    fillEl.style.width = `calc(${length * 100}% - ${length * 13}px)`;
     out.textContent = `${fmt(x)}–${fmt(y)}`;
     // Whichever thumb is on top must be the one you can grab when they meet — otherwise
     // an interval that has closed to zero can never be opened again.
@@ -278,7 +281,7 @@ export function dualSlider([a, b], onCommit, { color = T.accent, step = 0.05, mi
     let x = Number(lo.value);
     let y = Number(hi.value);
     if (x > y) [x, y] = [y, x];   // dragging past each other flips, never inverts
-    onCommit([x, y]);
+    return onCommit([x, y]);
   };
   lo.oninput = hi.oninput = paint;
   lo.onchange = hi.onchange = commit;
@@ -439,7 +442,7 @@ const EDGES = [
 
 /** A floating window with a drag bar and resize handles on ALL FOUR edges and
  *  corners — not just the bottom-right nub CSS `resize` gives you. */
-export function makeWindow({ key, title, defaults, minW = 640, minH = 360, onResize }) {
+export function makeWindow({ key, title, defaults, minW = 640, minH = 360, onResize, chromeTag = 'div' }) {
   let g = { ...defaults };
   try { g = { ...g, ...JSON.parse(localStorage.getItem(key) || '{}') }; } catch {}
 
@@ -456,7 +459,7 @@ export function makeWindow({ key, title, defaults, minW = 640, minH = 360, onRes
     }));
   };
 
-  const bar = div(`display:flex;align-items:center;gap:10px;padding:8px 12px;background:${T.bg2};
+  const bar = el(chromeTag, `display:flex;align-items:center;gap:10px;padding:8px 12px;background:${T.bg2};
     border-bottom:1px solid ${T.line};cursor:grab;user-select:none;flex-shrink:0;`);
   bar.append(div(`font-size:${T.fs.head};font-weight:600;letter-spacing:.01em;`, title));
   const spacer = div('flex:1;');

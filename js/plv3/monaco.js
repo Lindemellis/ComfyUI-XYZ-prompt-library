@@ -33,11 +33,16 @@ export function loadMonaco() {
     // a different origin than the document. Monaco's documented workaround: hand
     // it a tiny same-origin blob that sets the base URL and importScripts the
     // real worker.
+    const workerBase = new URL(BASE, location.href).href;
+    const shim = `self.MonacoEnvironment = { baseUrl: ${JSON.stringify(workerBase)} };
+                  importScripts(${JSON.stringify(workerBase + 'vs/base/worker/workerMain.js')});`;
+    // A blob has no relative HTTP base. Use absolute URLs inside the worker and
+    // share one shim URL rather than leaking a blob per editor/model change.
+    const workerUrl = URL.createObjectURL(new Blob([shim], { type: 'text/javascript' }));
+    addEventListener('pagehide', () => URL.revokeObjectURL(workerUrl), { once: true });
     window.MonacoEnvironment = {
       getWorkerUrl() {
-        const shim = `self.MonacoEnvironment = { baseUrl: '${BASE}' };
-                      importScripts('${VS}/base/worker/workerMain.js');`;
-        return URL.createObjectURL(new Blob([shim], { type: 'text/javascript' }));
+        return workerUrl;
       },
     };
 

@@ -562,6 +562,13 @@ def register(server) -> None:
     r.post("/xyz/plv3/doc/sync")(_post_doc_sync)
     r.post("/xyz/plv3/doc/toggle")(_post_doc_toggle)
 
+    # PLv4's pure editing layer shares this language and registers no new nodes.
+    if "." in __package__:
+        from ..prompt_library_v4.routes import register as register_v4
+    else:
+        from prompt_library_v4.routes import register as register_v4
+    register_v4(server)
+
     # Library
     r.get("/xyz/plv3/library/tree")(_get_tree)
     r.post("/xyz/plv3/library/folders")(_post_folder)

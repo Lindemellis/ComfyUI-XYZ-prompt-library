@@ -14,6 +14,8 @@ import { showConfirm, toast } from './ui.js';
 export const PLV3_TYPES = new Set([
   'XYZ Prompt Library V3',
   'XYZ Prompt Library V3 Monaco',
+  'XYZ Prompt Library V4',
+  'XYZ Prompt Library V4 Monaco',
 ]);
 
 function widget(node, name) {
