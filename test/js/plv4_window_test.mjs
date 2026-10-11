@@ -1,11 +1,15 @@
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { spawnSync } from 'node:child_process';
 import { test } from 'node:test';
 
 // Exercise the production window lifecycle without opening a browser. ComfyUI
 // workflow undo replaces node objects, keeping their numeric IDs and tabs.
 const source = (await readFile(new URL('../../js/plv4/window.js', import.meta.url), 'utf8')).replace(/^import .*;\r?\n/gm, '');
-const dependencies = `const report = error => { throw error; };
+globalThis.windowDragHelpers = await import('data:text/javascript;base64,' + Buffer.from((await readFile(new URL('../../js/plv4/drop_preview.js', import.meta.url), 'utf8')).replace(/^import .*;\r?\n/gm, '')).toString('base64'));
+const dependencies = `const {isEntry,isContainer,canInsertContainer,canDropBlock}=globalThis.windowDragHelpers;
+const report = error => { throw error; };
+const showForm = (...args) => globalThis.windowShowForm(...args);
 const NODE_TYPES = new Set(['XYZ Prompt Library V4']);
 const element = (tag, cls, text) => globalThis.tabElement ? globalThis.tabElement(tag, cls, text) : ({ tag, className: cls, textContent: text });
 const button = (text, title, action, cls) => { const node=element('button',cls,text);node.onclick=action;return node; };\n`;
@@ -80,7 +84,7 @@ test('Preview resolves a linked seed once without virtual widget callbacks recur
   const environment={app:win.app,PLv4Window:class{constructor(){return win;}},NODE_TYPES:new Set(['XYZ Prompt Library V4']),widget:(node,name)=>node.widgets.find(w=>w.name===name),window:{},report:error=>{throw error;}};
   globalThis.previewHookEnvironment=environment;
   const entry=(await readFile(new URL('../../js/plv4.js',import.meta.url),'utf8')).replace(/^import .*;\r?\n/gm,'');
-  await load('const {app,PLv4Window,NODE_TYPES,widget,window,report}=globalThis.previewHookEnvironment;\n'+entry);
+  await load('const {app,PLv4Window,NODE_TYPES,widget,window,report}=globalThis.previewHookEnvironment; const LoraBrowserWindow=class {};\n'+entry);
   win.extension.nodeCreated(node);
   await win.preview();for(let i=0;i<pending.length;i++) await pending[i];
   assert.equal(reads,1);assert.equal(compiled.length,1);assert.equal(lint,0);
@@ -339,4 +343,54 @@ test('Source drop preserves its insertion command instead of replacing the conta
   const target=win.libraryDropTarget(10,10);
   assert.equal(target.kind,undefined);assert.equal(target.parent,owner);
   assert.deepEqual(target.command,{parent_id:'block',edge:'end'});assert.equal(owner.meta.pool,'old');
+});
+
+test('container creation uses the real document command, focuses its first entry and shares one undo step', {skip:!process.env.PLV4_TEST_PYTHON}, async t => {
+  const helpers=(await readFile(new URL('../../js/plv4/details.js',import.meta.url),'utf8')).replace(/^import .*;\r?\n/gm,'');
+  const oldIndex=globalThis.indexTree;globalThis.indexTree=(await import('data:text/javascript;base64,'+Buffer.from(helpers).toString('base64'))).indexTree;
+  t.after(()=>{globalThis.indexTree=oldIndex;});
+  const {DocumentSession}=await import('data:text/javascript;base64,'+Buffer.from(await readFile(new URL('../../js/plv4/document_session.js',import.meta.url),'utf8')).toString('base64'));
+  const python=`import json,sys
+from prompt_library_v4.model import EditorState,projection
+from prompt_library_v4.commands import apply_command
+body=json.load(sys.stdin)
+state=EditorState.from_json(body['state']) if 'state' in body else EditorState.create('{ old }')
+if 'command' in body: state=apply_command(state,body['command'])
+print(json.dumps({'state':state.to_json(),'projection':projection(state)},ensure_ascii=True))`;
+  const request=async(_op,body)=>{
+    const result=spawnSync(process.env.PLV4_TEST_PYTHON,['-c',python],{input:JSON.stringify(body),encoding:'utf8',env:{...process.env,PYTHONUTF8:'1'}});
+    assert.equal(result.status,0,result.stderr);return JSON.parse(result.stdout);
+  };
+  for (const form of ['schedule','region']) {
+    const session=new DocumentSession(await request('open',{}),{request});
+    const win=Object.create(PLv4Window.prototype), focused=[],located=[];
+    Object.assign(win,{context:{session},blockView:{focusInput:id=>focused.push(id)},command:command=>session.dispatch(command),locate:async id=>{located.push(id);await session.dispatch({type:'LocateDetails',id});}});
+    const oldText=session.text;
+    await win.addBlock(session.projection.tree.children[0].id,false,form);
+    const created=session.projection.tree.children[1];
+    assert.equal(created.form,form);assert.equal(created.children.length,form==='schedule'?2:4);
+    assert.deepEqual(focused,[created.children[0].id]);assert.deepEqual(located,focused);
+    assert.equal(session.past.length,1,'creation plus detail navigation is a single edit');
+    const createdText=session.text;
+    await session.undo();assert.equal(session.text,oldText);
+    await session.redo();assert.equal(session.text,createdText);
+    assert.equal(session.projection.tree.children[1].children.length,created.children.length);
+  }
+});
+
+test('entry creation is explicit; external insert does not open entry forms and entry Save is blocked', async t => {
+  const helpers=(await readFile(new URL('../../js/plv4/details.js',import.meta.url),'utf8')).replace(/^import .*;\r?\n/gm,'');
+  const oldIndex=globalThis.indexTree, oldForm=globalThis.windowShowForm;
+  globalThis.indexTree=(await import('data:text/javascript;base64,'+Buffer.from(helpers).toString('base64'))).indexTree;
+  t.after(()=>{globalThis.indexTree=oldIndex;globalThis.windowShowForm=oldForm;});
+  let forms=0;globalThis.windowShowForm=async()=>{forms++;return {start:.5,end:1};};
+  const container={id:'schedule',form:'schedule',kind:'group',parent_id:'root',children:[]};
+  const entry={id:'entry',form:'schedule_entry',kind:'group',parent_id:'schedule',children:[],settings:{schedule:[0,1]}};container.children.push(entry);
+  const win=Object.create(PLv4Window.prototype),commands=[], focused=[];
+  Object.assign(win,{context:{session:{projection:{tree:{id:'root',form:'root',children:[container]}}}},flushEditor:async()=>{},locate:async()=>{},blockView:{focusInput:id=>focused.push(id)},command:async command=>{commands.push(command);return {state:{selection:{node_id:'entry'}}};},library:{reload:async()=>{throw new Error('entry Save must fail before library reads');}}});
+  assert.equal(await win.entryTarget(container,{edge:'end'}),false);assert.equal(forms,0);
+  await win.addBlock('schedule',true);
+  assert.equal(forms,1);assert.equal(commands[0].type,'InsertEntry');assert.ok(!('text' in commands[0]));assert.deepEqual(focused,['entry']);
+  await assert.rejects(win.saveBlock(entry),/entry 不能单独保存/);
+  await assert.rejects(win.addBlock('schedule',true,'region'),/不能创建/);
 });

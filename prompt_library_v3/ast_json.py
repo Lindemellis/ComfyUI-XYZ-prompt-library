@@ -39,6 +39,7 @@ def _region(r: Region | None) -> dict | None:
 
 def _settings(s: Settings) -> dict:
     return {
+        **({'avg_weight': s.avg_weight} if s.avg_weight is not None else {}),
         "weight": s.weight,
         "format": s.format,
         "shuffle": s.shuffle,
@@ -52,6 +53,7 @@ def _settings(s: Settings) -> dict:
 
 def _spans(s: Spans) -> dict:
     return {
+        **({'avg_form': s.avg_form} if s.avg_form else {}),
         "node": _span(s.node),
         "content": _span(s.content),
         "header": _span(s.header),
@@ -82,6 +84,7 @@ def to_json(node: Node) -> dict:
 
     if isinstance(node, Group):
         return {
+            **({'average': True} if node.average else {}),
             "kind": "group",
             "span": [node.pos, node.end],
             "path": list(node.path),

@@ -19,6 +19,7 @@ never reads the library).
 from __future__ import annotations
 
 import re
+import math
 from dataclasses import dataclass, field
 from typing import Union
 
@@ -101,6 +102,7 @@ class Settings:
     seed: int | None = None
     schedule: tuple[float, float] | None = None
     region: Region | None = None
+    avg_weight: float | None = None  # relative mixture weight, never prompt emphasis
 
 
 @dataclass
@@ -130,6 +132,7 @@ class Spans:
     # "set" = a field inside `.set{}`.
     region_form: str | None = None
     schedule_form: str | None = None
+    avg_form: str | None = None
 
 
 @dataclass
@@ -148,6 +151,7 @@ class Group:
     pos: int = 0
     end: int = 0
     spans: Spans = field(default_factory=Spans)
+    average: bool = False
 
 
 _KNOWN_FIELDS = {
@@ -386,6 +390,8 @@ class Parser:
                     return self.parse_schedule_block()
                 if kind == "region":
                     return self.parse_region_block()
+                if kind == "avg":
+                    return self.parse_avg_block()
                 return self.parse_ref_block()
 
             if t.kind == lx.LPAREN:
@@ -635,6 +641,8 @@ class Parser:
             return "schedule"
         if head == "@region":
             return "region"
+        if head == "@avg":
+            return "avg"
         # `[path]: {` — a library ref block.  A `[` that is followed by `:` but
         # not by a group is not a block at all.
         j = after + 1
@@ -827,6 +835,54 @@ class Parser:
         spans.content = content
         group.spans = spans
         return group
+
+    def parse_avg_block(self) -> Group:
+        """A scoped weighted mixture: [@avg]: { 1: { ... }, 3: { ... } }."""
+        open_tok = self.expect(lx.LBRACKET)
+        self.advance()
+        self.expect(lx.RBRACKET)
+        self._skip_ws()
+        self.expect(lx.COLON)
+        self._skip_ws()
+        brace = self.expect(lx.LBRACE)
+        entries = []
+        while not self.at(lx.RBRACE) and not self.at(lx.EOF):
+            if self.at(lx.COMMA) or self.at(lx.STOP):
+                self.advance()
+                continue
+            self._skip_ws()
+            if self.at(lx.RBRACE) or self.at(lx.EOF):
+                break
+            head = self.expect(lx.TEXT)
+            try:
+                weight = float(lx.ident(head.raw))
+            except ValueError:
+                raise self.error('AVG entry needs a non-negative relative weight', head.pos)
+            if not math.isfinite(weight) or weight < 0:
+                raise self.error('AVG entry needs a finite non-negative relative weight', head.pos)
+            self._skip_ws()
+            self.expect(lx.COLON)
+            self._skip_ws()
+            # Require a real entry shell: bare prompt text is never container content.
+            body = self.parse_group()
+            if body.settings.format or body.settings.shuffle or body.settings.random_select or body.settings.dropout:
+                raise self.error('AVG entries do not accept format or random settings; use a body subblock', head.pos)
+            body.settings.avg_weight = weight
+            body.spans.avg_form = 'block'
+            span = _trim_span(head)
+            body.spans.fields['avg_weight'] = {'value': span, 'entry': span}
+            entries.append(body)
+        if not self.at(lx.RBRACE):
+            self.fail("unclosed '{' after [@avg]", open_tok.pos)
+        content = (brace.pos + 1, self.peek().pos)
+        self.expect(lx.RBRACE)
+        settings, spans = self.maybe_set()
+        if settings.format or settings.shuffle or settings.random_select or settings.dropout:
+            raise self.error('AVG containers do not accept format or random settings', open_tok.pos)
+        spans.node = (open_tok.pos, self.prev_end())
+        spans.content = content
+        return Group(children=entries, settings=settings, pos=open_tok.pos,
+                     end=self.prev_end(), spans=spans, average=True)
 
     def parse_entry_body(self) -> Group:
         """The value side of a `[@schedule]` / `[@region]` entry.

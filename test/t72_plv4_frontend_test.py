@@ -7,7 +7,7 @@ import sys
 import pytest
 
 
-@pytest.mark.parametrize('script', ['plv4_session_test.mjs', 'plv4_window_test.mjs', 'plv4_inline_session_test.mjs', 'plv4_details_test.mjs', 'plv4_text_input_test.mjs', 'plv4_prompt_text_test.mjs', 'plv4_text_editing_test.mjs', 'plv4_tagac_test.mjs', 'plv4_library_test.mjs', 'plv4_drag_test.mjs'])
+@pytest.mark.parametrize('script', ['plv4_session_test.mjs', 'plv4_window_test.mjs', 'plv4_inline_session_test.mjs', 'plv4_details_test.mjs', 'plv4_text_input_test.mjs', 'plv4_prompt_text_test.mjs', 'plv4_text_editing_test.mjs', 'plv4_tagac_test.mjs', 'plv4_native_completion_test.mjs', 'plv4_library_test.mjs', 'plv4_drag_test.mjs', 'plv4_lora_test.mjs'])
 def test_document_session_history(script):
     node = shutil.which("node")
     if not node:

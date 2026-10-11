@@ -6,17 +6,17 @@ const textOf = node => node.kind !== 'group' || node.opaque ? node.raw : (node.o
 
 async function refresh() {
   const token = generation;
-  const data = await libraryRequest('complete'); const next = [];
-  const addPrompts = (node, source, path) => {
+  const data = await libraryRequest('complete', { all_folders: true }); const next = [];
+  const addPrompts = (node, source, folder, suggest) => {
     if (node.kind !== 'group' || node.form === 'paren' || node.opaque) {
-      next.push({ name: textOf(node), kind: 'poolTag', snapshot: node, source, path }); return;
+      next.push({ name: textOf(node), kind: 'poolTag', snapshot: node, source, path: folder.path, folders: [folder], suggest }); return;
     }
-    node.children?.forEach(child => { addPrompts(child, source, path); });
+    node.children?.forEach(child => { addPrompts(child, source, folder, suggest); });
   };
-  const walk = (nodes, path = []) => nodes.forEach(node => {
-    if (node.kind === 'folder') walk(node.children, [...path, node.name]);
+  const walk = (nodes, folder = null, suggest = false) => nodes.forEach(node => {
+    if (node.kind === 'folder') walk(node.children, { id: node.id, path: node.name, open: () => window.xyzPLv4OpenFolder?.(node.id) }, suggest || node.autocomplete);
     else {
-      addPrompts(node.snapshot, node.source, path.join(' / '));
+      addPrompts(node.snapshot, node.source, folder, suggest);
     }
   }); walk(data.candidates);
   if (token === generation) index = next;
@@ -27,28 +27,55 @@ window.addEventListener('xyz-plv4-library-changed', () => { generation++; loadin
 // A manual Library refresh also sees writes made in another browser session.
 window.addEventListener('xyz-plv4-library-index', () => { generation++; loading = null; });
 
-export async function poolSuggestions(query, editor) {
-  const pane = editor.__plv4Pane; const session = pane?.editSession;
-  if (!session?.valid) return [];
+export async function libraryMatches(query) {
   if (!loading) loading = refresh().catch(() => { loading = null; return []; });
   await loading;
-  const needle = query.toLocaleLowerCase().replace(/_/g, ' '); const seen = new Set();
-  return index.filter(value => {
-    const key = value.kind === 'poolBlock' ? JSON.stringify([value.source, value.path]) : value.name;
-    if (seen.has(key) || !value.name.toLocaleLowerCase().replace(/_/g, ' ').includes(needle)) return false;
-    seen.add(key); return true;
-  }).slice(0, 40).map(value => ({ ...value, insert: async (start, end) => {
-    const parent = session.parent || session; await parent.whenIdle();
-    const base = session.parent ? (session.contentStart ?? session.range[0]) : 0;
-    const a = session.sourceOffset ? session.sourceOffset(start) : start + base, b = session.sourceOffset ? session.sourceOffset(end) : end + base;
-    const rows = [...indexTree(parent.projection.tree).values()].filter(n => n.span && n.span[0] >= a && n.span[1] <= b);
-    const target = rows.find(n => n.kind !== 'group' || n.form === 'paren');
-    if (!target || rows.some(n => n.parent_id === target.parent_id && n.id !== target.id)) throw new Error('请在一条完整 prompt 上使用 池补全');
-    await parent.dispatch({ type: 'CompleteLibrary', id: target.id, span: [a, b], snapshot: value.snapshot, source: value.source });
-  } }));
+  const needle = query.toLocaleLowerCase().replace(/_/g, ' '), matches = new Map();
+  for (const value of index) {
+    const key = value.name.toLocaleLowerCase().replace(/_/g, ' ');
+    if (!key.includes(needle)) continue;
+    const existing = matches.get(key);
+    if (!existing) matches.set(key, { ...value, folders: [...value.folders] });
+    else {
+      if (value.suggest && !existing.suggest) Object.assign(existing, { snapshot: value.snapshot, source: value.source, path: value.path });
+      existing.suggest ||= value.suggest;
+      for (const folder of value.folders) if (!existing.folders.some(old => old.id === folder.id)) existing.folders.push(folder);
+    }
+  }
+  return [...matches.values()].sort((a,b) => Number(b.suggest) - Number(a.suggest)).slice(0, 80);
+}
+
+function completionTarget(session, start, end) {
+  const parent = session.parent || session;
+  if (!session.valid || session.disposed || !parent.projection?.tree ||
+      (session.parent && session.source !== parent.text)) return null;
+  const base = session.parent ? (session.contentStart ?? session.range[0]) : 0;
+  const a = session.sourceOffset ? session.sourceOffset(start) : start + base;
+  const b = session.sourceOffset ? session.sourceOffset(end) : end + base;
+  const rows = [...indexTree(parent.projection.tree).values()].filter(n => n.span && n.span[0] >= a && n.span[1] <= b);
+  const target = rows.find(n => n.kind !== 'group' || n.form === 'paren');
+  if (!target || rows.some(n => n.parent_id === target.parent_id && n.id !== target.id)) return null;
+  return { parent, target, span: [a, b] };
+}
+
+export async function poolSuggestions(query, editor) {
+  const session = editor.__plv4Pane?.editSession;
+  if (!session?.valid) return [];
+  return (await libraryMatches(query)).map(value => ({ ...value,
+    canInsert: (start, end) => !!completionTarget(session, start, end),
+    insert: async (start, end) => {
+      const parent = session.parent || session; await parent.whenIdle();
+      const match = completionTarget(session, start, end);
+      // In-progress typing and stale candidates are ordinary editor states.
+      // Decline them without interrupting input with an instructional toast.
+      if (!match) return false;
+      await parent.dispatch({ type: 'CompleteLibrary', id: match.target.id, span: match.span, snapshot: value.snapshot, source: value.source });
+    },
+  }));
 }
 
 window.xyzPLv4Suggestions = poolSuggestions;
+window.xyzPLv4Memberships = libraryMatches;
 
 window.xyzPLv4LibraryPaths = async model => {
   if (!model.__plv4Session) return [];

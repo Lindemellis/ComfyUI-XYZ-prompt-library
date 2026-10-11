@@ -17,7 +17,7 @@ def format_document(doc, *, depth=0, remember=True):
         root = node.form == "root"
         if not root and not node.open.rstrip().endswith("{"):
             # Bare schedule/region bodies need an explicit shell for indentation.
-            if node.form not in ("schedule_entry", "region_entry"):
+            if node.form not in ("schedule_entry", "region_entry", "avg_entry"):
                 return
             node.open = node.open.rstrip() + " {"
             node.close = "}" + node.close

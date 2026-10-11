@@ -8,7 +8,7 @@ A focused ComfyUI custom-node pack for prompt authoring, image management and Kr
 
 | Tool | What it does | Manual |
 |---|---|---|
-| **Prompt Library V4** | Edit nested blocks through Blocks / Source / Preview, reuse saved combinations, and collect tags into Folder pools. Uses the PLv3 language and prompt-control compiler. | [PLv4](prompt_library_v4/README.md) |
+| **Prompt Library V4** | Author prompts through Blocks / Source / Preview and Folder pools, with an independent LoRA browser and Schedule / Region / AVG blocks. Uses the PLv3 language and prompt-control compiler. | [PLv4](prompt_library_v4/README.md) |
 | **Prompt Library V3** | A prompt language with nested groups, schedules, regions, presets, saved documents, a Monaco editor and live detail controls. It compiles to [comfyui-prompt-control](https://github.com/asagi4/comfyui-prompt-control). | [PLv3](prompt_library_v3/README.md) |
 | **Tag autocomplete** | English-only Danbooru tags plus optional Gelbooru tags, backed by a local versioned dataset with updates, snapshots and date reconstruction. | [TagDB](tagdb/README.md) |
 | **XYZ Gallery** | Browse and manage ComfyUI images and videos, inspect metadata, filter and tag files, download variants, and send images to Krita. | [Gallery](gallery/README.md) |
@@ -29,6 +29,8 @@ parentheses are escaped; an outer `(tag:weight)` wrapper keeps its weight.
 2. Install [comfyui-prompt-control](https://github.com/asagi4/comfyui-prompt-control) if you use PLv3 or PLv4.
 3. Optionally install `curl_cffi>=0.7.0` if you want to scrape or update Danbooru yourself. Downloading the prebuilt dataset does not require it.
 4. Restart ComfyUI.
+
+After updating an existing installation, restart your regular ComfyUI instance and press **Ctrl+F5** in the browser to load the new interface. Personal Libraries, model files and workflows are preserved; test-environment data is not needed.
 
 On first run, the prebuilt Danbooru dataset downloads in the background. Autocomplete becomes available after the download finishes. The dataset contains English canonical names and aliases only; Japanese and Chinese wiki translations are intentionally not stored or searched.
 

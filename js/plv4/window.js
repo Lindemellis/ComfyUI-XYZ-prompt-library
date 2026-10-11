@@ -14,15 +14,17 @@ import { showEditorContextMenu, showEditorFind } from '../plv3/text_editing.js';
 import { inlineText, inlineOffset, inlinePoint } from './text_input.js';
 import { displayRun } from './prompt_text.js';
 import { blockFindSpans, highlightBlockFindMatch, clearBlockFindHighlight } from './block_find.js';
+import { isEntry, isContainer, canInsertContainer, canDropBlock } from './drop_preview.js';
 
 export class PLv4Window {
-  constructor(app) { this.app = app; this.sessions = new NodeSessions(app); this.generation = 0; this.visible = false; this.context = null; this.seedNode = null; this.libraryTabs = new Map(); this.closedNodes = new Set(); }
+  constructor(app) { this.app = app; this.sessions = new NodeSessions(app); this.generation = 0; this.visible = false; this.context = null; this.seedNode = null; this.libraryTabs = new Map(); this.closedNodes = new Set(); window.xyzPLv4OpenFolder = id => this.run(() => this.openFolder(id)); }
   build() {
     if (this.shell) return;
     this.shell = new WindowShell(() => this.pane?.relayout());
     this.shell.win.el.tabIndex = -1;
     const bar = this.shell.win.bar;
     bar.append(button('☷ Library', '展开 / 收起 Library', () => { this.shell.toggle('library'); if (!this.shell.library.hidden) this.library.reload(); }, 'window-pane-button'),
+      button('LoRA', '打开 LoRA 浏览器', () => this.openLoras?.(this.context?.node || this.seedNode), 'window-pane-button'),
       button('▥ Details', '展开 / 收起 Details', () => this.toggleDetails(), 'window-pane-button'), button('×', '关闭窗口', () => this.hide(), 'tiny-button'));
     this.tabs = element('div', 'plv4-row plv4-tabs'); this.tablist = element('div', 'plv4-tablist');
     this.tabs.append(this.tablist, button('▾', '全部标签', e => menu(e.currentTarget, this.tabEntries().map(tab => [tab.title, () => this.selectTab(tab)])), 'overflow'));
@@ -41,6 +43,10 @@ export class PLv4Window {
     this.details = new DetailsPane(this.shell.details, this); this.blockView = new BlockView(this.blocks, this); this.library = new LibraryPanel(this.shell.library, this);
     this.folderContainer = element('div', 'plv4-scroll notebook'); this.folderContainer.hidden = true; this.shell.center.append(this.folderContainer);
     this.folderPage = new FolderPage(this.folderContainer, this);
+    const modifier = event => {
+      if (this.visible && this.shell.win.el.contains(event.target) && event.key === 'Shift') event.stopPropagation();
+    };
+    window.addEventListener('keydown', modifier, true); window.addEventListener('keyup', modifier, true);
     window.addEventListener('keydown', e => {
       // ComfyUI handles shortcuts during document capture. Handle this window's
       // history first, including contenteditable fields and floating Monaco.
@@ -116,7 +122,7 @@ export class PLv4Window {
     }
     if (context.syntaxState) this.pane.editor.restoreViewState(context.syntaxState);
     this.unsubscribe = context.session.subscribe(({ reason }) => this.changed(reason));
-    if (!this.shell.library.hidden) await this.library.reload();
+    if (!this.shell.library.hidden || [...indexTree(context.session.projection.tree).values()].some(row => row.meta?.pool)) await this.library.reload();
     this.renderTabs(); this.renderView(true); this.details.render(context.session); this.pane.scheduleLint();
   }
   async detach() {
@@ -146,7 +152,7 @@ export class PLv4Window {
       const id = node.dataset.blockId || node.dataset.promptId; node.classList.toggle('selected', id === this.context.session.state.selection.node_id || (node.dataset.blockId && id === this.context.session.state.selection.block_id));
     }
     if (reason !== 'View' && !this.shell.details.hidden) this.details.render(this.context.session, {
-      keepOwner: !['LocateDetails', 'InsertBlock', 'InsertLibraryBlock', 'InsertLibraryPrompts', 'WrapSelection', 'CreateAsBlock', 'MoveBlock', 'LoadDocument'].includes(reason),
+      keepOwner: !['LocateDetails', 'InsertBlock', 'InsertEntry', 'InsertLora', 'InsertLibraryBlock', 'InsertLibraryPrompts', 'WrapSelection', 'CreateAsBlock', 'MoveBlock', 'LoadDocument'].includes(reason),
     });
     if (this.findBinding && this.context.session.view === 'block' && this.pane.editor.getContribution('editor.contrib.findController').getState().isRevealed) {
       this.findBinding.refreshScope(); this.showBlockMatch(this.pane.editor.getSelection());
@@ -241,6 +247,7 @@ export class PLv4Window {
     this.details.render(null); this.renderTabs(); this.status.textContent = message;
   }
   beginGraphRestore() {
+    this.graphEpoch = (this.graphEpoch || 0) + 1;
     this._graphRestoring = true;
     return this.transition(async () => {
       const identity = node => node && ({ id: String(node.id), type: node.comfyClass });
@@ -305,6 +312,27 @@ export class PLv4Window {
     return this.context.session.dispatch(command, revision ?? this.context.session.revision);
   }
   run(action) { return Promise.resolve().then(action).catch(report); }
+  refreshLibraryBindings() {
+    if (!this.visible || !this.context) return;
+    if (this.context.session.view === 'block') this.blockView.render(this.context);
+    if (!this.shell.details.contains(document.activeElement)) this.details.render(this.context.session, { keepOwner: true });
+  }
+  sendLora(node, info, graph = this.app.graph, epoch = this.graphEpoch || 0) {
+    return this.transition(async () => {
+      const check = () => { if ((this.graphEpoch || 0) !== epoch || this._graphRestoring || this.app.graph !== graph || node.graph !== graph || !graph._nodes.includes(node) || !node.comfyClass?.includes('Library V4')) throw new Error('目标节点或 workflow 已变化，请重新选择'); };
+      check(); await this.flushEditor(); check();
+      const context = await this.sessions.get(node); check(); await context.session.whenIdle(); check();
+      await this.library?.reload(); check();
+      await context.session.dispatch({ type: 'InsertLora', lora: { id: info.id, name: info.name, relative: info.relative, root_id: info.root_id }, pool_id: info.pool_id });
+      if (this.context === context && this.visible && !this.folderContext) {
+        context.focus = null;
+        this.blockView.render(context);
+        const id = context.session.state.selection.block_id;
+        [...this.blocks.querySelectorAll('[data-block-id]')].find(element => element.dataset.blockId === id)?.scrollIntoView({ block: 'nearest' });
+      }
+      return context.session.state.selection.block_id;
+    });
+  }
   async textTarget(row = null) {
     const context = this.context, selection = getSelection();
     const field = (selection?.anchorNode?.nodeType === 3 ? selection.anchorNode.parentElement : selection?.anchorNode)?.closest?.('[data-run-input],[data-empty]');
@@ -451,15 +479,21 @@ export class PLv4Window {
   }
   async locate(id) { await this.command({ type: 'LocateDetails', id }); this.toggleDetails(true); }
   toggleDetails(force) { this.shell.toggle('details', force); this.details.render(this.context?.session); }
-  async addBlock(id, child) {
+  async addBlock(id, child, form = null) {
     const map = indexTree(this.context.session.projection.tree); const row = map.get(id);
     const parent = child ? row : map.get(row.parent_id); const target = { parent_id: parent.id, ...(child ? { edge: 'end' } : { after_id: row.id }) };
-    const entry = await this.entryTarget(parent, target); if (entry === false) return;
-    const result = await this.command({ type: 'InsertBlock', text: '{ }', ...target, ...(entry ? { entry } : {}) });
-    await this.locate(result.state.selection.node_id);
-    this.blockView.focusInput(result.state.selection.node_id);
+    if (form && !canInsertContainer(parent, form, map)) throw new Error('此处不能创建该类型的容器');
+    const entry = isContainer(parent) ? await this.entryTarget(parent, target, true) : null; if (entry === false) return;
+    const result = await this.command({ type: entry ? 'InsertEntry' : 'InsertBlock', ...target,
+      ...(entry ? { entry } : form ? { form } : { text: '{ }' }) });
+    const inserted = indexTree(this.context.session.projection.tree).get(result.state.selection.node_id);
+    const focus = isContainer(inserted) ? inserted.children[0].id : result.state.selection.node_id;
+    await this.locate(focus);
+    this.blockView.focusInput(focus);
   }
-  async entryTarget(parent, target) {
+  async entryTarget(parent, target, create = false) {
+    if (isContainer(parent) && !create) return false;
+    if (parent.form === 'avg') return { avg_weight: 1 };
     if (parent.form === 'region') {
       const result = await showForm('Region entry', [{ key: 'kind', label: 'Kind', value: 'base', options: ['base', 'mask', 'imask', 'fill'].map(value => ({ value, label: value })) }]);
       if (!result) return false;
@@ -477,7 +511,7 @@ export class PLv4Window {
     return null;
   }
   async addPrompt(row) {
-    if (row.form === 'schedule' || row.form === 'region') throw new Error('先选择一个 entry，再添加 prompt');
+    if (isContainer(row)) throw new Error('先选择一个 entry，再添加 prompt');
     await this.setView('block'); await this.locate(row.id); this.blockView.focusInput(row.id);
   }
   openLibrary(context, permanent = false) { return this.transition(() => this._openLibrary(context, permanent)); }
@@ -496,7 +530,7 @@ export class PLv4Window {
   async insertSnapshot(snapshot, source, promptsOnly) {
     const map = indexTree(this.context.session.projection.tree); const selected = this.context.session.state.selection;
     let parent = map.get(selected.block_id) || this.context.session.projection.tree;
-    if (parent.form === 'schedule' || parent.form === 'region') throw new Error('请先选择 entry 的内容区');
+    if (isContainer(parent)) throw new Error('请先选择 entry 的内容区');
     const current = map.get(selected.node_id); const target = { parent_id: parent.id, ...(current && current.id !== parent.id ? { after_id: current.id } : { edge: 'end' }) };
     return this.command({ type: promptsOnly ? 'InsertLibraryPrompts' : 'InsertLibraryBlock', snapshot, source, ...target });
   }
@@ -506,6 +540,11 @@ export class PLv4Window {
     await this.context.session.loadDocument({ ...(typeof data.text === 'string' ? { text: data.text } : {}), doc: data.doc_json ? JSON.parse(data.doc_json) : null });
   }
   openFolder(id, permanent = false) { return this.transition(() => this._openFolder(id, permanent)); }
+  async openLoraDetails(id) {
+    const node = this.context?.node || this.seedNode;
+    await this.flushEditor();
+    return this.openLoras?.(node, id);
+  }
   async _openFolder(id, permanent = false) {
     this.build(); await this.shell.designReady;
     if (this.context?.asset && !this.context.session.valid) throw new Error('请先修复当前 Library block 原稿');
@@ -524,6 +563,8 @@ export class PLv4Window {
     row = indexTree(this.context.session.projection.tree).get(row.id) || row;
     if (action === 'save') return this.saveBlock(row);
     if (row.form === 'root') throw new Error('请选择一个 block');
+    if (isContainer(row)) throw new Error('Schedule / Region / AVG 容器不能绑定 Folder');
+    if (row.meta?.lora) throw new Error('LoRA 的触发词 Folder 为固定绑定');
     await this.library.reload();
     const folders = this.library.data.assets.filter(a => a.kind === 'folder');
     const result = await showForm('绑定池', [{ key: 'id', label: 'Folder', value: row.meta?.pool || '', options: [{ value: '', label: '不绑定' }, ...folders.map(a => ({ value: a.id, label: this.library.path(a) }))] }]);
@@ -532,6 +573,7 @@ export class PLv4Window {
 
   async saveBlock(row) {
     await this.flushEditor(); row = indexTree(this.context.session.projection.tree).get(row.id) || row;
+    if (isEntry(row)) throw new Error('entry 不能单独保存，请保存完整容器或正文 subblock');
     if (row.form === 'root') return this.saveDocument();
     await this.library.reload(); const source = row.meta?.source;
     const linked = source?.kind === 'block' && this.library.data.assets.some(a => a.id === source.id);
@@ -580,6 +622,7 @@ export class PLv4Window {
     if (this.context.asset && parent.form === 'root') {
       parent = session.projection.tree.children[0]; command = { parent_id: parent.id, edge: 'end' }; at = parent.ast.spans.content[1];
     }
+    if (!canDropBlock(parent)) return null;
     const position = model.getPositionAt(at), coords = this.pane.editor.getScrolledVisiblePosition(position);
     if (!coords) return null;
     const rect = this.pane.editor.getDomNode().getBoundingClientRect();

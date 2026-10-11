@@ -1,0 +1,60 @@
+.plv4.lora-browser { background: var(--bg); color: var(--text); z-index: 1300; font: 14px/1.4 var(--ui); }
+.lora-browser .lora-browser-body { display: flex; flex: 1; flex-direction: column; min-height: 0; overflow: hidden; }
+.lora-browser .lora-toolbar { display: flex; gap: 10px; align-items: center; padding: 12px; border-bottom: 1px solid var(--line); }
+.lora-browser .lora-toolbar input { flex: 1; min-width: 100px; }
+.lora-browser .lora-toolbar select { max-width: 300px; }
+.lora-browser .lora-layout { display: flex; flex: 1; min-height: 0; }
+.lora-browser .lora-tree { width: 190px; flex: 0 0 190px; overflow: auto; padding: 12px 6px; border-right: 1px solid var(--line); }
+.lora-browser .lora-tree button { text-align: left; max-width: 155px; overflow: hidden; text-overflow: ellipsis; }
+.lora-browser .lora-directory { margin-left: 12px; }
+.lora-browser .lora-grid { flex: 1; min-width: 0; display: grid; grid-template-columns: repeat(auto-fill,minmax(155px,1fr)); grid-auto-rows: max-content; align-content: start; gap: 14px; padding: 16px; overflow: auto; }
+.lora-browser .lora-card { min-width: 0; align-self: start; overflow: hidden; border: 1px solid var(--line); border-radius: 7px; background: var(--card); }
+.lora-browser .lora-cover { position: relative; display: flex; width: 100%; aspect-ratio: 3/4; padding: 0; justify-content: center; align-items: center; overflow: hidden; border: 0; background: var(--bg); color: var(--muted); }
+.lora-browser .lora-cover img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
+.lora-browser .lora-card-footer { display: flex; gap: 5px; align-items: center; padding: 8px 7px 4px; }
+.lora-browser .lora-card-name { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; border: 0; text-align: left; padding: 3px; }
+.lora-browser .lora-send { font-weight: 600; color: var(--accent); }
+.lora-browser .lora-card-path { display: block; padding: 0 10px 10px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.lora-browser .lora-details { width: 350px; flex: 0 0 350px; overflow: auto; padding: 14px; border-left: 1px solid var(--line); }
+.lora-browser .lora-details[hidden] { display: none; }
+.lora-browser .lora-detail-tools { display: flex; align-items: center; gap: 8px; }
+.lora-browser .lora-detail-tools strong { flex: 1; overflow-wrap: anywhere; }
+.lora-browser .lora-detail-path { display: block; margin: 8px 0; overflow-wrap: anywhere; color: var(--muted); }
+.lora-browser .lora-gallery > img { width: 100%; max-height: 360px; object-fit: contain; }
+.lora-browser .lora-thumbnails { display: flex; gap: 6px; overflow-x: auto; padding: 7px 0; }
+.lora-browser .lora-thumbnails button { flex: 0 0 56px; padding: 0; }
+.lora-browser .lora-thumbnails img { width: 56px; height: 70px; object-fit: cover; }
+.lora-browser .lora-detail-links { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin: 10px 0; }
+.lora-browser .lora-detail-links a { color: var(--accent); }
+.lora-browser .lora-triggers { overflow-wrap: anywhere; line-height: 1.6; }
+.lora-browser .lora-trigger-group { margin: 8px 0; padding: 6px 0; border-bottom: 1px solid var(--line); white-space: pre-wrap; }
+.lora-browser .lora-trigger-group:last-child { border-bottom: 0; }
+.lora-browser .lora-folder-section { margin-top: 14px; min-width: 0; border: 1px solid var(--line); border-radius: 5px; }
+.lora-browser .lora-folder-heading { display: flex; align-items: center; gap: 8px; min-height: 36px; padding: 6px 10px; list-style: none; cursor: pointer; font-weight: 600; }
+.lora-browser .lora-folder-heading::-webkit-details-marker { display: none; }
+.lora-browser .lora-folder-heading::before { content: '▸'; width: 12px; color: var(--muted); }
+.lora-browser .lora-folder-section[open] > .lora-folder-heading { border-bottom: 1px solid var(--line); }
+.lora-browser .lora-folder-section[open] > .lora-folder-heading::before { content: '▾'; }
+.lora-browser .lora-folder-body { padding: 10px; min-width: 0; }
+.lora-browser .lora-folder-tools { display: flex; align-items: center; margin-bottom: 10px; }
+.lora-browser .lora-folder-tools button { width: 100%; min-height: 30px; padding: 4px 0; text-align: left; }
+.lora-browser .lora-folder-controls { display: grid; gap: 8px; margin-bottom: 10px; min-width: 0; }
+.lora-browser .lora-folder-name { display: grid; grid-template-columns: 48px minmax(0, 1fr); align-items: center; gap: 8px; min-width: 0; }
+.lora-browser .lora-folder-name > input { width: 100%; min-width: 0; height: 30px; padding: 4px 6px; font: inherit; }
+.lora-browser .lora-folder-options { display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 30px; }
+.lora-browser .lora-folder-autocomplete { display: flex; align-items: center; gap: 8px; cursor: pointer; }
+.lora-browser .lora-folder-history { display: flex; align-items: center; gap: 4px; }
+.lora-browser .lora-folder-history button { display: grid; place-items: center; width: 30px; height: 30px; padding: 0; font-size: 18px; line-height: 1; }
+.lora-browser .folder-page { padding: 0; }
+.lora-browser .folder-page-tools { gap: 12px; min-height: 32px; margin-bottom: 8px; }
+.lora-browser .folder-page-tools button { min-height: 28px; }
+.lora-browser .folder-branch-head { min-height: 32px; }
+.lora-browser .folder-tag-row { min-height: 30px; }
+.lora-browser .folder-tag-row > input { height: 28px; }
+.lora-browser .lora-pagination { display: flex; justify-content: center; align-items: center; gap: 16px; padding: 8px; border-top: 1px solid var(--line); }
+.lora-browser .lora-status { min-height: 26px; padding: 5px 12px; color: var(--muted); }
+.lora-browser button:focus-visible, .lora-browser a:focus-visible, .lora-browser summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+@media (max-width: 900px) { .lora-browser .lora-tree { width: 145px; flex-basis: 145px; } .lora-browser .lora-details { width: 280px; flex-basis: 280px; } }
+.lora-browser.lora-narrow .lora-tree { width: 130px; flex-basis: 130px; }
+.lora-browser.lora-narrow .lora-details { width: 270px; flex-basis: 270px; }
+.lora-browser.lora-narrow:has(.lora-details:not([hidden])) .lora-tree { display: none; }

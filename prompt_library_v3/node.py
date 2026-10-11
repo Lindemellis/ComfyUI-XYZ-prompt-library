@@ -122,11 +122,32 @@ class _PLv3Base:
         # changes the document but leaves `text` alone for one beat, and two
         # documents that render the same text must not re-run.
         key = f"{source_text(text, doc)}\x00{seed}\x00{region_mode}\x00{uses_node_seed(doc)}"
+        if uses_node_seed(doc):
+            if '.' in __package__:
+                from ..prompt_library_v4.compiler import lora_positions
+                from ..prompt_library_v4.model import EditorState
+            else:
+                from prompt_library_v4.compiler import lora_positions
+                from prompt_library_v4.model import EditorState
+            state = EditorState.create(doc=json.loads(doc))
+            if state.valid: key += '\0' + str(lora_positions(state))
         return hashlib.sha256(key.encode("utf-8")).hexdigest()
 
     def execute(self, text: str = "", seed: int = 0, region_mode: str = "couple",
                 doc: str = "", **_):
         source = source_text(text, doc)
+        if uses_node_seed(doc):
+            if '.' in __package__:
+                from ..prompt_library_v4.compiler import compile_document
+                from ..prompt_library_v4.model import EditorState
+            else:
+                from prompt_library_v4.compiler import compile_document
+                from prompt_library_v4.model import EditorState
+            state = EditorState.create(doc=json.loads(doc))
+            if not state.valid:
+                compile_text(source)  # Keep V3's strict parser error for invalid drafts.
+            result = compile_document(state, seed=seed, region_mode=region_mode)
+            return result['prompt'], result['plain']
         options = dict(seed=seed, region_mode=region_mode, ignore_group_seeds=uses_node_seed(doc))
         result = compile_text(source, **options)
         for diag in result.diagnostics:

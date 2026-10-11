@@ -24,6 +24,21 @@ def edit(lib,state,kind,**body):
 def names(lib,pool): return [a['name'] for a in lib.read()['assets'] if a['kind']=='tag' and a['parent_id']==pool]
 def bind(state,pool,index=0): state.doc.root.children[index].meta['pool']=pool; return state
 
+def test_completion_memberships_include_opted_out_folders_without_polluting_enabled_cache(lib):
+    hidden = folder(lib, 'Hidden')
+    enabled = folder(lib, 'Enabled', hidden, autocomplete=True)
+    tag(lib, hidden, 'blue eyes')
+    tag(lib, enabled, 'green eyes')
+    normal = lib.read('complete')
+    assert [item['id'] for item in normal['candidates']] == [enabled]
+    all_folders = lib.read('complete', all_folders=True)
+    assert [item['id'] for item in all_folders['candidates']] == [hidden]
+    root = all_folders['candidates'][0]
+    assert root['autocomplete'] is False
+    assert root['children'][0]['autocomplete'] is True
+    assert root['children'][1]['snapshot']['raw'] == 'blue eyes'
+    assert lib.read('complete') == normal
+
 
 def test_class_api_and_metadata_removed(lib):
     with pytest.raises(CommandError): write(lib,'save_class',name='old')
@@ -31,6 +46,23 @@ def test_class_api_and_metadata_removed(lib):
     with pytest.raises(CommandError): apply_command(state,{'type':'SetMetadata','id':state.doc.root.children[0].id,'revision':0,'patch':{'association':{'mode':'none'}}})
     for pool in ([],{},'',1):
         with pytest.raises(CommandError): apply_command(state,{'type':'SetMetadata','id':state.doc.root.children[0].id,'revision':0,'patch':{'pool':pool}})
+
+
+@pytest.mark.parametrize('form', ['schedule', 'region'])
+def test_entry_cannot_be_saved_alone_but_container_and_body_subblock_can(lib, form):
+    state = EditorState.create('')
+    state = apply_command(state, {'type': 'InsertBlock', 'revision': 0, 'parent_id': state.doc.root.id, 'form': form})
+    container = state.doc.root.children[0]
+    entry = container.children[0]
+    with pytest.raises(CommandError, match='完整容器'):
+        write(lib, 'save_block', name='Entry', snapshot=entry.to_json())
+    assert not lib.read()['assets']
+    saved = write(lib, 'save_block', name='Container', snapshot=container.to_json())['asset']
+    assert saved['data']['snapshot']['form'] == form
+    state = apply_command(state, {'type': 'InsertBlock', 'revision': state.revision, 'parent_id': entry.id, 'text': '{ body }'})
+    child = state.doc.find(entry.id).children[0]
+    saved = write(lib, 'save_block', name='Body', snapshot=child.to_json())['asset']
+    assert saved['data']['snapshot']['form'] == 'brace'
 
 def test_recursive_collection_stops_at_own_pool_and_never_saves_structure(lib):
     parent=folder(lib,'quality'); child=folder(lib,'score',parent)
@@ -194,3 +226,17 @@ def test_invalid_library_insert_rolls_back_tags_and_snapshot(lib):
     pool=folder(lib,'P'); state=bind(EditorState.create(text='[@region]: { [base]: { a } }'),pool); before=lib.read()
     with pytest.raises((CommandError,PLv3Error)): edit(lib,state,'InsertLibraryBlock',parent_id=state.doc.root.children[0].children[0].id,edge='end',snapshot=snapshot('[@region]: { [base]: { x } }'),source={'kind':'block','id':'none'})
     assert lib.read()==before
+
+
+@pytest.mark.parametrize('form', ['schedule', 'region'])
+def test_saved_container_drops_old_pool_binding_without_losing_entry_pool(lib, form):
+    state = EditorState.create('')
+    state = apply_command(state, {'type': 'InsertBlock', 'revision': 0, 'parent_id': state.doc.root.id, 'form': form})
+    container = state.doc.root.children[0]
+    container.meta['pool'] = 'old-container-pool'
+    container.children[0].meta['pool'] = 'entry-pool'
+    saved = write(lib, 'save_block', name='Container', snapshot=container.to_json())
+    value = lib.read('get', id=saved['id'])['data']['snapshot']
+    assert not value['meta'].get('pool')
+    assert value['children'][0]['meta']['pool'] == 'entry-pool'
+    assert container.meta['pool'] == 'old-container-pool'

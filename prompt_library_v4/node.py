@@ -2,7 +2,7 @@
 import hashlib
 import json
 
-from .compiler import compile_document
+from .compiler import compile_document, lora_positions
 from .model import EditorState
 
 if '.' in __package__:
@@ -17,10 +17,11 @@ class PromptLibraryV4Node(_PLv3Base):
 
     @classmethod
     def IS_CHANGED(cls, text='', seed=0, region_mode='couple', doc='', **_):
-        # Metadata does not change generation; invalid JSON still invalidates cache.
+        # LoRA block markers protect the invocation during its own randomisation.
+        # Other presentation/pool metadata remains irrelevant to generation.
         try:
             state = EditorState.create(doc=json.loads(doc)) if doc and doc.strip() else EditorState.create(text=text)
-            content = state.text
+            content = state.text + '\0' + str(lora_positions(state) if state.valid else [])
         except (ValueError, TypeError, KeyError, AttributeError): content = doc or text
         return hashlib.sha256(f'{content}\0{seed}\0{region_mode}\0plv4'.encode()).hexdigest()
 

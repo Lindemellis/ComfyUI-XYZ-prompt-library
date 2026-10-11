@@ -3,9 +3,12 @@ import { PLv4Window } from './plv4/window.js';
 import { NODE_TYPES, widget } from './plv4/host_sessions.js';
 import { report } from './plv4/ui.js';
 import { installWorkflowUndoGuard } from './plv4/history_shortcuts.js';
+import { LoraBrowserWindow } from './plv4/lora_browser.js';
 
 const editorWindow = new PLv4Window(app);
-window.plv4 = { window: editorWindow, connectNode: async node => {
+const loras = new LoraBrowserWindow(app, editorWindow);
+editorWindow.openLoras = (node, id) => loras.open(node, id);
+window.plv4 = { window: editorWindow, loras, connectNode: async node => {
   const context = editorWindow.sessions.contexts.get(node);
   if (context) editorWindow.sessions.attachEmbedded(context);
   else {

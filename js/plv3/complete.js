@@ -101,6 +101,11 @@ export function braceContext(model, position) {
 /** The core of braceContext over a bare string (everything up to the caret). tagac
  *  drives itself off text+offset, not a Monaco model, so it needs this form. */
 export function braceContextText(text) {
+  const stack = braceContextsText(text);
+  return stack.length ? stack[stack.length - 1] : 'text';
+}
+
+export function braceContextsText(text) {
   const stack = [];
   let inStr = false;
   for (let i = 0; i < text.length; i++) {
@@ -116,7 +121,7 @@ export function braceContextText(text) {
       stack.pop();
     }
   }
-  return stack.length ? stack[stack.length - 1] : 'text';
+  return stack;
 }
 
 /** Is the caret in the one place a region SEGMENT can start?
@@ -194,7 +199,11 @@ function specialBlocks(monaco, model, position, range, needle, ctx) {
 
   const items = ctx === 'region'
     ? regionKinds(I)
-    : [
+    : model.__plv4Session ? [
+      ['@schedule', 'schedule block', 'Two empty schedule entries', '@schedule]: { 0 - 0.5: { }, 0.5 - 1: { } }'],
+      ['@region', 'region block', 'Base / Mask 1 / Mask 2 / Fill', '@region]: { [base]: { }, [mask: [0, 0.5, 0, 1]]: { }, [mask: [0.5, 1, 0, 1]]: { }, [fill]: { } }'],
+      ['@avg', 'weighted average block', 'Two equal-weight entries; outside context is shared', '@avg]: { 1: { }, 1: { } }'],
+    ] : [
       ['@schedule', 'schedule block',
         'Each entry lives in its own slice of the run: `0 - 0.3: closed eyes`',
         `@schedule]: {\n${I}\${1:0} - \${2:0.3}: \${3:closed eyes},\n${I}\${2:0.3} - 1: \${4:open eyes},\n${indent}}`],
@@ -205,6 +214,8 @@ function specialBlocks(monaco, model, position, range, needle, ctx) {
         'base is everything; each segment adds the ambient text plus its own content. imask: i is the CLIP ATTACH ORDER',
         // One header shape everywhere: `[<kind>, <params>]`, the kind first.
         `@region]: {\n${I}[base]: { \${1} }\n\n${I}[imask: \${2:0}]: { \${3} }\n\n${I}[imask: \${4:1}]: { \${5} }\n\n${I}[fill]: { \${0} }\n${indent}}`],
+      ['@avg', 'weighted average block', 'Relative entry weights; outside context is shared',
+        `@avg]: {\n${I}\${1:1}: { \${2} },\n${I}\${3:1}: { \${0} }\n${indent}}`],
     ];
 
   const want = needle.toLowerCase().replace(/^@/, '');
@@ -226,6 +237,7 @@ function specialBlocks(monaco, model, position, range, needle, ctx) {
 }
 
 export async function provideCompletions(monaco, model, position, { onInsertBlock } = {}) {
+  if (window.xyzAcSettings?.sourceCompletion === false) return { suggestions: [] };
   // Inside `.set{ … }` the vocabulary is field names, and language.js owns those.
   const brace = braceContext(model, position);
   if (brace === 'set') return { suggestions: [] };

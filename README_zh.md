@@ -8,7 +8,7 @@
 
 | 工具 | 作用 | 手册 |
 |---|---|---|
-| **Prompt Library V4** | 用 Blocks / Source / Preview 编辑嵌套 Block，复用保存的组合，把标签收录进 Folder 池；沿用 PLv3 语言和 prompt-control 编译器。 | [PLv4](prompt_library_v4/README_zh.md) |
+| **Prompt Library V4** | 用 Blocks / Source / Preview 编辑提示词，复用 Folder 池；包含独立 LoRA 浏览器、Schedule / Region / AVG Block，沿用 PLv3 语言和 prompt-control 编译器。 | [PLv4](prompt_library_v4/README_zh.md) |
 | **Prompt Library V3** | 提示词语言、嵌套组、时间调度、区域、预设、已保存文档、Monaco 编辑器和实时详情控制，最终编译为 [comfyui-prompt-control](https://github.com/asagi4/comfyui-prompt-control) 语法。 | [PLv3](prompt_library_v3/README.md) |
 | **标签自动补全** | 仅英文的 Danbooru 标签和可选 Gelbooru 标签；本地数据集支持更新、快照和按日期回溯。 | [TagDB](tagdb/README_zh.md) |
 | **XYZ Gallery** | 浏览和管理 ComfyUI 图片与视频，查看元数据、筛选、打标签、下载不同净化版本，并发送到 Krita。 | [画廊](gallery/README_zh.md) |
@@ -29,6 +29,8 @@ Prompt Library V2 和早期原创 LLM 提示词助手已经退役。个人 PLv2 
 2. 使用 PLv3 或 PLv4 时安装 [comfyui-prompt-control](https://github.com/asagi4/comfyui-prompt-control)。
 3. 只有在你要自行抓取或更新 Danbooru 时，才需要额外安装 `curl_cffi>=0.7.0`；下载预构建数据集不需要。
 4. 重启 ComfyUI。
+
+已有安装更新代码后，重启正式 ComfyUI，并在浏览器按 **Ctrl+F5** 加载新版界面。个人 Library、模型文件和 workflow 保留；无需复制测试环境的数据。
 
 首次运行时，预构建 Danbooru 数据集会在后台下载。下载完成后自动补全即可使用。数据集只保存和搜索英文规范名与英文别名；不保存日文、中文 wiki 翻译，这是明确的设计选择。
 

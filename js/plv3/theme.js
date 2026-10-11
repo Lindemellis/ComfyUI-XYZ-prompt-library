@@ -442,6 +442,21 @@ const EDGES = [
 
 /** A floating window with a drag bar and resize handles on ALL FOUR edges and
  *  corners — not just the bottom-right nub CSS `resize` gives you. */
+// Keep application windows below their menus/dialogs, with the last active on top.
+const windowOrder = [];
+export function registerWindow(win) {
+  const activate = () => {
+    const index = windowOrder.indexOf(win);
+    if (index >= 0) windowOrder.splice(index, 1);
+    windowOrder.push(win);
+    for (let i = windowOrder.length - 1; i >= 0; i--) if (!windowOrder[i].isConnected) windowOrder.splice(i, 1);
+    windowOrder.forEach((node, i) => { node.style.zIndex = String(1200 + i * 2); });
+  };
+  win.addEventListener('pointerdown', activate, true);
+  win.addEventListener('focusin', activate);
+  return activate;
+}
+
 export function makeWindow({ key, title, defaults, minW = 640, minH = 360, onResize, chromeTag = 'div' }) {
   let g = { ...defaults };
   try { g = { ...g, ...JSON.parse(localStorage.getItem(key) || '{}') }; } catch {}
@@ -522,6 +537,7 @@ export function makeWindow({ key, title, defaults, minW = 640, minH = 360, onRes
   }
 
   document.body.appendChild(win);
+  const activate = registerWindow(win);
 
   return {
     el: win,
@@ -529,7 +545,7 @@ export function makeWindow({ key, title, defaults, minW = 640, minH = 360, onRes
     body,
     titleActions: spacer, // append buttons before this to right-align them
     save,
-    show() { win.style.display = 'flex'; onResize?.(); },
+    show() { win.style.display = 'flex'; activate(); onResize?.(); },
     hide() { save(); win.style.display = 'none'; },
     isVisible() { return win.style.display !== 'none'; },
   };

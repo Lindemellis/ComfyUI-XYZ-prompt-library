@@ -4,6 +4,7 @@ import { spawnSync } from 'node:child_process';
 import { test } from 'node:test';
 
 const load = code => import('data:text/javascript;base64,' + Buffer.from(code + '\n//# sourceURL=plv4-prompt-text-under-test.js').toString('base64'));
+globalThis.runDropHelpers = await load((await readFile(new URL('../../js/plv4/drop_preview.js', import.meta.url), 'utf8')).replace(/^import .*;\r?\n/gm, ''));
 const helpers = await load(await readFile(new URL('../../js/plv4/prompt_text.js', import.meta.url), 'utf8'));
 const { promptDisplay, displayRun, scheduleSource, autocompleteText } = helpers;
 
@@ -78,6 +79,29 @@ test('legacy Region and actual user-created blocks remain block source, preservi
 });
 
 const python = process.env.PLV4_TEST_PYTHON;
+test('reopening a native run keeps trailing comma and newline drafts before the next prompt is typed', { skip: !python }, async () => {
+  const { DocumentSession } = await load(await readFile(new URL('../../js/plv4/document_session.js', import.meta.url), 'utf8'));
+  const indexTree = tree => { const map = new Map(); const visit = row => { map.set(row.id, row); row.children.forEach(visit); }; visit(tree); return map; };
+  globalThis.separatorRunFixture = { helpers, indexTree };
+  const view = (await readFile(new URL('../../js/plv4/block_view.js', import.meta.url), 'utf8')).replace(/^import .*;\r?\n/gm, '').replace('class RunSession', 'const {canInsertContainer}=globalThis.runDropHelpers; export class RunSession');
+  const { RunSession } = await load('const {helpers:{promptDisplay,displayRun,scheduleSource,runEnd},indexTree}=globalThis.separatorRunFixture;\n' + view);
+  for (const source of ['alpha', '{ alpha}', '{\n    alpha\n}']) {
+    for (const suffix of [',', ', ', ',\n', '\n', '\n\n']) {
+      const session = new DocumentSession(backend('open', { text: source }), { request: async (op, body) => backend(op, body) });
+      const owner = source.startsWith('{') ? session.projection.tree.children[0] : session.projection.tree;
+      const ids = owner.children.map(row => row.id);
+      const run = new RunSession(session, ids, {});
+      await run.replaceText('alpha' + suffix);
+      const draft = session.text;
+      const reopened = new RunSession(session, ids, {});
+      assert.equal(reopened.text, 'alpha' + suffix, JSON.stringify({ source, suffix }));
+      await reopened.replaceText(reopened.text + 'beta');
+      assert.ok(session.text.includes('alpha' + suffix + 'beta'));
+      await session.undo(); assert.equal(session.text, draft);
+      await session.redo(); assert.ok(session.text.includes('alpha' + suffix + 'beta'));
+    }
+  }
+});
 function backend(operation, body) {
   const script = `import json,sys
 from prompt_library_v4.model import EditorState,projection
@@ -106,7 +130,7 @@ test('the real run/backend preserve prompt IDs, parked siblings, compiled schedu
   const parent = indexTree(session.projection.tree).get(leaf.parent_id);
   globalThis.promptTextIntegration = { helpers, indexTree };
   const setup = `const { helpers: { promptDisplay, displayRun, scheduleSource, runEnd }, indexTree } = globalThis.promptTextIntegration;`;
-  const view = (await readFile(new URL('../../js/plv4/block_view.js', import.meta.url), 'utf8')).replace(/^import .*;\r?\n/gm, '').replace('class RunSession', 'export class RunSession');
+  const view = (await readFile(new URL('../../js/plv4/block_view.js', import.meta.url), 'utf8')).replace(/^import .*;\r?\n/gm, '').replace('class RunSession', 'const {canInsertContainer}=globalThis.runDropHelpers; export class RunSession');
   const { RunSession } = await load(setup + view);
   const run = new RunSession(session, parent.children.map(n => n.id), { undo: () => session.undo(), redo: () => session.redo() });
   const before = session.text;
@@ -167,7 +191,7 @@ test('the real Region block run hides indentation after reload and edits preserv
   const map = indexTree(session.projection.tree), tag = [...map.values()].find(row => row.source === 'fantasy landscape');
   const owner = map.get(tag.parent_id), ids = owner.children.map(row => row.id);
   globalThis.regionRunFixture = { helpers, indexTree };
-  const viewSource = (await readFile(new URL('../../js/plv4/block_view.js', import.meta.url), 'utf8')).replace(/^import .*;\r?\n/gm, '').replace('class RunSession', 'export class RunSession');
+  const viewSource = (await readFile(new URL('../../js/plv4/block_view.js', import.meta.url), 'utf8')).replace(/^import .*;\r?\n/gm, '').replace('class RunSession', 'const {canInsertContainer}=globalThis.runDropHelpers; export class RunSession');
   const { RunSession } = await load('const { helpers: { promptDisplay, displayRun, scheduleSource, runEnd }, indexTree } = globalThis.regionRunFixture;\n' + viewSource);
   const run = new RunSession(session, ids, {});
   assert.equal(run.text, 'fantasy landscape, detailed illustration');
@@ -189,7 +213,7 @@ test('real PLv3 trailing newlines survive Block run reopen and further editing w
   const {DocumentSession}=await load(await readFile(new URL('../../js/plv4/document_session.js',import.meta.url),'utf8'));
   const indexTree=tree=>{const map=new Map();const visit=n=>{map.set(n.id,n);n.children.forEach(visit);};visit(tree);return map;};
   globalThis.newlineRunFixture={helpers,indexTree};
-  const view=(await readFile(new URL('../../js/plv4/block_view.js',import.meta.url),'utf8')).replace(/^import .*;\r?\n/gm,'').replace('class RunSession','export class RunSession');
+  const view=(await readFile(new URL('../../js/plv4/block_view.js',import.meta.url),'utf8')).replace(/^import .*;\r?\n/gm,'').replace('class RunSession','const {canInsertContainer}=globalThis.runDropHelpers; export class RunSession');
   const {RunSession}=await load('const {helpers:{promptDisplay,displayRun,scheduleSource,runEnd},indexTree}=globalThis.newlineRunFixture;\n'+view);
   for(const source of ['{ cat }','{\n    cat\n}','{ {\n        cat\n    }, tail }']){
     const session=new DocumentSession(backend('open',{text:source}),{request:async(op,body)=>backend(op,body)});
@@ -208,7 +232,7 @@ test('Settings prompt switches preserve Enter lines through the real backend, Bl
   const {DocumentSession}=await load(await readFile(new URL('../../js/plv4/document_session.js',import.meta.url),'utf8'));
   const indexTree=tree=>{const map=new Map();const visit=n=>{map.set(n.id,n);n.children.forEach(visit);};visit(tree);return map;};
   globalThis.switchNewlineFixture={helpers,indexTree};
-  const view=(await readFile(new URL('../../js/plv4/block_view.js',import.meta.url),'utf8')).replace(/^import .*;\r?\n/gm,'').replace('class RunSession','export class RunSession');
+  const view=(await readFile(new URL('../../js/plv4/block_view.js',import.meta.url),'utf8')).replace(/^import .*;\r?\n/gm,'').replace('class RunSession','const {canInsertContainer}=globalThis.runDropHelpers; export class RunSession');
   const {RunSession}=await load('const {helpers:{promptDisplay,displayRun,scheduleSource,runEnd},indexTree}=globalThis.switchNewlineFixture;\n'+view);
   const session=new DocumentSession(backend('open',{text:'{\n    first,\n    second\n}'}),{request:async(op,body)=>backend(op,body)});
   session.state.doc.root.meta={...session.state.doc.root.meta,_layout_indent:4};
@@ -228,7 +252,7 @@ test('deleting Region subblock terminal blank lines stays deleted after reopen a
   const {DocumentSession}=await load(await readFile(new URL('../../js/plv4/document_session.js',import.meta.url),'utf8'));
   const indexTree=tree=>{const map=new Map();const visit=n=>{map.set(n.id,n);n.children.forEach(visit);};visit(tree);return map;};
   globalThis.deleteNewlineFixture={helpers,indexTree};
-  const view=(await readFile(new URL('../../js/plv4/block_view.js',import.meta.url),'utf8')).replace(/^import .*;\r?\n/gm,'').replace('class RunSession','export class RunSession');
+  const view=(await readFile(new URL('../../js/plv4/block_view.js',import.meta.url),'utf8')).replace(/^import .*;\r?\n/gm,'').replace('class RunSession','const {canInsertContainer}=globalThis.runDropHelpers; export class RunSession');
   const {RunSession}=await load('const {helpers:{promptDisplay,displayRun,scheduleSource,runEnd},indexTree}=globalThis.deleteNewlineFixture;\n'+view);
   for(const source of [
     '[@region]: { [base]: { landscape } [mask: [0, 0.5, 0, 1]]: { 1girl, emerald cloak\n\n } [fill]: { mist } }',
@@ -277,7 +301,7 @@ test('typing a new Prompt Control range is editable after reopen, and an incompl
   const indexTree = tree => { const map = new Map(); const walk = n => { if (!n) return; map.set(n.id, n); n.children.forEach(walk); }; walk(tree); return map; };
   globalThis.promptTextNewRange = { helpers, indexTree };
   const setup = `const { helpers: { promptDisplay, displayRun, scheduleSource, runEnd }, indexTree } = globalThis.promptTextNewRange;`;
-  const view = (await readFile(new URL('../../js/plv4/block_view.js', import.meta.url), 'utf8')).replace(/^import .*;\r?\n/gm, '').replace('class RunSession', 'export class RunSession');
+  const view = (await readFile(new URL('../../js/plv4/block_view.js', import.meta.url), 'utf8')).replace(/^import .*;\r?\n/gm, '').replace('class RunSession', 'const {canInsertContainer}=globalThis.runDropHelpers; export class RunSession');
   const { RunSession } = await load(setup + view);
   const owner = session.projection.tree.children[0];
   const run = new RunSession(session, owner.children.map(n => n.id), {});

@@ -8,7 +8,7 @@ import { compactFolders } from './folder_tree.js';
 
 export const isBlock = row => row.kind === 'group' && row.form !== 'paren' && !inlinePrompt(row);
 export function indexTree(tree) { const map = new Map(); const visit = n => { if (!n) return; map.set(n.id, n); n.children.forEach(visit); }; visit(tree); return map; }
-export const nameOf = row => row.meta?.name || row.ast?.header || ({ schedule: 'Schedule', region: 'Region', schedule_entry: 'Schedule', region_entry: 'Region' }[row.form]) || '';
+export const nameOf = row => row.meta?.name || row.ast?.header || ({ schedule: 'Schedule', region: 'Region', avg: 'AVG', avg_entry: 'AVG entry', schedule_entry: 'Schedule', region_entry: 'Region' }[row.form]) || '';
 const textOf = node => node.source ?? (node.kind !== 'group' || node.opaque ? node.raw || '' : (node.open || '') + (node.lead || '') + (node.children || []).map(child => textOf(child) + (child.sep || '')).join('') + (node.close || ''));
 
 export function promptKey(node) {
@@ -28,7 +28,7 @@ export class DetailsPane {
   render(session, { keepOwner = false } = {}) {
     this.rememberScroll();
     const token = this.token = (this.token || 0) + 1;
-    if (!session) { this.container.replaceChildren(); this.mountedSession = null; this.ownerId = null; return; }
+    if (!session) { this.mountGuard?.field.removeEventListener('blur', this.mountGuard.listener); this.mountGuard = null; this.container.replaceChildren(); this.mountedSession = null; this.ownerId = null; return; }
     const previousSession = this.session;
     this.session = session;
     if (!this.promptStates.has(session)) this.promptStates.set(session, new Set());
@@ -43,20 +43,31 @@ export class DetailsPane {
     const name = input(row.meta?.name || '', value => this.command('SetMetadata', row, { patch: { name: value } }), { title: 'Block 名称' }); name.placeholder = 'Block 名称'; name.dataset.field = 'name';
     name.classList.add('detail-name'); top.append(name, button('×', '关闭 Details', () => this.host.toggleDetails(false), 'tiny-button')); page.append(top);
     if (row.form !== 'root') {
-      const field = this.field('Format', input(row.settings?.format || '', value => this.setting(row, 'format', value || null)));
-      field.querySelector('input').classList.add('format-input');
+      if (row.meta?.lora) {
+        const section = this.section('LoRA');
+        const match = row.children[0]?.source?.trim().match(/^<lora:[^:<>]+:([-+\d.eE]+)(?::([-+\d.eE]+))?>$/);
+        const model = Number(match?.[1] ?? 1), clip = Number(match?.[2] ?? match?.[1] ?? 1);
+        section.append(element('div', 'pool-help', row.meta.lora.relative),
+          this.field('Model strength', this.weightControl(model, value => this.command('SetLoraStrength', row, { model: value }), { title: 'Model strength' })),
+          this.field('CLIP strength', this.weightControl(clip, value => this.command('SetLoraStrength', row, { clip: value }), { title: 'CLIP strength' })),
+          this.folderBinding(row, true),
+          button('打开 LoRA 详情', '浏览此 LoRA 的预览图和触发词 Folder', () => this.host.openLoraDetails(row.meta.lora.id), 'detail-open-lora'));
+        page.append(section);
+      }
       const common = this.section('GENERAL');
       common.append(this.field('Enable', check(row.enabled, enabled => this.command('SetEnabled', row, { enabled }))),
-        this.field('Weight', this.weightControl(row.settings?.weight ?? 1, value => this.setting(row, 'weight', value), { min: 0 })),
-        this.field('Shuffle', check(!!row.settings?.shuffle, value => this.setting(row, 'shuffle', value))), field);
-      const random = this.section('RANDOM');
-      random.append(this.field('Random select', input(row.settings?.random_select?.join('-') || '', value => {
-          const numbers = value.trim() ? value.split('-').map(Number) : null;
-          if (numbers?.some(n => !Number.isInteger(n))) throw new Error('Random select 使用整数或整数范围');
-          return this.setting(row, 'random_select', numbers?.length === 1 ? numbers[0] : numbers);
-        })), this.field('Dropout', input(row.settings?.dropout ?? 0, value => this.setting(row, 'dropout', value), { type: 'number', min: 0, max: 1, step: .05 })));
-      page.append(common, random);
-      if (!['schedule', 'region'].includes(row.form)) {
+        row.form === 'avg_entry'
+          ? this.field('AVG weight', this.weightControl(row.settings?.avg_weight ?? 1, value => this.command('SetAvgWeight', row, { value }), { min: 0, title: '相对混合权重；各 entry 按比例归一化，0 不参与' }))
+          : this.field('Weight', this.weightControl(row.settings?.weight ?? 1, value => this.setting(row, 'weight', value), { min: 0 })));
+      page.append(common);
+      if (!['schedule', 'region', 'avg', 'avg_entry'].includes(row.form)) {
+        const field = this.field('Format', input(row.settings?.format || '', value => this.setting(row, 'format', value || null), { title: '对直接子项套用格式，subblock 作为整体；$p 为该项内容' }));
+        field.querySelector('input').classList.add('format-input');
+        common.append(this.field('Shuffle', check(!!row.settings?.shuffle, value => this.setting(row, 'shuffle', value))), field);
+        const random = this.section('RANDOM');
+        random.append(this.randomSelect(row), this.dropout(row)); page.append(random);
+      }
+      if (!['schedule', 'region', 'avg'].includes(row.form)) {
         const timing = this.section('TIMING & REGION');
         if (row.form === 'schedule_entry') this.interval(timing, row.settings.schedule, (value, side) => this.command('SetScheduleBoundary', row, { side, value }));
         else {
@@ -70,19 +81,18 @@ export class DetailsPane {
         }
         page.append(timing);
       }
-      const pool = this.section('池绑定');
-      const poolId = row.meta?.pool;
-      const folder = this.host.library.data?.assets?.find(a => a.id === poolId);
-      pool.append(this.field('文件夹', button(`${folder ? folder.name : poolId ? '池已删除 / 不在本机' : '未绑定'} ▾`, folder ? this.host.library.path(folder) : '绑定 Folder 池', () => this.host.libraryAction('pool', row), 'pool-setting')));
-      page.append(pool);
-      if (row.meta?.source?.kind === 'block') {
+      if (!row.meta?.lora && !['schedule', 'region', 'avg'].includes(row.form)) {
+        const pool = this.section('池绑定');
+        pool.append(this.folderBinding(row)); page.append(pool);
+      }
+      if (row.meta?.source?.kind === 'block' && !['schedule_entry', 'region_entry', 'avg_entry'].includes(row.form)) {
         const status = element('div', 'plv4-row');
         status.append(button('覆盖回库', '显式覆盖来源 block', () => this.host.saveBlock(row))); page.append(status);
         this.sourceStatus(row, status, token).catch(error => { if (token === this.token) status.append(element('span', 'plv4-badge', error.message)); });
       }
     }
-    if (row.form === 'schedule' || row.form === 'region') {
-      const entries = this.section(row.form === 'schedule' ? 'Schedule entries' : 'Region entries');
+    if (['schedule', 'region', 'avg'].includes(row.form)) {
+      const entries = this.section({ schedule: 'Schedule entries', region: 'Region entries', avg: 'AVG entries' }[row.form]);
       const regionTree = row.form === 'region' ? element('div', 'detail-contents-tree detail-region-tree') : null;
       if (regionTree) entries.append(regionTree);
       for (const [index, entry] of row.children.entries()) {
@@ -91,18 +101,19 @@ export class DetailsPane {
         line.append(check(entry.enabled, value => this.command('SetEnabled', entry, { enabled: value })), button(nameOf(entry), nameOf(entry), () => this.host.locate(entry.id)), button('×', '删除 entry', () => this.command('Delete', entry)));
         entries.append(line);
         if (row.form === 'schedule') this.interval(entries, entry.settings.schedule, (value, side) => this.command('SetScheduleBoundary', entry, { side, value }));
+        if (row.form === 'avg') entries.append(this.field('Weight', this.weightControl(entry.settings?.avg_weight ?? 1, value => this.command('SetAvgWeight', entry, { value }), { min: 0, title: '相对混合权重' })));
       }
       entries.append(button('+', '添加 entry', () => this.host.addBlock(row.id, true))); page.append(entries);
     }
     const prompts = this.section('Content');
     prompts.classList.add('detail-content-section');
     const contentTree = element('div', 'detail-contents-tree'); contentTree.dataset.depth = 0; prompts.append(contentTree);
-    this.localContents(row.children, contentTree, session, row);
+    this.localContents(row.children.filter(child => !child.meta?.lora_invocation), contentTree, session, row);
     const folder = row.meta?.pool && this.host.library?.data?.assets?.find(asset => asset.id === row.meta.pool);
     let pending = null;
-    const add = button('＋ 添加 prompt', '添加 prompt', () => this.host.addPrompt(row), 'small-add'); prompts.append(add);
+    if (!['schedule', 'region', 'avg'].includes(row.form)) prompts.append(button('＋ 添加 prompt', '添加 prompt', () => this.host.addPrompt(row), 'small-add'));
     page.append(prompts);
-    if (row.meta?.pool) {
+    if (row.meta?.pool && !['schedule', 'region', 'avg'].includes(row.form)) {
       const poolSection = this.section('Pool'), poolTree = element('div', 'plv4-candidates pool-tree');
       poolSection.classList.add('detail-pool-section');
       poolSection.append(poolTree); page.append(poolSection);
@@ -111,9 +122,20 @@ export class DetailsPane {
       });
       else poolTree.append(element('p', 'pool-help', 'Folder 已删除 / 不在本机。当前内容仍可在 Content 编辑。'));
     }
-    XYZPLv4Design.foldSections(page, { id: row.id, type: ['schedule', 'region'].includes(row.form) ? row.form : 'normal', schedule: row.settings?.schedule, region: row.settings?.region }, this.sections);
+    XYZPLv4Design.foldSections(page, { id: row.id, type: ['schedule', 'region', 'avg'].includes(row.form) ? row.form : 'normal', schedule: row.settings?.schedule, region: row.settings?.region }, this.sections);
     const mount = () => {
       if (token !== this.token) return;
+      const focused = document.activeElement;
+      if (focused && this.mountedSession === session && this.mountedOwner === row.id && this.container.contains(focused) && focused.matches('input,textarea,select,[contenteditable="true"]')) {
+        // Pool reads may finish after the user starts a new draft. Replacing
+        // that field would discard its focus, caret and uncommitted value.
+        this.mountGuard?.field.removeEventListener('blur', this.mountGuard.listener);
+        const listener = () => queueMicrotask(mount);
+        this.mountGuard = { field: focused, listener };
+        focused.addEventListener('blur', listener, { once: true });
+        return;
+      }
+      if (this.mountGuard) { this.mountGuard.field.removeEventListener('blur', this.mountGuard.listener); this.mountGuard = null; }
       // The old tree stays mounted while pool data loads, so its scroll extent
       // never collapses to an empty placeholder between toggle and redraw.
       this.rememberScroll();
@@ -174,6 +196,57 @@ export class DetailsPane {
     container.append(card);
   }
   command(type, row, extra = {}) { return this.host.command({ type, id: row.id, ...extra }); }
+  randomSelect(row) {
+    const value = row.settings?.random_select;
+    const bounds = Array.isArray(value) ? value : Number.isInteger(value) ? [value, value] : ['', ''];
+    const control = element('div', 'detail-random-range');
+    const fields = bounds.map((value, index) => {
+      const field = input(value, () => apply(), { type: 'number', min: 0, step: 1, title: index ? '上限 b：整数，b ≥ a；两个框留空关闭' : '下限 a：整数，0 ≤ a ≤ b；两个框留空关闭' });
+      field.min = '0'; field.step = '1'; field.placeholder = index ? 'b' : 'a';
+      field.setAttribute('aria-label', index ? 'Random select 最大数量 b' : 'Random select 最小数量 a');
+      field.oninput = () => fields.forEach(input => input.setCustomValidity?.(''));
+      return field;
+    });
+    const apply = () => {
+      fields.forEach(field => field.setCustomValidity?.(''));
+      if (fields.some(field => field.validity?.badInput)) return;
+      if (fields.every(field => field.value === '')) return this.setting(row, 'random_select', null);
+      if (fields.some(field => field.value === '')) return;
+      const [a, b] = fields.map(field => Number(field.value));
+      if (![a, b].every(value => Number.isSafeInteger(value) && value >= 0) || a > b) {
+        const field = fields.find(field => !Number.isSafeInteger(Number(field.value)) || Number(field.value) < 0) || fields[1];
+        field.setCustomValidity?.('需要满足 0 ≤ a ≤ b，且 a、b 都为整数'); field.reportValidity?.(); return;
+      }
+      return this.setting(row, 'random_select', [a, b]);
+    };
+    control.append(fields[0], element('span', '', '–'), fields[1]);
+    return this.field('Random select', control);
+  }
+  dropout(row) {
+    const control = element('div', 'detail-dropout-control');
+    const slider = input(row.settings?.dropout ?? 0, value => this.setting(row, 'dropout', value), { type: 'range', min: 0, max: 1, step: .05, title: 'Dropout' });
+    slider.setAttribute('aria-label', 'Dropout 概率');
+    const value = element('span', 'detail-dropout-value', Number(slider.value).toFixed(2));
+    slider.oninput = () => { value.textContent = Number(slider.value).toFixed(2); };
+    control.append(slider, value);
+    return this.field('Dropout', control);
+  }
+  folderBinding(row, fixed = false) {
+    const poolId = row.meta?.pool;
+    const folder = this.host.library.data?.assets?.find(asset => asset.kind === 'folder' && asset.id === poolId);
+    const name = folder ? folder.name : poolId ? 'Folder 已删除 / 不在本机' : '未绑定';
+    const controls = element('div', 'detail-folder-control'); controls.dataset.folderBinding = fixed ? 'fixed' : 'editable';
+    const label = fixed ? element('span', 'detail-folder-name', name)
+      : button(`${name} ▾`, folder ? this.host.library.path(folder) : '绑定 Folder 池', () => this.host.libraryAction('pool', row), 'pool-setting');
+    label.title = folder ? this.host.library.path(folder) : name;
+    controls.append(label);
+    if (poolId) {
+      const open = button('↗', '打开绑定的 Folder 设置', () => this.host.openFolder(poolId), 'detail-open-folder');
+      open.setAttribute('aria-label', `打开 ${name} 的 Folder 设置`); open.disabled = !folder;
+      controls.append(open);
+    }
+    return this.field('文件夹', controls);
+  }
   async sourceStatus(row, container, token) {
     const source = row.meta.source; const expected = { ...source.dependencies, [source.id]: source.version };
     const latest = await libraryRequest('versions', { ids: Object.keys(expected) }); if (token !== this.token) return;
@@ -221,7 +294,7 @@ export class DetailsPane {
   }
   localContents(children, container, session, owner, depth = 0, active = owner.enabled !== false && owner.effective !== false, present = true) {
     if (!this.promptStates.has(session)) this.promptStates.set(session, new Set()); this.expandedPrompts = this.promptStates.get(session);
-    for (const item of children) {
+    for (const item of children.filter(child => !child.meta?.lora_invocation)) {
       if (isBlock(item)) this.blockRow(container, item, session, owner, { local: present ? item : null, depth, key: `local:${item.id}`, active });
       else this.promptRow(container, item, session.state?.selection || {}, { local: present ? item : null, active });
     }
@@ -258,6 +331,7 @@ export class DetailsPane {
       if (match) { this.highlightJoined(match.node.id); return; }
       if (current.enabled === false || current.effective === false) return;
       const target = { parent_id: current.id, edge: 'end' };
+      if (['schedule', 'region', 'avg'].includes(current.form)) return;
       const entry = await this.host.entryTarget(current, target); if (entry === false || this.host.context?.session !== session) return;
       return this.host.command({ type: 'EnableCandidate', ...target, snapshot: candidate.snapshot, source: candidate.source, occurrence: candidate.occurrence, ...(entry ? { entry } : {}) });
     });
@@ -321,7 +395,7 @@ export class DetailsPane {
         line.dataset.poolState = selected ? 'joined' : 'unused';
         if (selected) line.classList.add('pool-joined');
         const add = button('＋', selected ? '已加入：提示当前位置，不重复添加' : `添加 ${name} 到 Content 末尾`, () => this.addPoolCandidate(session, current, candidate), 'pool-add');
-        add.dataset.action = 'add-pool-candidate'; add.disabled = !active; add.setAttribute('aria-label', `添加 ${name}`);
+        add.dataset.action = 'add-pool-candidate'; add.disabled = !active || ['schedule', 'region', 'avg'].includes(current.form); add.setAttribute('aria-label', `添加 ${name}`);
         line.append(add);
       };
       const status = (line, selected) => line.append(element('small', 'pool-usage', selected ? '已添加' : '未添加'));
@@ -348,7 +422,7 @@ export class DetailsPane {
               const entry = await this.host.entryTarget(current, target); if (entry === false) return;
               return this.host.command({ type: 'InsertLibraryBlock', ...target, snapshot: source.snapshot, source: source.source, ...(entry ? { entry } : {}) });
             }, 'pool-insert');
-            insert.disabled = !active; insert.dataset.action = 'insert-folder-block'; head.append(insert);
+            insert.disabled = !active || ['schedule', 'region', 'avg'].includes(current.form); insert.dataset.action = 'insert-folder-block'; head.append(insert);
           }
           parent.append(box); walk(terminal.children, body, depth + 1, terminal.name, actualDepth + chain.length);
           if (!terminal.children.length) body.append(element('span', 'pool-empty', '空文件夹')); return;

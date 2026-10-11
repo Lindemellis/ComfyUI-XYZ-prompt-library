@@ -59,8 +59,8 @@ def test_compiler_is_the_existing_compiler_with_one_node_seed(text, mode):
     state = EditorState.create(text)
     for seed in (0, 42, 987):
         result = compile_document(state, seed=seed, region_mode=mode)
-        assert result["prompt"] == compile_text(text, seed=seed, region_mode=mode).text
-        assert result["plain"] == compile_text(text, seed=seed, region_mode=mode, ignore_regions=True).text
+        assert result["prompt"] == compile_text(text, seed=seed, region_mode=mode, centralize_loras=True).text
+        assert result["plain"] == compile_text(text, seed=seed, region_mode=mode, ignore_regions=True, centralize_loras=True).text
     assert state.text == text
 
 
@@ -338,14 +338,16 @@ def test_text_run_edit_preserves_parked_items_and_mixed_order():
     assert not state.doc.find(group.children[1].id).enabled
 
 
-def test_region_head_changes_and_move_out_keep_the_correct_mask():
+def test_region_head_changes_keep_mask_and_reject_move_out():
     state = EditorState.create("ambient, [@region]: { base: { a } [imask: 0]: { red } [imask: 1]: { blue } }, tail")
     region = state.doc.root.children[1]
     red = region.children[1]
     state = run(state, "SetRegion", id=red.id, region={"kind": "imask", "imask": 3, "feather": 12})
     assert "[imask: 3, feather: 12]: {\n        red\n    }" in state.text
-    state = run(state, "MoveBlock", id=red.id, parent_id=state.doc.root.id, edge="end")
-    assert "{\n    red\n}.set{region: [imask: 3" in state.text
+    before = state.to_json()
+    with pytest.raises(CommandError, match="所属容器"):
+        run(state, "MoveBlock", id=red.id, parent_id=state.doc.root.id, edge="end")
+    assert state.to_json() == before
     _, index = full_index(state.doc)
     assert index[red.id].settings.region.imask == 3
     assert index[region.children[2].id].settings.region.imask == 1
@@ -370,14 +372,18 @@ def test_schedule_boundary_updates_both_raw_heads_and_disabled_slots():
     assert not full_index(state.doc)[1][schedule.children[0].id].implicit
 
 
-def test_move_schedule_entry_out_and_insert_special_entry():
+def test_schedule_entry_cannot_move_out_but_new_entry_can_be_created():
     state = EditorState.create("[@schedule]: { 0 - 0.3: a, 0.3 - 1: { b } }, { tail }")
     schedule, target = state.doc.root.children
     first = schedule.children[0]
-    state = run(state, "MoveBlock", id=first.id, parent_id=target.id, edge="start")
-    assert "{\n        a\n    }.set{schedule: {0, 0.3}}" in state.text
-    state = run(state, "InsertBlock", parent_id=schedule.id, edge="start", text="{ new }", entry={"schedule": [0, 0.3]})
-    assert "0 - 0.3: {\n        new\n    }" in state.text
+    before = state.to_json()
+    with pytest.raises(CommandError, match="所属容器"):
+        run(state, "MoveBlock", id=first.id, parent_id=target.id, edge="start")
+    assert state.to_json() == before
+    state = run(state, "InsertEntry", parent_id=schedule.id, after_id=first.id, entry={"schedule": [0.15, 0.3]})
+    created = state.doc.find(schedule.id).children[1]
+    assert created.form == 'schedule_entry' and not created.children
+    assert full_index(state.doc)[1][created.id].settings.schedule == (0.15, 0.3)
 
 
 def test_illegal_latent_region_move_and_special_drop_are_rejected():
@@ -539,6 +545,109 @@ def test_special_same_parent_reorder_keeps_time_slots_and_region_heads():
     assert index[red.id].settings.region.imask == 0 and index[blue.id].settings.region.imask == 1
 
 
+@pytest.mark.parametrize('form', ['schedule', 'region'])
+def test_new_special_container_defaults_are_atomic_and_preserve_surrounding_content(form):
+    state = EditorState.create('before,\n\n{ old },\n\nend')
+    old = state.doc.root.children[1]
+    before = state.to_json()
+    created = run(state, 'InsertBlock', parent_id=state.doc.root.id, after_id=old.id, form=form)
+    container = created.doc.root.children[2]
+    assert created.revision == state.revision + 1 and state.to_json() == before
+    assert container.form == form
+    assert all(entry.enabled and not entry.children for entry in container.children)
+    assert len(ids(created)) == len(set(ids(created)))
+    assert created.text.startswith('before,\n\n{ old },\n\n') and created.text.endswith('end')
+    _, index = full_index(created.doc)
+    if form == 'schedule':
+        assert [index[n.id].settings.schedule for n in container.children] == [(0, .5), (.5, 1)]
+    else:
+        assert [index[n.id].settings.region.kind for n in container.children] == ['base', 'mask', 'mask', 'fill']
+        assert index[container.children[1].id].settings.region.mask == (0, .5, 0, 1)
+        assert index[container.children[2].id].settings.region.mask == (.5, 1, 0, 1)
+        assert [n.meta['name'] for n in container.children] == ['Base', 'Mask 1', 'Mask 2', 'Fill']
+    restored = EditorState.from_json(created.to_json())
+    assert restored.doc.to_json() == created.doc.to_json()
+    for mode in ('mask', 'couple'):
+        assert compile_document(restored, seed=42, region_mode=mode)['plain'] == 'before, old, end'
+
+
+@pytest.mark.parametrize('form', ['schedule', 'region'])
+def test_entry_cannot_move_between_containers_or_into_an_entry_body(form):
+    state = EditorState.create('')
+    for _ in range(2):
+        state = run(state, 'InsertBlock', parent_id=state.doc.root.id, form=form)
+    a, b = state.doc.root.children
+    entry = a.children[0]
+    before = state.to_json()
+    for target in (b, b.children[0], state.doc.root):
+        with pytest.raises(CommandError, match='所属容器'):
+            run(state, 'MoveBlock', id=entry.id, parent_id=target.id,
+                entry={'schedule': [0, .25], 'region': {'kind': 'base'}})
+    assert state.to_json() == before
+
+
+@pytest.mark.parametrize('form', ['schedule', 'region'])
+@pytest.mark.parametrize('command', ['MoveBlock', 'InsertBlock', 'InsertLibraryBlock', 'EnableCandidate', 'InsertLibraryPrompts'])
+def test_external_blocks_cannot_be_promoted_to_entries_even_with_entry_settings(form, command):
+    state = EditorState.create('{ external }')
+    external = state.doc.root.children[0]
+    state = run(state, 'InsertBlock', parent_id=state.doc.root.id, form=form)
+    container = state.doc.root.children[1]
+    before = state.to_json()
+    args = dict(parent_id=container.id, entry={'schedule': [0, .25], 'region': {'kind': 'base'}})
+    if command == 'MoveBlock':
+        args['id'] = external.id
+    elif command != 'InsertBlock':
+        args.update(snapshot=external.to_json(), source={'kind': 'block', 'id': 'external'}, occurrence={})
+    with pytest.raises(CommandError, match='entry'):
+        run(state, command, **args)
+    assert state.to_json() == before
+
+
+@pytest.mark.parametrize('form', ['schedule', 'region'])
+def test_external_and_library_subblocks_can_enter_and_leave_entry_bodies(form):
+    state = EditorState.create('{ external }.set{weight: 1.2}')
+    external = state.doc.root.children[0]
+    state = run(state, 'InsertBlock', parent_id=state.doc.root.id, form=form)
+    container = state.doc.root.children[1]
+    entry = container.children[0]
+    state = run(state, 'MoveBlock', id=external.id, parent_id=entry.id)
+    assert state.doc.find(entry.id).children[0].id == external.id
+    assert full_index(state.doc)[1][external.id].settings.weight == 1.2
+    source = EditorState.create('{ library, { nested } }').doc.root.children[0].to_json()
+    state = run(state, 'InsertLibraryBlock', parent_id=entry.id, snapshot=source,
+                source={'kind': 'block', 'id': 'saved', 'version': 1})
+    inserted = state.doc.find(entry.id).children[1]
+    assert inserted.meta['source']['id'] == 'saved'
+    state = run(state, 'MoveBlock', id=inserted.id, parent_id=state.doc.root.id)
+    assert state.doc.root.children[-1].id == inserted.id
+    assert state.doc.find(entry.id).children[0].id == external.id
+
+
+def test_insert_entry_only_creates_empty_entries_in_special_containers():
+    state = EditorState.create('[@region]: { [base]: { } }, { ordinary }')
+    container, ordinary = state.doc.root.children
+    before = state.to_json()
+    for extra in ({'text': '{ existing }'}, {'snapshot': ordinary.to_json()}, {'form': 'schedule'}):
+        with pytest.raises(CommandError, match='不能由外部'):
+            run(state, 'InsertEntry', parent_id=container.id, entry={'region': {'kind': 'fill'}}, **extra)
+    with pytest.raises(CommandError, match='新建 entry'):
+        run(state, 'InsertEntry', parent_id=ordinary.id, entry={'region': {'kind': 'fill'}})
+    assert state.to_json() == before
+    state = run(state, 'InsertEntry', parent_id=container.id, entry={'region': {'kind': 'fill'}})
+    assert state.doc.find(container.id).children[-1].form == 'region_entry'
+
+
+def test_new_region_container_rejects_disabled_region_ancestry_atomically():
+    state = EditorState.create('{ outer }.set{region: [imask: 0]}')
+    outer = state.doc.root.children[0]
+    state = run(state, 'SetEnabled', id=outer.id, enabled=False)
+    before = state.to_json()
+    with pytest.raises(Exception, match='region'):
+        run(state, 'InsertBlock', parent_id=outer.id, form='region')
+    assert state.to_json() == before
+
+
 def test_library_insertion_ids_are_fresh_even_in_an_empty_document():
     source = EditorState.create("{ a, { b } }")
     snapshot = source.doc.root.children[0].to_json()
@@ -613,3 +722,53 @@ def test_detail_list_edit_keeps_owned_weight_and_schedule_like_plv3_span_edit(te
     expected = text.replace('solo', 'solo, blonde hair')
     assert updated.text == expected
     assert compile_document(updated, seed=7, region_mode='couple')['prompt'] == compile_text(expected, seed=7, region_mode='couple').text
+
+
+@pytest.mark.parametrize('form', ['schedule', 'region'])
+def test_container_pool_is_rejected_while_entry_pool_remains_editable(form):
+    state = EditorState.create('')
+    state = run(state, 'InsertBlock', parent_id=state.doc.root.id, form=form)
+    container = state.doc.root.children[0]
+    before = state.to_json()
+    with pytest.raises(CommandError) as error:
+        run(state, 'SetMetadata', id=container.id, patch={'pool': 'folder'})
+    assert error.value.code == 'container_pool'
+    assert state.to_json() == before
+    entry = container.children[0]
+    updated = run(state, 'SetMetadata', id=entry.id, patch={'pool': 'folder'})
+    assert updated.doc.find(entry.id).meta['pool'] == 'folder'
+    assert not updated.doc.find(container.id).meta.get('pool')
+
+
+@pytest.mark.parametrize('form', ['schedule', 'region'])
+def test_opening_old_container_binding_preserves_source_ids_and_entry_binding(form):
+    state = EditorState.create('')
+    state = run(state, 'InsertBlock', parent_id=state.doc.root.id, form=form)
+    container = state.doc.root.children[0]
+    container.meta['pool'] = 'obsolete-container-pool'
+    container.children[0].meta['pool'] = 'entry-pool'
+    container.children[-1].enabled = False
+    before = state.to_json()
+    restored = EditorState.create(doc=before['doc'])
+    assert restored.text == before['text']
+    assert [node.id for node in restored.doc.root.walk()] == [node.id for node in state.doc.root.walk()]
+    assert not restored.doc.find(container.id).meta.get('pool')
+    assert restored.doc.find(container.children[0].id).meta['pool'] == 'entry-pool'
+    assert not restored.doc.find(container.children[-1].id).enabled
+    assert state.to_json() == before
+
+
+@pytest.mark.parametrize('form', ['schedule', 'region'])
+@pytest.mark.parametrize('patch', [{'shuffle': True}, {'dropout': .35}, {'random_select': [0, 1]}, {'format': '@$p'}])
+def test_container_rejects_random_and_format_settings_while_entry_accepts_them(form, patch):
+    state = EditorState.create('')
+    state = run(state, 'InsertBlock', parent_id=state.doc.root.id, form=form)
+    container = state.doc.root.children[0]
+    before = state.to_json()
+    with pytest.raises(CommandError) as error:
+        run(state, 'SetSettings', id=container.id, patch=patch)
+    assert error.value.code == 'container_setting'
+    assert state.to_json() == before
+    updated = run(state, 'SetSettings', id=container.children[0].id, patch=patch)
+    key, value = next(iter(patch.items()))
+    assert projection(updated)['tree']['children'][0]['children'][0]['settings'][key] == value

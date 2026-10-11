@@ -41,7 +41,8 @@ const MONARCH = {
   tokenizer: {
     root: [
       [/\\./, 'escape'],
-      [/\[@(schedule|region)\]/, 'keyword.block'],
+      [/\[@(schedule|region|avg)\]/, 'keyword.block'],
+      [/\b\d+(?:\.\d+)?(?=\s*:\s*\{)/, 'number.weight'],
       // a `[@schedule]` entry head: `0 - 0.2:`
       [/-?[\d.]+\s*-\s*-?[\d.]+(?=\s*:)/, 'number.weight'],
       [/\.set(?=\s*\{)/, 'keyword.set'],
@@ -141,6 +142,7 @@ export function foldingRanges(model) {
 // --- completions -----------------------------------------------------------
 
 function completions(monaco, model, position) {
+  if (window.xyzAcSettings?.sourceCompletion === false) return { suggestions: [] };
   // Field names only make sense inside an open `.set{ … }`. A brace STACK (not a
   // lastIndexOf) is what tells a plain group `{ }` apart from a set block: after a
   // `.set{ … }` closes, the next `{` used to still read as "in a set block" and the

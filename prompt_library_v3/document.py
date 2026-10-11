@@ -72,7 +72,8 @@ class DocNode:
     # Carried through for the frontend: it needs to know a library block from a
     # region segment without re-parsing.
     header: str | None = None
-    # Editor-only metadata and syntax shape; neither changes compilation.
+    # Editor-only metadata and syntax shape. AVG entry weights live in their
+    # source heads, so execution and cache identity never depend on UI metadata.
     meta: dict[str, Any] = field(default_factory=dict)
     form: str | None = None
 
@@ -211,7 +212,11 @@ class _Builder:
         if kind != "group":
             return doc
 
-        if node.spans.schedule_form == "block":
+        if node.spans.avg_form == "block":
+            doc.form = "avg_entry"
+        elif node.average:
+            doc.form = "avg"
+        elif node.spans.schedule_form == "block":
             doc.form = "schedule_entry"
         elif node.spans.region_form == "block":
             doc.form = "region_entry"
@@ -262,6 +267,8 @@ class _Builder:
                     head_span = child.spans.fields.get("schedule", {}).get("value")
                     if head_span is not None:
                         child_pos = min(child_pos, head_span[0])
+                if child.spans.avg_form == 'block':
+                    child_pos = min(child_pos, child.spans.fields['avg_weight']['value'][0])
             # The gap is `[blank] , [blank] head`. Everything up to and including the
             # separating comma is the PREVIOUS child's; the head is what follows it.
             # The first comma in the gap is always the separator: the part before it

@@ -250,3 +250,28 @@ test('Pool completion calculates tags inside parked blocks and strips structural
   assert.deepEqual(suggestions.map(n=>n.name),['closed','plain','(weighted:1.2)']);
   assert.ok(suggestions.every(n=>n.kind==='poolTag'));
 });
+
+test('Pool completion declines partial and multi-prompt spans quietly, but completes a whole prompt', async () => {
+  globalThis.window={addEventListener(){}};
+  globalThis.completionDetails=await module('../../js/plv4/details.js');
+  const completionSource=(await readFile(new URL('../../js/plv4/completion.js',import.meta.url),'utf8')).replace(/^import .*;\r?\n/gm,'');
+  const {poolSuggestions}=await import('data:text/javascript;base64,'+Buffer.from(deps+'const {indexTree}=globalThis.completionDetails;\n'+completionSource+'\n//# sourceURL=plv4-completion-guards.js').toString('base64'));
+  globalThis.libraryMock=async()=>({candidates:[{kind:'folder',name:'Pool',autocomplete:true,children:[{kind:'tag',snapshot:{kind:'text',raw:'blue eyes'},source:{kind:'tag',id:'T'}}]}]});
+  const commands=[];
+  const session={valid:true,whenIdle:async()=>{},dispatch:async command=>commands.push(command),projection:{tree:{id:'root',children:[
+    {id:'a',kind:'item',parent_id:'root',span:[0,9],children:[]},
+    {id:'b',kind:'item',parent_id:'root',span:[11,14],children:[]},
+  ]}}};
+  const [candidate]=await poolSuggestions('blue',{__plv4Pane:{editSession:session}});
+  assert.equal(candidate.canInsert(0,4),false);
+  assert.equal(await candidate.insert(0,4),false);
+  assert.equal(candidate.canInsert(0,14),false);
+  assert.equal(await candidate.insert(0,14),false);
+  assert.deepEqual(commands,[]);
+  assert.equal(candidate.canInsert(0,9),true);
+  await candidate.insert(0,9);
+  assert.deepEqual(commands.map(c=>[c.type,c.id,c.span]),[['CompleteLibrary','a',[0,9]]]);
+  session.valid=false;
+  assert.equal(candidate.canInsert(0,9),false);
+  assert.equal(await candidate.insert(0,9),false);
+});

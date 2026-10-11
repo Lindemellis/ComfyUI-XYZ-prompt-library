@@ -7,10 +7,12 @@ const { DocumentSession } = await import('data:text/javascript;base64,' + Buffer
 const textCode = await readFile(new URL('../../js/plv4/text_input.js', import.meta.url), 'utf8');
 globalThis.inlineTextHelpers = await import('data:text/javascript;base64,' + Buffer.from(textCode).toString('base64'));
 globalThis.promptTextHelpers = await import('data:text/javascript;base64,' + Buffer.from(await readFile(new URL('../../js/plv4/prompt_text.js', import.meta.url), 'utf8')).toString('base64'));
+globalThis.inlineDragHelpers = await import('data:text/javascript;base64,' + Buffer.from((await readFile(new URL('../../js/plv4/drop_preview.js', import.meta.url), 'utf8')).replace(/^import .*;\r?\n/gm, '')).toString('base64'));
 const viewCode = (await readFile(new URL('../../js/plv4/block_view.js', import.meta.url), 'utf8')).replace(/^import .*;\r?\n/gm, '').replace('class RunSession', 'export class RunSession');
 const dependencies = `export const reported = [];
 const { inlineText, inlineOffset, inlinePoint } = globalThis.inlineTextHelpers;
 const { promptDisplay, displayRun, scheduleSource, normalizePromptInput, runEnd } = globalThis.promptTextHelpers;
+const {canInsertContainer} = globalThis.inlineDragHelpers;
 const report = error => reported.push(error);
 const indexTree = tree => { const map = new Map(); const visit = row => { if (!row) return; map.set(row.id, row); row.children.forEach(visit); }; visit(tree); return map; };
 const attachInlineAutocomplete = async () => {};\n`;
@@ -36,7 +38,7 @@ test('a queued input from the closed pre-undo text segment cannot overwrite rest
   await session.replaceText('edited, second');
   const run = new RunSession(session, ['i2'], host);
   let release; const waiting = new Promise(resolve => { release = resolve; });
-  const field = { innerText: 'edited!', contentEditable: 'true' };
+  const field = { innerText: 'edited!', contentEditable: 'plaintext-only' };
   const active = { element: field, context, run, ready: Promise.resolve(run), pending: waiting };
   view.inline = active; view.inlineEditors.add(active);
   const before = reported.length;
@@ -64,7 +66,7 @@ test('closing before initialization does not attach an old run to the restored i
   const { session, view } = fixture();
   let release; const waiting = new Promise(resolve => { release = resolve; });
   session._enqueue(() => waiting);
-  const field = { dataset: { prompt: 'i2' }, contentEditable: 'true' };
+  const field = { dataset: { prompt: 'i2' }, contentEditable: 'plaintext-only' };
   view.beginInline(field); const active = view.inline;
   view.closeEditor(); release(); await active.ready;
   assert.equal(active.run, undefined);
@@ -77,7 +79,7 @@ test('typing immediately after undo uses a fresh run and preserves the neighbour
   const old = new RunSession(session, ['i2'], host);
   view.inline = { run: old, context }; view.inlineEditors.add(view.inline);
   view.closeEditor(); await session.undo();
-  const field = { innerText: 'first!', contentEditable: 'true', dataset: { prompt: 'i2' } };
+  const field = { innerText: 'first!', contentEditable: 'plaintext-only', dataset: { prompt: 'i2' } };
   view.beginInline(field); view.typeInline(field); await view.flush();
   assert.equal(session.text, 'first!, second');
   assert.equal(old.disposed, true);
@@ -88,7 +90,7 @@ test('an input request failure does not poison subsequent typing in the same fie
   const { session, view } = fixture();
   const request = session.request; let fail = true;
   session.request = async (...args) => { if (fail) { fail = false; throw new Error('temporary request failure'); } return request(...args); };
-  const field = { innerText: 'failed', contentEditable: 'true', dataset: { prompt: 'i2' } };
+  const field = { innerText: 'failed', contentEditable: 'plaintext-only', dataset: { prompt: 'i2' } };
   view.beginInline(field); view.typeInline(field); await view.flush();
   assert.equal(session.text, 'first, second');
   field.innerText = 'retry'; view.typeInline(field); await view.flush();
@@ -97,7 +99,7 @@ test('an input request failure does not poison subsequent typing in the same fie
 
 test('native Block typing converts Chinese separators before persistence and shared document parsing', async () => {
   const {session,view,writes}=fixture();
-  const field={innerText:'solo， blonde hair',contentEditable:'true',dataset:{prompt:'i2'}};
+  const field={innerText:'solo， blonde hair',contentEditable:'plaintext-only',dataset:{prompt:'i2'}};
   view.beginInline(field);view.typeInline(field);await view.flush();
   assert.equal(session.text,'solo, blonde hair, second');
   assert.equal(writes.at(-1),session.text);
@@ -106,7 +108,7 @@ test('native Block typing converts Chinese separators before persistence and sha
 
 test('native newlines survive queued typing, persistence and document undo/redo',async()=>{
   const {session,view,writes}=fixture();
-  const field={innerText:'first\n',contentEditable:'true',dataset:{runIds:'i2,i3',runInput:''}};
+  const field={innerText:'first\n',contentEditable:'plaintext-only',dataset:{runIds:'i2,i3',runInput:''}};
   view.beginInline(field);view.typeInline(field);await view.flush();
   assert.equal(session.text,'first\n');assert.equal(writes.at(-1),session.text);
   field.innerText='first\n\nsecond';view.typeInline(field);await view.flush();
@@ -117,8 +119,8 @@ test('native newlines survive queued typing, persistence and document undo/redo'
 
 test('rapid focus transfer drains both text segments before history or navigation', async () => {
   const { session, view } = fixture();
-  const first = { innerText: 'changed', contentEditable: 'true', dataset: { prompt: 'i2' } };
-  const second = { innerText: 'other', contentEditable: 'true', dataset: { prompt: 'i3' } };
+  const first = { innerText: 'changed', contentEditable: 'plaintext-only', dataset: { prompt: 'i2' } };
+  const second = { innerText: 'other', contentEditable: 'plaintext-only', dataset: { prompt: 'i3' } };
   const before = reported.length;
   view.beginInline(first); view.typeInline(first);
   view.beginInline(second); view.typeInline(second); await view.flush();
@@ -130,25 +132,54 @@ test('rapid focus transfer drains both text segments before history or navigatio
 
 test('a cached autocomplete field uses the new run and discards an old delayed suggestion', async () => {
   const code = (await readFile(new URL('../../js/plv4/inline_input.js', import.meta.url), 'utf8')).replace(/^import .*;\r?\n/gm, '');
-  const setup = `export const environment = { xyzTagAC: {}, xyzPLv4Suggestions: (query, context) => [context.__plv4Pane.editSession.name] }; const window = environment;\n`;
-  const { attachInlineAutocomplete } = await import('data:text/javascript;base64,' + Buffer.from(setup + code + '\n//# sourceURL=plv4-autocomplete-under-test.js').toString('base64'));
+  const setup = `export let hidden = 0; export const environment = { xyzTagAC: { hide() { hidden++; } }, xyzPLv4Suggestions: (query, context) => [context.__plv4Pane.editSession.name] }; const window = environment;\n`;
+  const module = await import('data:text/javascript;base64,' + Buffer.from(setup + code + '\n//# sourceURL=plv4-autocomplete-under-test.js').toString('base64'));
+  const { attachInlineAutocomplete } = module;
   const field = { _xyzTagACHooked: true, isConnected: true };
   let release; const waiting = new Promise(resolve => { release = resolve; });
   const old = { name: 'old', whenIdle: () => waiting };
   await attachInlineAutocomplete(field, old);
+  const baseline = module.hidden;
+  await attachInlineAutocomplete(field, old); assert.equal(module.hidden, baseline);
   const delayed = field._xyzPoolSuggestions('prompt');
   old.disposed = true;
   await attachInlineAutocomplete(field, { name: 'new', whenIdle: async () => {} });
+  assert.equal(module.hidden, baseline + 1, 'a cached host must dismiss popup candidates from its retired run');
   release(); assert.deepEqual(await delayed, []);
   assert.deepEqual(await field._xyzPoolSuggestions('prompt'), ['new']);
 });
 
 test('one editable run replaces multiple prompts as one document edit and shares undo', async () => {
   const { session, view } = fixture();
-  const field = { innerText: 'changed, other', contentEditable: 'true', dataset: { runIds: 'i2,i3', runInput: '' } };
+  const field = { innerText: 'changed, other', contentEditable: 'plaintext-only', dataset: { runIds: 'i2,i3', runInput: '' } };
   view.beginInline(field); view.typeInline(field); await view.flush();
   assert.deepEqual(view.inline.run.ids, ['i2', 'i3']);
   assert.equal(session.text, 'changed, other');
   view.closeEditor(); await session.undo(); assert.equal(session.text, 'first, second');
   await session.redo(); assert.equal(session.text, 'changed, other');
+});
+
+test('blur retains an invalid Source run until it is completed in the same field', async () => {
+  const {session,view}=fixture();
+  const original=session.request;session.request=async(op,body)=>{const value=await original(op,body);value.state.valid=!body.command.text.includes('{');return value;};
+  let renders=0;view.render=()=>renders++;
+  const field={innerText:'{',contentEditable:'plaintext-only',dataset:{prompt:'i2'}};
+  view.beginInline(field);view.typeInline(field);await view.flush();
+  const active=view.inline;await view.finishInline(field);
+  assert.equal(session.valid,false);assert.equal(view.inline,active);
+  assert.ok(!active.closed&&!active.run.disposed);assert.equal(renders,0);
+  field.innerText='completed';view.typeInline(field);await view.finishInline(field);
+  assert.equal(session.valid,true);assert.equal(session.text,'completed, second');
+  assert.equal(view.inline,null);assert.equal(renders,1);
+});
+
+test('external Source updates rebase the focused run instead of leaving focus on the page body',async()=>{
+  const {session,view,host,context}=fixture();
+  const run=new RunSession(session,['i2'],host),bookmark={prompt:'i2',offsets:[2,2]};
+  view.inline={run,context};view.inlineEditors.add(view.inline);
+  view.captureFocus=()=>bookmark;view.render=()=>{};let restored;
+  view.restoreFocus=value=>restored=value;
+  const off=run.subscribe(()=>{});
+  await session.replaceText('FIRST, second');off();
+  assert.equal(run.disposed,true);assert.equal(restored,bookmark);
 });

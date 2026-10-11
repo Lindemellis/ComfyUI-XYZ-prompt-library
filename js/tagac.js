@@ -15,6 +15,7 @@
 
 import { app } from '../../../scripts/app.js';
 import { ComfyWidgets } from '../../../scripts/widgets.js';
+import { loraCompletions } from './lora_completion.js';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -42,6 +43,9 @@ const DEFAULT_DELIM = ', ';
 
 const settings = {
   enabled: true,
+  loraCompletion: true,
+  sourceCompletion: true,
+  libraryCompletion: true,
   maxSuggestions: 15,
   replaceUnderscore: true,
   autoInsertComma: true,
@@ -68,6 +72,7 @@ const settings = {
 const _SETTINGS_KEY = 'xyzAcSettings_v1';
 try { Object.assign(settings, JSON.parse(localStorage.getItem(_SETTINGS_KEY) || '{}')); } catch {}
 settings.save = function () {
+  window.xyzTagAC?.hide?.();
   try {
     const { save, ...plain } = settings;
     localStorage.setItem(_SETTINGS_KEY, JSON.stringify(plain));
@@ -605,17 +610,20 @@ class TagAutocompleteUI {
     this._isRelated = false;
     this._isInfo = false;
     this._lastQuery = info.query || '';
-    if (settings.animaArtist && (info.query || '').startsWith('@')) {
+    if (settings.enabled && settings.animaArtist && (info.query || '').startsWith('@')) {
       return this._showAtTags(el, info);
     }
     const [tagsRaw, library] = await Promise.all([
       settings.enabled ? searchTags(info.query, settings.maxSuggestions) : [],
-      el._xyzPoolSuggestions?.(info.query) || [],
+      settings.libraryCompletion ? el._xyzPoolSuggestions?.(info.query) || [] : [],
     ]);
     // An older request must not reopen the list under a moved caret/new draft.
     if (requestId !== this._tagRequest || _acVal(el) !== originalValue || _acCaret(el) !== originalCaret) return;
+    const tags = new Map(tagsRaw.map(tag => [_canonicalName(tag.name), tag]));
     const names = new Set(library.filter(item => item.kind === 'poolTag').map(item => _canonicalName(item.name)));
-    const results = [...library, ..._applyMinCount(tagsRaw).filter(tag => !names.has(_canonicalName(tag.name))).map((tag) => ({ ...tag, kind: 'tag' }))];
+    const results = [...library.filter(item => item.suggest !== false || tags.has(_canonicalName(item.name))).map(item => item.kind !== 'poolTag' ? item : {
+      ...item, ...(tags.get(_canonicalName(item.name)) || { sources: [], _libraryOnly: true }), kind: 'tag',
+    }), ..._applyMinCount(tagsRaw).filter(tag => !names.has(_canonicalName(tag.name))).map(tag => ({ ...tag, kind: 'tag' }))];
     if (!results.length) { this.hide(); return; }
     const query = _canonicalName(info.query);
     if (query) {
@@ -718,7 +726,11 @@ class TagAutocompleteUI {
 
   confirmSelected() {
     if (this._selIndex >= 0 && this._selIndex < this._candidates.length && this._target) {
-      this._insert(this._target, this._candidates[this._selIndex]);
+      const candidate = this._candidates[this._selIndex];
+      if (candidate.canInsert && !candidate.canInsert(this._rangeStart, _acCaret(this._target))) {
+        this.hide(); return false;
+      }
+      this._insert(this._target, candidate);
       return true;
     }
     return false;
@@ -737,6 +749,7 @@ class TagAutocompleteUI {
 
   // Insert a tag candidate, preserving the host delimiter and undo behaviour.
   async _insert(el, cand) {
+    if (cand.canInsert && !cand.canInsert(this._rangeStart, _acCaret(el))) { this.hide(); return; }
     if (cand.insert) {
       const start = this._rangeStart, end = _acCaret(el); this.hide();
       try { await cand.insert(start, end); } catch (error) { console.error('[PLv4 completion]', error); window.app?.extensionManager?.toast?.add?.({ severity: 'error', summary: 'Library', detail: error.message }); }
@@ -777,7 +790,12 @@ class TagAutocompleteUI {
         display: 'flex', alignItems: 'center', padding: '4px 8px',
         cursor: 'pointer', gap: '6px', borderBottom: '1px solid #2a2a3e',
       });
-      if (cand.kind === 'poolTag' || cand.kind === 'poolBlock') {
+      if (cand.kind === 'folderLink') row.append(this._badge('L', '#b89bde'), this._nameSpan(cand.name));
+      else if (cand.kind === 'syntax') {
+        row.append(this._nameSpan(cand.name));
+        const detail = document.createElement('span'); detail.textContent = cand.detail; detail.style.cssText = 'color:#888;font-size:11px'; row.append(detail);
+      }
+      else if (cand.kind === 'poolTag' || cand.kind === 'poolBlock') {
         row.append(this._badge(cand.kind === 'poolBlock' ? 'Block' : 'Pool', '#b89bde'), this._nameSpan(cand.name));
         const path = document.createElement('span'); path.textContent = cand.path; path.style.cssText = 'color:#888;font-size:11px;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'; row.append(path);
       }
@@ -829,7 +847,7 @@ class TagAutocompleteUI {
       width: '7px', height: '7px', borderRadius: '50%',
       backgroundColor: CATEGORY_COLORS[tag.category] || '#aaddff', flexShrink: '0',
     });
-    dot.title = CATEGORY_NAMES[tag.category] || 'general';
+    dot.title = tag._libraryOnly ? 'Library' : CATEGORY_NAMES[tag.category] || 'general';
     row.appendChild(dot);
     const dispName = settings.replaceUnderscore ? tag.name.replace(/_/g, ' ') : tag.name;
     row.appendChild(this._nameSpan(tag._atArtist ? '@' + dispName : dispName));
@@ -842,7 +860,7 @@ class TagAutocompleteUI {
       // Show category + post count inline (header style)
       const infoSpan = document.createElement('span');
       Object.assign(infoSpan.style, { color: '#aaa', fontSize: '12px', flexShrink: '0' });
-      infoSpan.textContent = `${CATEGORY_NAMES[tag.category] || 'general'} · ${_fmtCount(tag.post_count)}`;
+      infoSpan.textContent = tag._libraryOnly ? tag.path : `${CATEGORY_NAMES[tag.category] || 'general'} · ${_fmtCount(tag.post_count)}`;
       row.appendChild(infoSpan);
     } else {
       const aliasSpan = document.createElement('span');
@@ -862,6 +880,9 @@ class TagAutocompleteUI {
         aliasSpan.title = `matched alias: ${matched}` +
           (tag.aliases?.length ? `\nall: ${tag.aliases.join(', ')}` : '');
         aliasSpan.style.color = '#a6c98f';
+      } else if (tag._libraryOnly) {
+        aliasSpan.textContent = tag.path;
+        aliasSpan.title = (tag.folders || []).map(folder => folder.path).join('\n') || tag.path;
       } else if (tag.aliases?.length) {
         aliasSpan.textContent = tag.aliases[0];
         aliasSpan.title = tag.aliases.join(', ');
@@ -872,7 +893,7 @@ class TagAutocompleteUI {
     if (!tag._isSelf) {
       const infoSpan = document.createElement('span');
       Object.assign(infoSpan.style, { color: '#888', fontSize: '11px', flexShrink: '1', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis', maxWidth: '130px' });
-      const cat = CATEGORY_NAMES[tag.category] || 'general';
+      const cat = tag._libraryOnly ? 'Library' : CATEGORY_NAMES[tag.category] || 'general';
       // Show post_count for autocomplete, frequency/overlap for related tags
       const countText = tag.post_count != null ? _fmtCount(tag.post_count)
         : tag.frequency != null ? _fmtCount(tag.frequency)
@@ -907,8 +928,23 @@ class TagAutocompleteUI {
       row.appendChild(j);
     }
 
-    // Preview icon (header + regular rows): showArtistPreview → artist tags only; showTagPreview → all tags
-    if (!tag._isSelf || settings.showTagPreview || (settings.showArtistPreview && tag.category === 1)) {
+    if (tag.folders?.length) {
+      const link = this._badge('L', '#b89bde'); link.style.cursor = 'pointer';
+      link.title = tag.folders.map(folder => folder.path).join('\n');
+      link.addEventListener('mousedown', e => {
+        e.preventDefault(); e.stopPropagation();
+        if (tag.folders.length === 1) { this.hide(); tag.folders[0].open?.(); }
+        else {
+          this._isInfo = true;
+          this._open(this._target, tag.folders.map(folder => ({ kind: 'folderLink', name: folder.path, path: '',
+            insert: async () => folder.open?.() })), this._rangeStart);
+        }
+      });
+      row.appendChild(link);
+    }
+
+    // Library-only text has no Danbooru preview to request.
+    if (!tag._libraryOnly && (!tag._isSelf || settings.showTagPreview || (settings.showArtistPreview && tag.category === 1))) {
       const wantTagPv = settings.showTagPreview;
       const wantArtistPv = !wantTagPv && settings.showArtistPreview && tag.category === 1;
       if (wantTagPv || wantArtistPv) {
@@ -966,7 +1002,9 @@ class TagAutocompleteUI {
         if (selfTag) lookupName = selfTag.name;
       }
     }
-    if (!selfTag) { this.hide(); return; }  // tag not in any active dataset → nothing to show
+    const library = (await (el._xyzPoolSuggestions?.(name) || [])).find(item => _canonicalName(item.name) === _canonicalName(selfTag?.name || name));
+    if (library) selfTag = { ...library, ...(selfTag || { sources: [], _libraryOnly: true }) };
+    if (!selfTag) { this.hide(); return; }
 
     const sources = Array.isArray(selfTag.sources) ? selfTag.sources : ['danbooru'];
     const results = [{ ...selfTag, kind: 'tag', _isSelf: true }];
@@ -990,7 +1028,7 @@ class TagAutocompleteUI {
         kind: 'note', _isSelf: true,
         name: sources.includes('danbooru')
           ? 'No related tags found'
-          : 'Gelbooru-only tag — no related tags',
+          : selfTag._libraryOnly ? selfTag.path : 'Gelbooru-only tag — no related tags',
       });
     }
     this._candidates = results;
@@ -1104,8 +1142,33 @@ class TagACHandler {
 
   _debounce(el) {
     clearTimeout(this._timer);
+    const generation = this._generation = (this._generation || 0) + 1;
     this._timer = setTimeout(async () => {
-      if (!settings.enabled && !el._xyzPoolSuggestions) return;
+      if (el._xyzComposing) return;
+      const text = _acVal(el), caret = _acCaret(el);
+      // LoRA calls have their own syntax; ordinary tag normalization/delimiters
+      // must never modify their paths or weights.
+      const loras = await loraCompletions(text, caret, settings.maxSuggestions, settings.loraCompletion);
+      if (generation !== this._generation || _acVal(el) !== text || _acCaret(el) !== caret || el._xyzComposing) return;
+      if (loras !== null) {
+        const values = settings.loraCompletion ? loras : [];
+        if (values.length) {
+          this.ui._isInfo = this.ui._isRelated = false;
+          this.ui._open(el, values.map(item => ({ ...item, insert: () => {
+            if (_acVal(el) === text && _acCaret(el) === caret) _spliceInsert(el, item.start, item.end, item.insertText);
+          } })), values[0].start);
+        } else this.ui.hide();
+        return;
+      }
+      if (el._xyzSourceSuggestions) {
+        const source = await el._xyzSourceSuggestions();
+        if (generation !== this._generation || el._xyzComposing) return;
+        if (source !== null && source !== undefined) {
+          if (settings.sourceCompletion && source.length) { this.ui._isInfo = this.ui._isRelated = false; this.ui._open(el, source, source[0].start); }
+          else this.ui.hide();
+          return;
+        }
+      }
       const info = _analyzeToken(el);
       if (info.query.length >= 1) await this.ui.showTags(el, info);
       else this.ui.hide();
@@ -1113,12 +1176,12 @@ class TagACHandler {
   }
 
   handleInput(e) {
-    if (!settings.enabled && !e.currentTarget?._xyzPoolSuggestions) return;
     // Trusted events only — EXCEPT for a host that has no real input events of its
     // own to give. PLv3's Monaco editor types into its own hidden textarea, so the
     // bridge synthesises them (see js/plv3/tagac_monaco.js); dropping those would
     // mean the dropdown never opens there at all.
     if (!e.isTrusted && !e.currentTarget?._xyzSynthetic) return;
+    if (e.isComposing || e.currentTarget?._xyzComposing) { this.ui.hide(); clearTimeout(this._timer); return; }
     // A just-committed insertion fired this event — swallow it so the dropdown
     // doesn't reopen on the candidate we just chose.
     if (this._suppressInput) {
@@ -1142,10 +1205,14 @@ class TagACHandler {
   }
 
   handleKeyDown(e) {
-    if (!settings.enabled && !e.currentTarget?._xyzPoolSuggestions) return;
+    if (e.isComposing || e.keyCode === 229 || e.currentTarget?._xyzComposing) return;
     this._keyMods.set(e.key.toLowerCase(), e.ctrlKey || e.altKey || e.metaKey);
 
     if (!this.ui.isVisible()) return;
+    // Blur may keep a popup alive while focus transfers between AC hosts.
+    // Only its own text host can confirm it; an old guarded completion can
+    // otherwise consume Enter without inserting anything in the new run.
+    if (this.ui._target !== e.currentTarget) { this.ui.hide(); return; }
 
     // A MODIFIED arrow (Ctrl/Alt/Cmd + ↑/↓) is an editor shortcut — weight nudging in the
     // PLv3 editors — not dropdown navigation. Let it through
@@ -1185,7 +1252,6 @@ class TagACHandler {
   }
 
   handleKeyUp(e) {
-    if (!settings.enabled && !e.currentTarget?._xyzPoolSuggestions) return;
 
     const key = e.key.toLowerCase();
     if (this._keyMods.get(key)) { this._keyMods.delete(key); return; }
@@ -1201,6 +1267,8 @@ class TagACHandler {
   }
 
   handleBlur(e) {
+    this._generation = (this._generation || 0) + 1;
+    clearTimeout(this._timer);
     // Short delay so mousedown on the list (and focus moves) settle first.
     setTimeout(() => {
       const ae = document.activeElement;
@@ -1248,6 +1316,8 @@ function attachTo(el, opts = {}) {
   el._xyzTagACHooked = true;
 
   el.addEventListener('input',   (e) => handler.handleInput(e));
+  el.addEventListener('compositionstart', () => { el._xyzComposing = true; handler._generation = (handler._generation || 0) + 1; clearTimeout(handler._timer); handler.ui.hide(); });
+  el.addEventListener('compositionend', () => { el._xyzComposing = false; handler._debounce(el); });
   el.addEventListener('keydown', (e) => handler.handleKeyDown(e));
   el.addEventListener('keyup',   (e) => handler.handleKeyUp(e));
   el.addEventListener('blur',    (e) => handler.handleBlur(e));
@@ -1255,7 +1325,7 @@ function attachTo(el, opts = {}) {
 }
 
 // Public API used by ordinary prompt fields and the PLv3 Monaco bridge.
-window.xyzTagAC = { attach: attachTo };
+window.xyzTagAC = { attach: attachTo, hide() { handler._generation = (handler._generation || 0) + 1; clearTimeout(handler._timer); handler.ui._tagRequest = (handler.ui._tagRequest || 0) + 1; handler.ui.hide(); } };
 
 app.registerExtension({
   id:   EXT_ID,

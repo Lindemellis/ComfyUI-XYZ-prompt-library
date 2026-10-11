@@ -54,12 +54,41 @@ const { attachPromptAutocomplete } = globalThis.tagacHosts;
 const settings = () => ({ scheduleStep: 0.05 });
 const element = (tag, cls = '', text = '') => { const node = document.createElement(tag); node.className = cls; if (text) node.textContent = text; return node; };
 const button = (text, title, action, cls) => { const node = element('button', cls, text); node.title = title; node.onclick = () => action({ currentTarget: node }); return node; };
-const input = (value, action, options = {}) => { const node = element('input'); node.value = String(value ?? ''); node.type = options.type || 'text'; node.onchange = () => action(node.type === 'number' ? Number(node.value) : node.value); return node; };
+const input = (value, action, options = {}) => { const node = element('input'); node.value = String(value ?? ''); node.type = options.type || 'text'; node.onchange = () => action(['number','range'].includes(node.type) ? Number(node.value) : node.value); return node; };
 const check = (value, action) => { const node = input('', action, { type: 'checkbox' }); node.checked = value; node.onchange = () => action(node.checked); return node; };
 const menu = (anchor, items) => { globalThis.settingMenu = items; };
 const report = error => { throw error; };
 `;
 const { DetailsPane, isBlock } = await import('data:text/javascript;base64,' + Buffer.from(dependencies + detailSource + '\n//# sourceURL=plv4-details-under-test.js').toString('base64'));
+
+test('random selection requires both ordered non-negative integer bounds and can be cleared', async () => {
+  const calls = [], row = { id: 'block', settings: {} };
+  const pane = new DetailsPane(new Node('div'), { command: command => calls.push(command) });
+  const fields = pane.randomSelect(row).querySelectorAll('input');
+  assert.deepEqual(fields.map(field => field.value), ['', '']);
+  fields[0].value = '2'; await fields[0].onchange(); assert.equal(calls.length, 0);
+  fields[1].value = '4'; await fields[1].onchange(); assert.deepEqual(calls.at(-1).patch.random_select, [2, 4]);
+  for (const [a, b] of [['-1','4'], ['1.5','4'], ['5','4'], ['0','1.5']]) {
+    fields[0].value = a; fields[1].value = b; await fields[1].onchange();
+    assert.equal(calls.length, 1, 'invalid drafts must not mutate the document');
+  }
+  fields[0].value = '0'; fields[1].value = '0'; await fields[1].onchange();
+  assert.deepEqual(calls.at(-1).patch.random_select, [0, 0], 'zero means choose no children, distinct from unset');
+  fields[0].value = ''; fields[1].value = ''; await fields[1].onchange();
+  assert.equal(calls.at(-1).patch.random_select, null);
+  const fixed = pane.randomSelect({ ...row, settings: { random_select: [3, 3] } });
+  assert.deepEqual(fixed.querySelectorAll('input').map(field => field.value), ['3', '3']);
+});
+
+test('dropout slider previews while dragging and commits once on change', async () => {
+  const calls = [], row = { id: 'block', settings: { dropout: .2 } };
+  const pane = new DetailsPane(new Node('div'), { command: command => calls.push(command) });
+  const control = pane.dropout(row), slider = control.querySelector('input[type=range]');
+  for (const value of ['0.25', '0.3', '0.35']) { slider.value = value; slider.oninput(); }
+  assert.equal(control.querySelector('.detail-dropout-value').textContent, '0.35');
+  assert.equal(calls.length, 0);
+  await slider.onchange(); assert.deepEqual(calls, [{ type: 'SetSettings', id: 'block', patch: { dropout: .35 } }]);
+});
 
 function fixture() {
   const leaf = { id: 'prompt', kind: 'item', source: '1girl', form: 'item', enabled: true, children: [] };

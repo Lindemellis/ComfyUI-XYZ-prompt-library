@@ -93,18 +93,22 @@ test('saved block header paths follow source IDs, survive missing assets, and ex
   assert.ok(html.indexOf('block-library-path')<html.indexOf('class="header-controls"'));
   assert.ok(html.includes('Folder.&lt;Block&gt;'));assert.ok(!html.includes('Folder.<Block>'));
 });
-test('shared block headers show a connection icon before the name only for their own Folder binding',()=>{
-  const block={id:'bound',name:'Character',type:'normal',enabled:true,collapsed:false,meta:{pool:'P'}};
+test('shared block headers show Folder navigation before the name only for their own allowed binding',()=>{
+  const block={id:'bound',name:'Character',type:'normal',enabled:true,collapsed:false,meta:{pool:'P'},poolName:'Triggers',poolPath:'Characters.Triggers',poolAvailable:true};
   const env={state:{},root:()=>({}),isLibraryBlockView:()=>false,childrenHTML:()=>'',join:()=>'',leaves:()=>[],text:n=>n.source,esc:value=>String(value)};
   const render=b=>XYZPLv4Design.blockHTML(b,0,false,env);
   const html=render(block);
-  assert.ok(html.includes('class="block-pool-link"'));assert.ok(html.includes('aria-label="已绑定 Folder"'));
-  assert.ok(html.indexOf('block-pool-link')<html.indexOf('block-title'));
+  assert.ok(html.includes('class="block-pool-link"'));assert.ok(html.includes('aria-label="打开绑定的 Folder：Triggers"'));
+  assert.ok(html.indexOf('block-pool-link')<html.indexOf('data-kind="folder"'));
+  assert.ok(html.indexOf('data-kind="folder"')<html.indexOf('block-title'));
+  assert.equal((html.match(/data-open-folder="P"/g)||[]).length,2);
   assert.ok(!html.includes('block-library-path'),'a Folder binding still does not create a saved Library path');
   for(const meta of [{},{pool:null},{source:{kind:'block',id:'saved'}}]) assert.ok(!render({...block,meta}).includes('block-pool-link'));
   const child=render({...block,id:'child',meta:{name:'Child'}});assert.ok(!child.includes('block-pool-link'),'an unbound child does not inherit the parent icon');
   assert.ok(render({...block,enabled:false}).includes('block-pool-link'),'binding is metadata, independent of enabled state');
   assert.ok(render({...block,meta:{pool:'missing-folder'}}).includes('block-pool-link'),'portable binding remains visible when the local Folder is absent');
+  for(const type of ['schedule','region']) assert.ok(!render({...block,type}).includes('data-open-folder'),'containers cannot display Folder bindings');
+  assert.ok(render({...block,type:'lora',meta:{pool:'P',lora:{id:'model'}}}).includes('data-open-lora="model"'));
 });
 
 const helpers = await load(await source('../../js/plv4/text_input.js'));
@@ -113,7 +117,7 @@ globalThis.promptTextHelpers = await load(await source('../../js/plv4/prompt_tex
 const dependencies = `
 const { promptDisplay, displayRun, scheduleSource, separatorDisplay, runEnd } = globalThis.promptTextHelpers;
 export const menus = [];
-const { inlineText, inlineOffset, inlinePoint, insertInlineNewline, deleteInlineNewline, syncInlineEnd } = globalThis.textInputHelpers;
+const { inlineText, inlineOffset, inlinePoint, renderInlineEnd } = globalThis.textInputHelpers;
 const element = (tag, cls) => { const node = document.createElement(tag); node.className = cls + (cls === 'plv4-run' ? ' run' : ''); return node; };
 const menu = (anchor, items) => menus.push(items);
 const indexTree = root => { const map = new Map(); const visit = n => { map.set(n.id, n); n.children.forEach(visit); }; visit(root); return map; };
@@ -141,7 +145,7 @@ function fixture(text = 'cinematic illustration, fine details', rows) {
 
 test('adjacent prompts and their punctuation have one native editing host', () => {
   const { run } = fixture();
-  assert.equal(run.contentEditable, 'true');
+  assert.equal(run.contentEditable, 'plaintext-only');
   assert.equal(run.querySelectorAll('[contenteditable="true"]').length, 0);
   assert.equal(run.querySelectorAll('[data-prompt-id]').length, 2);
   assert.equal(run.textContent, 'cinematic illustration, fine details');
@@ -245,93 +249,30 @@ test('reopening runs retains terminal Enter lines without exposing the closing-b
   }
 });
 
-test('Enter inserts literal text, retains its caret and emits one edit without cloning prompt decoration',()=>{
-  const {run}=fixture('a, b'), text=run.querySelectorAll('[data-prompt-id]').at(-1).childNodes[0];
-  const range={startContainer:text,endContainer:text,startOffset:1,endOffset:1,
-    deleteContents(){}, insertNode(node){ const index=text.parentNode.childNodes.indexOf(text);node.parentNode=node.parentElement=text.parentNode;text.parentNode.childNodes.splice(index+1,0,node); },
-    setStart(node,offset){this.startContainer=this.endContainer=node;this.startOffset=this.endOffset=offset;}, collapse(){},
-  };
-  selection={rangeCount:1,getRangeAt:()=>range,removeAllRanges(){},addRange(next){assert.equal(next,range);}};
-  globalThis.InputEvent=class {constructor(type,options){this.type=type;Object.assign(this,options);}};
-  const prompts=run.querySelectorAll('[data-prompt-id]');
-  assert.equal(helpers.insertInlineNewline(run),true);
-  assert.equal(helpers.inlineText(run),'a, b\n');assert.equal(range.startOffset,1);assert.equal(range.startContainer.data,'\n');
-  assert.equal(helpers.inlineOffset(run,range.startContainer,range.startOffset),5);
-  assert.deepEqual(run.querySelectorAll('[data-prompt-id]'),prompts);
-  assert.equal(run.querySelectorAll('[data-inline-end]').length,1);assert.equal(run.events.length,1);assert.equal(run.events[0].inputType,'insertLineBreak');
-  helpers.syncInlineEnd(run);assert.equal(run.querySelectorAll('[data-inline-end]').length,1);
-  run.append(document.createTextNode('continued'));helpers.syncInlineEnd(run);
-  assert.equal(run.querySelectorAll('[data-inline-end]').length,0);assert.equal(helpers.inlineText(run),'a, b\ncontinued');
-  selection={isCollapsed:true};assert.equal(helpers.insertInlineNewline(run),false);
+test('rendered blank final lines use the native text terminator and keep logical caret offsets',()=>{
+  const field=new DomNode('div');field.contentEditable='plaintext-only';
+  const first=document.createTextNode('first\n');field.append(first);
+  helpers.renderInlineEnd(field);
+  assert.equal(helpers.inlineText(field),'first\n');
+  assert.equal(field.textContent,'first\n\n');
+  assert.equal(field.querySelectorAll('br').length,0);
+  assert.equal(helpers.inlineOffset(field,...helpers.inlinePoint(field,6)),6);
 });
 
-test('Block beforeinput handles Enter and Shift+Enter only in editable hosts outside composition',()=>{
+test('Block input leaves Enter, Backspace and Delete to the browser',()=>{
   const container=new DomNode('div');new BlockView(container,{});
-  const {run}=fixture('a, b');container.append(run);
-  const text=run.querySelectorAll('[data-prompt-id]').at(-1).childNodes[0];
-  const range={startContainer:text,endContainer:text,deleteContents(){},insertNode(node){run.append(node);},setStart(node,offset){this.startContainer=this.endContainer=node;this.startOffset=offset;},collapse(){}};
-  selection={rangeCount:1,getRangeAt:()=>range,removeAllRanges(){},addRange(){}};
-  for(const inputType of ['insertParagraph','insertLineBreak']){
-    let prevented=false;container.handlers.beforeinput({target:run,inputType,cancelable:true,preventDefault(){prevented=true;}});
-    assert.equal(prevented,true);
-  }
-  assert.equal(helpers.inlineText(run),'a, b\n\n');
-  for(const options of [{isComposing:true},{cancelable:false},{inputType:'insertText'}]){
-    container.handlers.beforeinput({target:run,inputType:'insertParagraph',cancelable:true,...options,preventDefault(){assert.fail('ordinary typing/composition must remain native');}});
-  }
-  run.contentEditable='false';container.handlers.beforeinput({target:run,inputType:'insertParagraph',cancelable:true,preventDefault(){assert.fail('disabled hosts must not change');}});
-  selection={isCollapsed:true};
+  assert.equal(container.handlers.beforeinput,undefined);
 });
 
-function selectOffsets(field, start, end = start, visualEnd = false) {
-  const [startContainer,startOffset] = visualEnd ? [field,field.childNodes.length] : helpers.inlinePoint(field,start);
-  const [endContainer,endOffset] = visualEnd ? [field,field.childNodes.length] : helpers.inlinePoint(field,end);
-  let range={startContainer,startOffset,endContainer,endOffset};
-  selection={rangeCount:1,getRangeAt:()=>range,removeAllRanges(){},addRange(next){range=next;}};
-  return ()=>range;
-}
-
-test('Backspace deletes successive terminal source newlines even with the caret after the display filler',()=>{
-  const {run}=fixture('a, b');run.append(document.createTextNode('\n\n'));helpers.syncInlineEnd(run);
-  globalThis.InputEvent=class {constructor(type,options){this.type=type;Object.assign(this,options);}};
-  const prompts=run.querySelectorAll('[data-prompt-id]');
-  for(const expected of ['a, b\n','a, b']){
-    const caret=selectOffsets(run,helpers.inlineText(run).length,undefined,true);
-    assert.equal(helpers.deleteInlineNewline(run,'deleteContentBackward'),true);
-    assert.equal(helpers.inlineText(run),expected);
-    assert.equal(helpers.inlineOffset(run,caret().startContainer,caret().startOffset),expected.length);
-    assert.deepEqual(run.querySelectorAll('[data-prompt-id]'),prompts);
-  }
-  assert.equal(run.querySelectorAll('[data-inline-end]').length,0);
-  assert.equal(run.events.length,2);
-  assert.equal(helpers.deleteInlineNewline(run,'deleteContentBackward'),false,'ordinary character deletion remains native');
-  selection={isCollapsed:true};
-});
-
-test('Delete, selected blank lines and indented CRLF tails remove source whitespace while preserving parked prompts',()=>{
-  const {run}=fixture('a, b',[{id:'a',source:'a',span:[0,1]},{id:'off',source:'parked',enabled:false,effective:false,span:null},{id:'b',source:'b',span:[3,4]}]);
-  const tail=document.createTextNode('\r\n    \n');run.append(tail);helpers.syncInlineEnd(run);
-  const parked=run.querySelectorAll('[data-parked]')[0];
-  selectOffsets(run,4);assert.equal(helpers.deleteInlineNewline(run,'deleteContentForward'),true);
-  assert.equal(helpers.inlineText(run),'a, b    \n');
-  selectOffsets(run,4,9);assert.equal(helpers.deleteInlineNewline(run,'deleteContentBackward'),true);
-  assert.equal(helpers.inlineText(run),'a, b');assert.ok(run.contains(parked));
-  run.append(document.createTextNode('\r\n    '));
-  selectOffsets(run,helpers.inlineText(run).length);assert.equal(helpers.deleteInlineNewline(run,'deleteContentBackward'),true);
-  assert.equal(helpers.inlineText(run),'a, b');assert.ok(run.contains(parked));
-  selection={isCollapsed:true};
-});
-
-test('Block beforeinput routes newline deletion to the existing input handler, without consuming composition or ordinary deletion',()=>{
-  const container=new DomNode('div');new BlockView(container,{});
-  const {run}=fixture('a, b');container.append(run);run.append(document.createTextNode('\n'));helpers.syncInlineEnd(run);
-  selectOffsets(run,5,undefined,true);
-  let prevented=false;container.handlers.beforeinput({target:run,inputType:'deleteContentBackward',cancelable:true,preventDefault(){prevented=true;}});
-  assert.equal(prevented,true);assert.equal(helpers.inlineText(run),'a, b');
-  for(const options of [{},{isComposing:true},{cancelable:false}]){
-    container.handlers.beforeinput({target:run,inputType:'deleteContentBackward',cancelable:true,...options,preventDefault(){assert.fail('native deletion must remain available');}});
-  }
-  selection={isCollapsed:true};
+test('plaintext native terminal display newline is excluded from source and caret offsets',()=>{
+  const field=new DomNode('div');field.contentEditable='plaintext-only';
+  const text=document.createTextNode('1girl,\n\n');field.append(text);
+  assert.equal(helpers.inlineText(field),'1girl,\n');
+  assert.equal(helpers.inlineOffset(field,text,7),7);
+  assert.equal(helpers.inlineOffset(field,text,8),7);
+  assert.equal(helpers.inlineOffset(field,...helpers.inlinePoint(field,7)),7);
+  text.data='1girl,\n2girls';
+  assert.equal(helpers.inlineText(field),text.data,'only the terminal visual newline is excluded');
 });
 
 test('paste inserts plain text through the shared native input rather than nested editing islands', () => {

@@ -43,6 +43,7 @@ export class FolderPage {
     const current = structuredClone(this.asset);
     await this.edit(next => { next.name = saved.name; next.data = saved.data; }, false);
     history[from].pop(); history[to].push(current);
+    this.render();
   }
   render() {
     const asset = this.asset; this.container.dataset.folderId = asset.id;
@@ -66,6 +67,7 @@ export class FolderPage {
     if (!children.get(asset.id)?.length) page.append(element('div', 'folder-empty', '暂无散装 tag 或子文件夹'));
     this.rememberView(); this.container.replaceChildren(page); this.restoreView();
     if (this.host.folderContext === asset.id) this.host.renderTabs();
+    this.host.onFolderRender?.(this);
   }
   renderFolder(folder, container, ancestors, children) {
     if (ancestors.has(folder.id)) return;

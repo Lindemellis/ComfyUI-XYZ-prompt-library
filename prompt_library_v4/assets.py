@@ -9,9 +9,10 @@ import uuid
 import sqlite3
 from urllib.parse import quote
 from ._v3 import DocNode, Document, render
-from .model import CommandError, EditorState, full_document, projection, refresh_document
+from .model import CommandError, EditorState, full_document, projection, refresh_document, normalise_metadata
 from .commands import apply_command, text_edit
 from .hierarchy import UNSET, asset_path, ancestors, placement_check, set_header
+from .lora_triggers import trigger_groups
 if '.' in __package__:
     from ..prompt_library_v3.repo import WriteQueue
     from ..prompt_library_v3.db import connect_read
@@ -26,9 +27,10 @@ def validate_snapshot(snapshot):
     node = DocNode.from_json(snapshot)
     if node.kind != 'group' or node.form == 'paren':
         raise CommandError('invalid_asset', 'SavedBlock 必须是完整 block')
-    if node.form in ('schedule_entry', 'region_entry'):
-        raise CommandError('entry_asset', '请保存包含时间或区域 entry 的完整容器')
+    if node.form in ('schedule_entry', 'region_entry', 'avg_entry'):
+        raise CommandError('entry_asset', 'entry 不能单独保存，请保存完整容器')
     doc = Document(DocNode('asset-root', 'group', '', opaque=False, children=[node], form='root'))
+    normalise_metadata(doc)
     ids = [n.id for n in doc.root.walk()]
     if len(ids) != len(set(ids)):
         raise CommandError('invalid_asset', 'block 实例 ID 重复')
@@ -40,7 +42,7 @@ def validate_snapshot(snapshot):
 
 
 def reusable(snapshot):
-    return snapshot['kind'] == 'group' and snapshot.get('form') not in ('paren', 'schedule_entry', 'region_entry') and snapshot.get('meta', {}).get('presentation') != 'prompt'
+    return snapshot['kind'] == 'group' and snapshot.get('form') not in ('paren', 'schedule_entry', 'region_entry', 'avg_entry') and snapshot.get('meta', {}).get('presentation') != 'prompt'
 
 
 def block_name(node):
@@ -140,6 +142,7 @@ def disambiguate_library_names(conn):
 
 def tags(node, stop_pools=False):
     """Atomic prompt nodes, including parked content; structural wrappers stay out."""
+    if node.meta.get('lora_invocation'): return
     if node.kind != 'group' or node.opaque or node.form == 'paren':
         if render(node).strip(): yield node
         return
@@ -330,8 +333,8 @@ def move_into_block(conn, previous, destination, expected):
     if previous.get('node_id'):
         next(n for n in source_root.walk() if target in n.children).children.remove(target)
     selected = next(n for n in dest_root.walk() if n.id == destination['node_id']) if destination.get('node_id') else dest_root
-    if selected.form in ('schedule','region'):
-        if not selected.children: raise CommandError('invalid_parent', '请先创建时间或区域 entry')
+    if selected.form in ('schedule','region','avg'):
+        if not selected.children: raise CommandError('invalid_parent', '请先创建 entry')
         selected = selected.children[-1]
     if source_id != destination_id:
         used = {n.id for n in dest_root.walk()}
@@ -363,6 +366,7 @@ def bind_paths(conn, state):
     for asset in catalog(conn):
         if asset['kind'] in ('folder','block'): lookup.setdefault(asset['path'],[]).append(asset)
     for node in state.doc.root.walk():
+        if node.form in ('schedule', 'region', 'avg') or node.meta.get('lora'): continue
         if not node.header or node.meta.get('source') or node.meta.get('pool'): continue
         # expand() labels contained snapshots for display. They already have IDs
         # and content; resolving their labels creates accidental references and
@@ -379,6 +383,7 @@ def bind_paths(conn, state):
 def observe(conn, state, owner, collect=False, suppress=False):
     if not isinstance(owner,str) or not owner: raise CommandError('invalid_owner', '需要稳定文档身份')
     for block in state.doc.root.walk():
+        if block.form in ('schedule', 'region', 'avg'): continue
         pool = block.meta.get('pool')
         if not pool: continue
         # A portable or deleted pool never prevents editing/compilation.
@@ -400,6 +405,49 @@ class MutationOp:
         body=self.body; action=body['action']; response={}; asset_id=None
         if action=='save_block':
             asset_id=save_block(conn,body['snapshot'],body['name'],body.get('folder_id'),body.get('id'),body.get('version'),body.get('parent_id',UNSET))
+        elif action=='ensure_lora':
+            lora = body['lora']
+            if not isinstance(lora, dict) or not isinstance(lora.get('id'), str) or len(lora['id']) != 64:
+                raise CommandError('invalid_lora', '无效 LoRA 身份')
+            existing = next((asset for asset in catalog(conn) if asset['kind'] == 'folder' and asset['data'].get('lora', {}).get('id') == lora['id']), None)
+            if existing:
+                asset_id = existing['id']
+            else:
+                name = 'LoRA · ' + ''.join(char if char not in '[]\\\n\r' else '_' for char in str(lora.get('name', 'LoRA'))) + ' (' + lora['id'][:12] + ')'
+                asset_id = store(conn, None, 'folder', name, {'autocomplete': False, 'lora': deepcopy(lora)})
+            if not existing or body.get('import_triggers') or body.get('regroup_existing'):
+                groups = trigger_groups(body.get('triggers', []))
+                allowed = None
+                if existing and body.get('regroup_existing') and not body.get('import_triggers'):
+                    # Explicit repair of old flat imports only. Never refill a
+                    # deleted tag, touch an already grouped pool or move custom
+                    # edits whose wording no longer matches source metadata.
+                    children = [child for child in catalog(conn) if child['parent_id'] == asset_id]
+                    if any(child['kind'] == 'folder' and child['data'].get('lora_trigger_group') for child in children):
+                        groups = []
+                    allowed = {tag_key(DocNode.from_json(child['data']['snapshot'])) for child in children if child['kind'] == 'tag'}
+                    groups = [group for group in groups if group['key']]
+                for group in groups:
+                    items = {key: item for key, item in group['nodes'].items() if allowed is None or key in allowed}
+                    if not items: continue
+                    destination = asset_id
+                    if group['key']:
+                        marker = {'lora_id': lora['id'], 'key': group['key']}
+                        children = [child for child in catalog(conn) if child['parent_id'] == asset_id]
+                        matched = next((child for child in children if child['kind'] == 'folder' and child['data'].get('lora_trigger_group') == marker), None)
+                        if matched:
+                            destination = matched['id']
+                        else:
+                            occupied = {child['name'] for child in children if child['kind'] in ('folder', 'block')}
+                            name, suffix = group['name'], 2
+                            while name in occupied:
+                                name = f'{group["name"]} {suffix}'; suffix += 1
+                            destination = store(conn, None, 'folder', name, {'autocomplete': False, 'lora_trigger_group': marker}, parent_id=asset_id)
+                    present = pool_keys(conn, destination)
+                    for key, item in items.items():
+                        if key not in present:
+                            add_tag(conn, destination, item.to_json(), automatic=True)
+                            present.add(key)
         elif action=='save_tag':
             snapshot=body.get('snapshot')
             if snapshot is None:
@@ -417,7 +465,11 @@ class MutationOp:
             response['assets']=[row(conn,ident) for ident in saved]
         elif action in ('save_folder','save_document'):
             kind=action[5:]; data=body.get('data',{})
-            if kind=='folder': data={'autocomplete':bool(data.get('autocomplete',False))}
+            if kind=='folder':
+                data={'autocomplete':bool(data.get('autocomplete',False))}
+                previous = row(conn, body['id'], 'folder') if body.get('id') else None
+                if previous and previous['data'].get('lora'): data['lora'] = previous['data']['lora']
+                if previous and previous['data'].get('lora_trigger_group'): data['lora_trigger_group'] = previous['data']['lora_trigger_group']
             else: EditorState.create(doc=data['doc']).check()
             asset_id=store(conn,body.get('id'),kind,body['name'],data,body.get('folder_id'),body.get('version'),body.get('parent_id',UNSET))
         elif action=='create_block':
@@ -427,7 +479,7 @@ class MutationOp:
                 if parent['version']!=body.get('version'): raise CommandError('asset_conflict','父 block 已变化')
                 whole=DocNode.from_json(parent['data']['snapshot']); node.sep=', '
                 target=whole
-                if whole.form in ('region','schedule'):
+                if whole.form in ('region','schedule','avg'):
                     if not whole.children: raise CommandError('invalid_parent','请先创建 entry')
                     target=whole.children[-1]
                 for part in node.walk(): part.id=identity()
@@ -475,7 +527,7 @@ class MutationOp:
             if action!='observe': response={'state':state.to_json(),'projection':projection(state),'edit':text_edit(previous.text,state.text)}
         else: raise CommandError('invalid_action','未知 Library 操作')
         placement_check(conn); loose_check(conn)
-        if action in ('save_block', 'save_folder', 'create_block', 'rename', 'move', 'save_instance'): names_check(conn)
+        if action in ('save_block', 'save_folder', 'create_block', 'rename', 'move', 'save_instance', 'ensure_lora'): names_check(conn)
         # Observations are bookkeeping, not autocomplete data changes.
         if action!='observe': bump(conn)
         return {'id':asset_id,'revision':conn.execute('SELECT revision FROM library_meta').fetchone()[0],**response,**({'asset':row(conn,asset_id)} if asset_id else {})}
@@ -502,7 +554,9 @@ class AssetLibrary:
             if action=='tree':
                 assets=[]; documents=[]
                 for asset in catalog(conn):
+                    lora_root = asset['kind'] == 'folder' and bool(asset['data'].get('lora'))
                     asset={k:v for k,v in asset.items() if k!='data'}; asset['folder_id']=asset['parent_id']
+                    if lora_root: asset['lora_root'] = True
                     if asset['kind']=='document': documents.append(asset); continue
                     assets.append(asset)
                 return {'revision':revision,'assets':assets,'saved_documents':documents}
@@ -521,8 +575,11 @@ class AssetLibrary:
                 snapshot=expand(conn,args['id']); validate_snapshot(snapshot)
                 return {'snapshot':snapshot,'source':snapshot['meta']['source'],'revision':revision}
             if action in ('candidates','complete'):
-                if action=='complete' and self._completion_cache and self._completion_cache['revision']==revision: return deepcopy(self._completion_cache)
-                pools=[args['pool']] if action=='candidates' else [r['id'] for r in conn.execute("SELECT id,data_json FROM assets WHERE kind='folder'") if json.loads(r['data_json']).get('autocomplete')]
+                all_folders = action == 'complete' and args.get('all_folders') is True
+                if action=='complete' and not all_folders and self._completion_cache and self._completion_cache['revision']==revision: return deepcopy(self._completion_cache)
+                pools=([args['pool']] if action=='candidates' else
+                       [r['id'] for r in conn.execute("SELECT id FROM assets WHERE kind='folder' AND parent_id IS NULL")] if all_folders else
+                       [r['id'] for r in conn.execute("SELECT id,data_json FROM assets WHERE kind='folder'") if json.loads(r['data_json']).get('autocomplete')])
                 def walk(folder_id):
                     folder=row(conn,folder_id,'folder'); children=[]
                     for record in conn.execute('SELECT id FROM assets WHERE parent_id=? ORDER BY position,id',(folder_id,)):
@@ -531,9 +588,9 @@ class AssetLibrary:
                         elif item['kind'] in ('tag','block'):
                             snapshot=expand(conn,item['id']) if item['kind']=='block' else deepcopy(item['data']['snapshot'])
                             children.append({'kind':item['kind'],'id':item['id'],'name':item['path'] if item['kind']=='block' else item['name'],'snapshot':snapshot,'occurrence':[folder_id,item['id']], 'source':{'kind':item['kind'],'id':item['id'],'version':item['version'],'path':item['path']}})
-                    return {'kind':'folder','id':folder_id,'name':folder['path'],'children':children}
+                    return {'kind':'folder','id':folder_id,'name':folder['path'],'autocomplete':bool(folder['data'].get('autocomplete')),'children':children}
                 result={'revision':revision,'candidates':[walk(pool) for pool in pools]}
-                if action=='complete': self._completion_cache=result
+                if action=='complete' and not all_folders: self._completion_cache=result
                 return deepcopy(result)
             raise CommandError('invalid_action','未知读取操作')
         finally: conn.close()

@@ -110,13 +110,16 @@ export function runEnd(rows, parent, source) {
   const next = children.slice(children.findIndex(row => row.id === last.id) + 1).find(row => row.effective && row.span);
   const content = parent?.ast?.spans?.content;
   const limit = next?.span[0] ?? content?.[1] ?? end;
-  let gap = /^\s*/.exec(source.slice(end, limit))[0];
+  // A trailing separator is an unfinished next prompt, owned by this run.
+  // Dropping it from the display/range on blur makes the next edit fuse tags.
+  // Before another block, its separating comma still belongs to the layout.
+  let gap = (next ? /^\s*/ : /^[\s,]*/).exec(source.slice(end, limit))[0];
   // Closing-brace layout is already represented by the card. Remove only its
   // single layout line, leaving additional Enter/blank lines editable on reopen.
   if (!next && parent?.form !== 'root' && content && /^\s*\n[ \t]+/.test(source.slice(content[0], children.find(row => row.effective && row.span)?.span[0] ?? content[0]))) {
-    gap = gap.replace(/[ \t]*\r?\n[ \t]*$/, '');
+    gap = gap.replace(/\r?\n[ \t]*$/, '');
   }
-  return /[\r\n]/.test(gap) ? end + gap.length : end;
+  return /[,\r\n]/.test(gap) ? end + gap.length : end;
 }
 
 // Balanced constructs, escaped punctuation and LoRA names must survive intact.

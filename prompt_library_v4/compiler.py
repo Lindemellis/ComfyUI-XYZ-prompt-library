@@ -1,6 +1,14 @@
 """PLv4 execution/preview adapter: one ComfyUI node seed, two existing backends."""
 from ._v3 import compile_text
-from .model import CommandError, EditorState
+from .model import CommandError, EditorState, pair_tree
+from ._v3 import parse
+
+
+def lora_positions(state):
+    root, _ = parse(state.text)
+    index = {}
+    pair_tree(state.doc.root, root, index, visible=True)
+    return [index[node.id].pos for node in state.doc.root.walk() if node.id in index and node.meta.get('lora') and node.children and node.children[0].enabled]
 
 
 def compile_document(state: EditorState, *, seed: int, region_mode: str) -> dict:
@@ -10,7 +18,8 @@ def compile_document(state: EditorState, *, seed: int, region_mode: str) -> dict
     if region_mode not in ("couple", "mask"):
         raise CommandError("invalid_mode", "region_mode must be couple or mask")
     state.check()
-    options = dict(seed=seed, region_mode=region_mode, ignore_group_seeds=True)
+    options = dict(seed=seed, region_mode=region_mode, ignore_group_seeds=True,
+                   centralize_loras=True, lora_block_positions=lora_positions(state))
     prompt = compile_text(state.text, **options)
     plain = compile_text(state.text, ignore_regions=True, **options)
     return dict(prompt=prompt.text, plain=plain.text, revision=state.revision,

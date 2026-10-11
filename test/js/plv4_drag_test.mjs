@@ -8,7 +8,7 @@ async function load(file, dependencies = '') {
 }
 globalThis.dragHelpers = await load('drop_preview.js');
 globalThis.detailHelpers = await load('details.js');
-const { BlockView } = await load('block_view.js', 'const {blockPlacement,nearestBlockBoundary,dropLocation}=globalThis.dragHelpers; const {indexTree,nameOf}=globalThis.detailHelpers;');
+const { BlockView } = await load('block_view.js', 'const {blockPlacement,nearestBlockBoundary,dropLocation,isEntry,isContainer,canInsertContainer,canDropBlock}=globalThis.dragHelpers; const {indexTree,nameOf}=globalThis.detailHelpers;');
 const { dropLocation } = globalThis.dragHelpers;
 
 function fixture({ library = false } = {}) {
@@ -78,4 +78,52 @@ test('inline prompt boundaries and folded-card edges remain distinct from struct
   assert.equal(f.view.dropTarget(80,99).placement,'inline');
   const collapsed = f.node({blockId:'child'},50,75,20);f.setHit(collapsed);
   assert.deepEqual(f.view.dropTarget(100,73).command,{parent_id:'parent',after_id:'child'});
+});
+
+for (const form of ['schedule', 'region']) {
+  test(`${form} first-level boundaries reject external blocks but accept their own entry reorder`, () => {
+    const f = fixture(); f.parent.form = form; f.child.form = `${form}_entry`;
+    f.setHit(f.parentEnd);
+    assert.equal(f.view.dropTarget(100,105), null, 'Library insert has no entry source');
+    assert.equal(f.view.dropTarget(100,105,new Set(),{id:'external',form:'brace'}),null);
+    assert.equal(f.view.dropTarget(100,105,new Set(),f.child).parent.id,'parent');
+    assert.equal(f.view.dropTarget(100,105,new Set(),{...f.child,parent_id:'other'}),null);
+    f.setHit(f.rootEnd);
+    assert.equal(f.view.dropTarget(100,113,new Set(),f.child),null,'entry cannot leave its container');
+    f.setHit(f.childEnd);
+    assert.equal(f.view.dropTarget(100,99,new Set(),f.child),null,'entry cannot move into an entry body');
+    assert.equal(f.view.dropTarget(100,99).parent.id,'child','Library blocks enter the entry body');
+    assert.equal(f.view.dropTarget(100,99,new Set(),{id:'external',form:'brace'}).parent.id,'child');
+  });
+}
+
+test('More offers grouped sibling/child containers, omits entry Save and invalid Region nesting', async () => {
+  const f = fixture(), calls=[]; f.view.host={addBlock:(...args)=>calls.push(args)};
+  const items=f.view.menuItems(f.child);
+  assert.deepEqual(items.filter(([,action])=>Array.isArray(action)).map(([label])=>label),['添加同级 Block','添加子 Block']);
+  const flatten=items=>items.flatMap(([label,action])=>Array.isArray(action)?action:[[label,action]]);
+  for (const [label,action] of flatten(items)) if (['Schedule 容器','Region 容器'].includes(label)) await action();
+  assert.deepEqual(calls,[['child',false,'schedule'],['child',false,'region'],['child',true,'schedule'],['child',true,'region']]);
+  assert.equal(flatten(f.view.menuItems(f.parent,true)).filter(([label])=>label==='Schedule 容器').length,1,'Library root has no sibling creation');
+  f.parent.form='region'; f.child.form='region_entry';
+  const entry=f.view.menuItems(f.child);
+  assert.ok(!entry.some(([label])=>['Save','添加同级 Block'].includes(label)));
+  assert.ok(flatten(entry).some(([label])=>label==='Schedule 容器'));
+  const normal={...f.child,form:'brace',settings:{region:{kind:'base'}}};
+  assert.ok(!flatten(f.view.menuItems(normal)).some(([label])=>label==='Region 容器'));
+});
+
+test('AVG entries cannot move, outside blocks enter only their body, and More respects their boundary', () => {
+  const f = fixture(); f.parent.form = 'avg'; f.child.form = 'avg_entry';
+  f.setHit(f.parentEnd);
+  assert.equal(f.view.dropTarget(100,105), null);
+  assert.equal(f.view.dropTarget(100,105,new Set(),f.child), null);
+  f.setHit(f.rootEnd);
+  assert.equal(f.view.dropTarget(100,113,new Set(),f.child), null);
+  f.setHit(f.childEnd);
+  assert.equal(f.view.dropTarget(100,99).parent.id, 'child');
+  const entryMenu = f.view.menuItems(f.child);
+  assert.ok(!entryMenu.some(([label]) => ['Save','添加同级 Block'].includes(label)));
+  assert.ok(entryMenu.some(([,action]) => Array.isArray(action)&&action.some(([label])=>label==='AVG 容器')));
+  assert.ok(!f.view.menuItems(f.parent).some(([label]) => label === '绑定池'));
 });

@@ -1,5 +1,25 @@
 import { element } from './ui.js';
 
+export const isEntry = row => ['schedule_entry', 'region_entry', 'avg_entry'].includes(row?.form);
+export const isContainer = row => ['schedule', 'region', 'avg'].includes(row?.form);
+
+export function canInsertContainer(parent, form, map) {
+  if (!parent || isContainer(parent)) return false;
+  if (form === 'region') {
+    for (let row = parent; row; row = map.get(row.parent_id)) {
+      if (row.form === 'region_entry' || row.settings?.region) return false;
+    }
+  }
+  return true;
+}
+
+export function canDropBlock(parent, moving = null) {
+  if (!parent) return false;
+  if (moving?.form === 'avg_entry') return false;
+  if (isEntry(moving)) return parent.id === moving.parent_id;
+  return !isContainer(parent);
+}
+
 // Fallback for card edges without a nearby structural insertion line (including
 // folded cards). Internal moves and Library insertion use the same resolver.
 export function blockPlacement(rect, y) {
@@ -32,6 +52,8 @@ export function dropLocation(target) {
 export class DropPreview {
   constructor(host) {
     this.host = host;
+    this.targets = host.blockView.container;
+    this.targets?.classList.add('plv4-drag-targets');
     this.hint = element('div', 'plv4 plv4-drop drop-hint');
     this.mark = element('div', 'plv4 plv4-drop-mark');
     this.hint.hidden = this.mark.hidden = true;
@@ -71,5 +93,5 @@ export class DropPreview {
     };
     tick(); return event => { pointer = event; };
   }
-  destroy() { cancelAnimationFrame(this.frame); this.clear(); this.hint.remove(); this.mark.remove(); }
+  destroy() { this.targets?.classList.remove('plv4-drag-targets'); cancelAnimationFrame(this.frame); this.clear(); this.hint.remove(); this.mark.remove(); }
 }

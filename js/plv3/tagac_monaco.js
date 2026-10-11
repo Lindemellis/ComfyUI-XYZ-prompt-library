@@ -112,6 +112,7 @@ export async function attachTagAC(editor, container) {
   });
 
   editor.onKeyDown((e) => {
+    if (e.browserEvent.isComposing || e.browserEvent.keyCode === 229) return;
     const ev = new KeyboardEvent('keydown', {
       key: e.browserEvent.key,
       code: e.browserEvent.code,
@@ -139,6 +140,9 @@ export async function attachTagAC(editor, container) {
   editor.onDidBlurEditorText(() => {
     host.dispatchEvent(new FocusEvent('blur', { bubbles: false }));
   });
+
+  editor.onDidCompositionStart?.(() => host.dispatchEvent(new Event('compositionstart')));
+  editor.onDidCompositionEnd?.(() => host.dispatchEvent(new Event('compositionend')));
 
   // Clicking a tag in the text opens its related-tags panel (tagac's `related` mode).
   editor.onMouseUp(() => {

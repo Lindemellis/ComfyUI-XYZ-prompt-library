@@ -90,6 +90,14 @@ def full_index(doc: Document) -> tuple[str, dict]:
     return source, result
 
 
+def normalise_metadata(doc: Document):
+    from .lora_block import normalise
+    normalise(doc)
+    for node in doc.root.walk():
+        if node.form in ('schedule', 'region', 'avg'):
+            node.meta.pop('pool', None)
+
+
 def refresh_document(doc: Document) -> Document:
     """Re-slice after a command, retaining identity, metadata and every switch."""
     source, complete = full_index(doc)
@@ -106,6 +114,7 @@ def refresh_document(doc: Document) -> Document:
             transfer(a, b)
     transfer(doc.root, fresh.root)
     fresh.next_id = doc.next_id
+    normalise_metadata(fresh)
     return fresh
 
 
@@ -150,6 +159,7 @@ class EditorState:
             (int(i[1:]) for i in ids if i.startswith("i") and i[1:].isdigit()), default=0))
         if "text" in value and state.text != value["text"]:
             raise CommandError("invalid_state", "text differs from the document projection")
+        normalise_metadata(state.doc)
         if state.valid:
             state.check()
         return state
@@ -171,6 +181,7 @@ class EditorState:
         if render(merged) != text:
             raise CommandError("roundtrip_mismatch", "reconciliation changed the original source")
         self.doc = merged
+        normalise_metadata(self.doc)
 
     @staticmethod
     def single_root(doc: Document) -> bool:
@@ -215,6 +226,8 @@ def projection(state: EditorState) -> dict:
                     start = min(start, current.spans.region_decl[0])
                 if current.spans.schedule_form == "block":
                     start = min(start, current.spans.fields["schedule"]["value"][0])
+                if current.spans.avg_form == 'block':
+                    start = min(start, current.spans.fields['avg_weight']['value'][0])
             span = [js_offset(text, start), js_offset(text, end)]
         out = dict(id=node.id, parent_id=parent, kind=node.kind, form=node.form,
                    enabled=node.enabled, effective=effective, span=span,

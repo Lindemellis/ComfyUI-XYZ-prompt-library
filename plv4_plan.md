@@ -1,8 +1,10 @@
 # PLv4 分析与实施计划
 
-依据：plv4.md 最终 Folder 池设定及后续明确更正、现有 PLv3 文档/解析器/IR/编译器和共享编辑器。2026-10-08 用户确认本阶段结束，并授权同步内部文档、面向用户 README、Git 与 GitHub；P1–P4 已实现。最新契约与离线验证见 prompt_library_v4/DEVELOPMENT.md，本机接续见 HANDOFF.md。旧原型与早期 Class 方案仅历史保留，不作为并行设计。
+依据：plv4.md 最终 Folder 池设定及后续明确更正、现有 PLv3 文档/解析器/IR/编译器和共享编辑器。2026-10-08 Folder 池 P1–P4 收束；2026-10-10 用户确认 LoRA / AVG / 输入及菜单后续完成，并授权同步 README、内部工程文档、GitHub 和正式 ComfyUI。最新契约与验证见 prompt_library_v4/DEVELOPMENT.md，本机接续见 HANDOFF.md。旧原型与早期 Class 方案仅历史保留，不作为并行设计。
 
-当前实现要点：标签为 Blocks / Source / Preview；Blocks 连续文本段共用一个 native 输入宿主，复用 Source 的菜单、Find/Replace 与文档历史。单条设置直接显示 Weight/Schedule，取消 + setting、单条 Region 和详情 Danbooru 眼睛按钮；attention/interval 以通常语法显示，新增 `{}` 仅局部格式化。三处 TagAC 共用开关/弹窗及就绪等待，8190 测试实例已补实际 tag 数据；Blocks 不再显示 Source 分隔符里的结构缩进。最近修复只做离线检查，不引用旧浏览器数量作为当前验证。
+当前实现要点：标签为 Blocks / Source / Preview；Blocks 连续文本段共用 plaintext-only 原生输入宿主，Enter / Backspace / Delete 使用浏览器行为，复用 Source 补全、Find/Replace 与文档历史。支持独立 LoRA 浏览器及 Folder 触发词组合、LoRA 引用集中输出和 AVG 相对权重混合。Header 更多菜单按同级 / 子级悬停展开，特殊容器保持 entry 边界；输入样式与焦点稳定，点击菜单后才提交失焦，避免吞第一次点击。三处 TagAC 共用开关与弹窗，失效候选静默放行 Enter。正式运行直接使用 custom_nodes 下的源码与个人库；8190 是独立验收实例。
+
+2026-10-10 收尾全量离线回归 **909 passed / 3 skipped**（开发解释器缺 torch / PyAV）；最新真实 ComfyUI 菜单 **25** 项通过，输入定向 **46** 项、样式 **40** 项及 AVG **36** 项见维护记录。验收覆盖具体回归，不把历史累计数量当作当前完整浏览器测试。后续按新发现的具体 bug 修复，不重开设计阶段。
 
 ## 1. 结论与边界
 

@@ -13,6 +13,7 @@ export function tagacReady(timeoutMs = 8000) {
 }
 
 export async function attachPromptAutocomplete(element) {
+  element._xyzPoolSuggestions = query => window.xyzPLv4Memberships?.(query) || [];
   const immediate = window.xyzTagAC;
   const api = immediate || await tagacReady();
   // A Details redraw may have replaced this input while TagAC was loading.

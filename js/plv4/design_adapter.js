@@ -34,13 +34,15 @@ export function blockLibraryPath(row, library) {
   return row.meta?.full_path && row.meta?.source?.kind !== 'folder' ? row.meta.full_path : '';
 }
 
-export function blockFrame(row, depth, folded, selected, libraryRoot, libraryPath = '') {
+export function blockFrame(row, depth, folded, selected, libraryRoot, libraryPath = '', folder = null) {
   const settings = row.settings || {};
   const b = { ...row, name: row.meta?.name || row.ast?.header || '', libraryPath, collapsed: folded,
-    type: ['schedule', 'region'].includes(row.form) ? row.form : 'normal',
+    type: ['schedule', 'region', 'avg'].includes(row.form) ? row.form : row.meta?.lora ? 'lora' : 'normal',
+    avgWeight: settings.avg_weight,
+    poolName: folder?.name || 'Folder 不在本机', poolPath: folder?.path || '', poolAvailable: !!folder,
     schedule: !!settings.schedule, start: settings.schedule?.[0], end: settings.schedule?.[1],
     region: !!settings.region, regionKind: settings.region?.kind, mask: settings.region?.imask };
-  const leaves = (node, enabled = true) => enabled && node.enabled ? (node.children || []).flatMap(child =>
+  const leaves = (node, enabled = true) => enabled && node.enabled ? (node.children || []).filter(child => !child.meta?.lora_invocation).flatMap(child =>
     child.kind === 'group' && child.form !== 'paren' ? leaves(child) : child.enabled ? [child] : []) : [];
   const esc = value => String(value ?? '').replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
   const template = document.createElement('template');
@@ -58,6 +60,8 @@ export function blockFrame(row, depth, folded, selected, libraryRoot, libraryPat
 }
 
 const ADAPTER = `
+.plv4 .plv4-menu-group{padding:6px 8px 2px;color:var(--muted);font-size:11px;pointer-events:none}
+.plv4 .plv4-menu-separator{margin:4px 0;border:0;border-top:1px solid var(--line)}
 .plv4 .plv4-tab.preview-tab .plv4-tab-label{font-style:italic}
 .plv4 .plv4-tab{display:flex;align-items:center;gap:5px;cursor:pointer}.plv4 .plv4-tab-label{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.plv4 .plv4-tab-close{display:grid;place-items:center;flex:0 0 20px;width:20px;height:20px;padding:0;border-radius:3px;font-size:14px;color:#a9bcb1}.plv4 .plv4-tab-close:hover{color:#e8f5ef;background:#ffffff16}
 .plv4.floating-shell{z-index:1200;font:12px var(--ui);color:var(--text);background:var(--bg);border-color:#58645f;box-shadow:0 24px 85px #000a,0 0 0 1px #0009}
@@ -71,8 +75,8 @@ const ADAPTER = `
 .plv4 .plv4-library-head{padding:0 0 8px}.plv4 .plv4-library-head input{width:100%;font-size:11px}.plv4 .plv4-library-row{display:flex;align-items:center;gap:3px;min-height:27px;margin:1px 0;border:1px solid transparent;border-radius:4px;font-size:10px}.plv4 .plv4-library-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;cursor:pointer;text-align:left}.plv4 .plv4-library-row button{flex:none}.plv4 .plv4-library-row:hover{background:#ffffff08}.plv4 .plv4-library-row[data-kind=folder]{color:var(--text)}
 .plv4 .plv4-section>summary{font-size:8px;letter-spacing:1px;color:var(--muted)}.plv4 .plv4-child-link{font-size:10px;text-align:left}.plv4 .plv4-candidates .plv4-row{min-height:22px;font-size:10px}
 .plv4.plv4-popover.context-menu{z-index:1600;position:fixed;display:flex;flex-direction:column;width:max-content;min-width:120px;padding:5px;background:#2a3234;border:1px solid #53615b;border-radius:6px;box-shadow:0 10px 35px #0006;text-align:left}
-.plv4.plv4-popover.context-menu>button{display:block;width:100%;padding:8px 11px;border:0;border-radius:4px;background:transparent;color:#d4dfda;text-align:left;font:13px/1.4 var(--ui);cursor:pointer}
-.plv4.plv4-popover.context-menu>button:hover{background:#394841}
+.plv4.plv4-popover.context-menu>button,.plv4.plv4-popover.context-menu>.plv4-menu-branch>button{display:block;width:100%;padding:8px 11px;border:0;border-radius:4px;background:transparent;color:#d4dfda;text-align:left;font:13px/1.4 var(--ui);cursor:pointer}
+.plv4.plv4-popover.context-menu>button:hover,.plv4.plv4-popover.context-menu>.plv4-menu-branch>button:hover{background:#394841}
 .plv4.plv4-drop.drop-hint{z-index:1500;position:fixed;pointer-events:none;color:#d6eee0;font:12px/1.4 var(--ui);background:#294437;border:1px solid #82b69c;padding:7px 10px;border-radius:5px;max-width:320px}
 .plv4.plv4-drop-mark{z-index:1500;position:fixed;pointer-events:none;width:2px;background:#93d9c1;box-shadow:0 0 0 1px #93d9c133}
 .plv4 .drop-inside{outline:2px solid #93d9c1;outline-offset:-2px;background-color:#93d9c110}

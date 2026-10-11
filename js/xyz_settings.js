@@ -1,6 +1,7 @@
 /** XYZ Prompt Tools — settings for TagDB autocomplete and Prompt Library V3. */
 
 import { app } from '../../../scripts/app.js';
+import { registerWindow } from './plv3/theme.js';
 import { manager as tagdbManager } from './tagdb_panel.js';
 import { reset as plv3Reset, set as plv3Set, settings as plv3 } from './plv3/settings.js';
 
@@ -105,6 +106,7 @@ class SettingsPage {
   show() {
     if (!this.root) this.build();
     this.root.style.display = 'flex';
+    this.activate();
     this.select(this.active || 'autocomplete');
   }
   hide() {
@@ -149,6 +151,7 @@ class SettingsPage {
     win.append(bar, el('div', { style: { display: 'flex', flex: '1', minHeight: '0' } }, nav, this.content));
     document.body.append(win);
     this.root = win;
+    this.activate = registerWindow(win);
   }
 
   select(key) {
@@ -171,8 +174,11 @@ class SettingsPage {
 
     if (key === 'autocomplete') {
       wrap.append(
-        sectionTitle('Autocomplete', 'English Danbooru and Gelbooru tag suggestions while you type.'),
-        row('Enable autocomplete', 'Turn suggestions on or off everywhere.', toggle(() => settings.enabled, update('enabled'))),
+        sectionTitle('Autocomplete', 'Choose which suggestions appear while you type.'),
+        row('LoRA syntax', 'Complete <lora:…> from local LoRA model paths.', toggle(() => settings.loraCompletion !== false, update('loraCompletion'))),
+        row('Source syntax', 'Complete Source block headers and Library paths.', toggle(() => settings.sourceCompletion !== false, update('sourceCompletion'))),
+        row('Danbooru / Gelbooru dataset', 'Suggest tags from the installed datasets.', toggle(() => settings.enabled !== false, update('enabled'))),
+        row('Library prompts', 'Suggest prompts from enabled Library Folders.', toggle(() => settings.libraryCompletion !== false, update('libraryCompletion'))),
         row('Max suggestions', 'How many results the dropdown shows.',
           sliderCtrl(() => settings.maxSuggestions ?? 15, update('maxSuggestions'), { min: 5, max: 50, step: 5 })),
         row('Hide rare tags', 'Skip tags below this post count (0 = show all).',

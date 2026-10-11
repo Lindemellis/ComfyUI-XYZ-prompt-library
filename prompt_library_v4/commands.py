@@ -15,11 +15,29 @@ from .model import (CommandError, EditorState, full_document, full_index,
                     projection, python_offset, refresh_document, text_edit)
 from .formatting import format_document, format_new_block
 
-_LAYOUT_COMMANDS = {"WrapSelection", "MoveBlock", "InsertBlock", "InsertLibraryBlock",
+_LAYOUT_COMMANDS = {"WrapSelection", "MoveBlock", "InsertBlock", "InsertEntry", "InsertLibraryBlock",
                     "InsertLibraryPrompts", "EnableCandidate", "CompleteLibrary",
                     "UpdateLibraryBlock", "SetSettings", "SetPromptSettings",
                     "SetRegion", "SetScheduleBoundary", "Delete"}
-_LOCAL_INSERT_COMMANDS = {"WrapSelection", "InsertBlock", "InsertLibraryBlock", "InsertLibraryPrompts", "EnableCandidate", "SetPromptSettings"}
+_LOCAL_INSERT_COMMANDS = {"WrapSelection", "InsertBlock", "InsertEntry", "InsertLibraryBlock", "InsertLibraryPrompts", "EnableCandidate", "SetPromptSettings", "InsertLora"}
+
+
+def _new_container(form):
+    if form == "schedule":
+        node = _fragment("[@schedule]: { 0 - 0.5: { }, 0.5 - 1: { } }")
+        names = ["阶段 1", "阶段 2"]
+    elif form == "region":
+        node = _fragment("[@region]: { [base]: { } [mask: [0, 0.5, 0, 1]]: { } "
+                         "[mask: [0.5, 1, 0, 1]]: { } [fill]: { } }")
+        names = ["Base", "Mask 1", "Mask 2", "Fill"]
+    elif form == 'avg':
+        node = _fragment('[@avg]: { 1: { }, 1: { } }')
+        names = ['Entry 1', 'Entry 2']
+    else:
+        raise CommandError("invalid_container", "请选择 Schedule、Region 或 AVG 容器")
+    for entry, name in zip(node.children, names):
+        entry.meta["name"] = name
+    return node
 
 
 def _number(value):
@@ -133,7 +151,7 @@ def _body(node):
 
 
 def _fragment(source, form=None):
-    prefix = "[@schedule]: { " if form == "schedule_entry" else "[@region]: { " if form == "region_entry" else ""
+    prefix = {'schedule_entry': '[@schedule]: { ', 'region_entry': '[@region]: { ', 'avg_entry': '[@avg]: { '}.get(form, '')
     parsed = from_text(prefix + source + (" }" if prefix else ""), recover=False)
     nodes = parsed.root.children[0].children if prefix else parsed.root.children
     if len(nodes) != 1:
@@ -170,7 +188,7 @@ def _explicit(node):
     if node.opaque:
         raise CommandError("opaque_block", "this block cannot be structurally edited")
     # A bare special entry needs real braces once its body has structural edits.
-    if node.form == "implicit" or (node.form in ("schedule_entry", "region_entry") and not node.close):
+    if node.form == "implicit" or (node.form in ("schedule_entry", "region_entry", 'avg_entry') and not node.close):
         node.open = node.open.rstrip() + " {"
         if not node.children and not node.lead:
             node.lead = " "
@@ -179,7 +197,7 @@ def _explicit(node):
 
 def _ordinary_parent(node):
     _explicit(node)
-    if node.form in ("schedule", "region", "paren"):
+    if node.form in ("schedule", "region", 'avg', "paren"):
         raise CommandError("special_boundary", "special containers require an entry command")
 
 
@@ -221,6 +239,8 @@ def _selected(doc, ids):
     if positions != sorted(positions):
         raise CommandError("invalid_selection", "selection must follow document order")
     a, b = positions[0], positions[-1]
+    if any(node.meta.get('lora_invocation') for node in parent.children[a:b+1]):
+        raise CommandError('fixed_lora', 'LoRA 调用项不能作为正文分组或编辑')
     # Invisible disabled siblings strictly between the endpoints move into the group.
     if any(n.enabled and n.id not in ids for n in parent.children[a:b+1]):
         raise CommandError("non_contiguous", "selection must include every visible item between endpoints")
@@ -264,6 +284,8 @@ def _set_settings(doc, node, values):
     for key, value in values.items():
         if key == "seed":
             raise CommandError("node_seed_only", "use the ComfyUI node seed input")
+        if node.form in ('schedule', 'region', 'avg', 'avg_entry') and key in ('shuffle', 'dropout', 'random_select', 'format') and value is not None:
+            raise CommandError('container_setting', '请在正文 subblock 中设置格式与随机选项')
         _, index = full_index(doc)
         ast = index[node.id]
         spans = ast.spans
@@ -324,34 +346,22 @@ def _normalise_schedule(doc, parent):
         _schedule_head(doc, prev, (old[0], current[following.id].settings.schedule[0]))
 
 
-def _detach_entry(doc, node):
-    """Move a special entry out without leaving its external head behind."""
-    _, index = full_index(doc)
-    ast = index[node.id]
-    settings = {}
-    if node.form == "schedule_entry":
-        settings["schedule"] = list(ast.settings.schedule)
-    elif node.form == "region_entry":
-        settings["region"] = ast_json(ast)["settings"]["region"]
-    else:
-        return
-    _explicit(node)
-    # Braces are owned by this group; a library header, when present, stays.
-    brace = node.open.rfind("{")
-    node.open = node.open[brace:]
-    node.form = "brace"
-    # The old parent's syntax still requires a head until removal. Edit this
-    # body's shell in isolation, so the transient state is never parsed there.
-    temporary = Document(DocNode("root", "group", "", opaque=False, children=[node], form="root"))
-    _set_settings(temporary, node, settings)
-
-
 def _attach_entry(doc, parent, node, entry):
-    if parent.form not in ("schedule", "region"):
+    if parent.form not in ("schedule", "region", 'avg'):
         _ordinary_parent(parent)
         return
     if not isinstance(entry, dict):
         raise CommandError("special_boundary", "drop into a special container needs explicit entry settings")
+    if parent.form == 'avg':
+        if 'avg_weight' not in entry:
+            raise CommandError('special_boundary', 'AVG 容器需要 AVG entry 权重')
+        value = entry['avg_weight']
+        _number(value)
+        if value < 0:
+            raise CommandError('invalid_setting', 'AVG 权重必须非负')
+        node.open = _number(value) + ': ' + node.open
+        node.form = 'avg_entry'
+        return
     _explicit(node)
     if node.form in ("schedule", "region", "paren"):
         raise CommandError("special_boundary", "drop a regular body block into a special entry")
@@ -522,6 +532,8 @@ def apply_command(state: EditorState, command: dict) -> EditorState:
         doc = result.doc
         local_format_id = None
         node = _node(doc, command["id"]) if "id" in command else None
+        if node and node.meta.get('lora_invocation') and kind not in ('LocateDetails',):
+            raise CommandError('fixed_lora', '请从 LoRA block 设置编辑权重；删除或关闭整个 block')
         if kind == "LocateDetails":
             _locate(result, node.id)
         elif kind == "SetEnabled":
@@ -537,7 +549,7 @@ def apply_command(state: EditorState, command: dict) -> EditorState:
                 raise CommandError("invalid_command", "enabled must be boolean")
             # Empty bare entry bodies need braces to remain parsable.
             owner = parent_map[node.id]
-            if owner.form in ("schedule_entry", "region_entry"):
+            if owner.form in ("schedule_entry", "region_entry", "avg_entry"):
                 _explicit(owner)
             node.enabled = command["enabled"]
         elif kind == "Delete":
@@ -554,9 +566,51 @@ def apply_command(state: EditorState, command: dict) -> EditorState:
                 raise CommandError("invalid_metadata", "unsupported editing metadata")
             if "pool" in patch and (node.kind != "group" or node.form == "paren" or (patch["pool"] is not None and (not isinstance(patch["pool"], str) or not patch["pool"]))):
                 raise CommandError("invalid_metadata", "pool must be one Folder id or null on a block")
+            if "pool" in patch:
+                if node.form in ('schedule', 'region', 'avg') and patch['pool'] is not None:
+                    raise CommandError('container_pool', 'Schedule / Region / AVG 容器不能绑定 Folder')
+                if node.meta.get('lora') and patch['pool'] != node.meta.get('pool'):
+                    raise CommandError('fixed_lora_pool', 'LoRA 的触发词 Folder 为固定绑定')
             node.meta.update(deepcopy(patch))
         elif kind == "SetSettings":
             _set_settings(doc, node, command["patch"])
+        elif kind == 'SetAvgWeight':
+            if node.form != 'avg_entry':
+                raise CommandError('special_setting', '请选择 AVG entry')
+            value = command['value']
+            _number(value)
+            if value < 0:
+                raise CommandError('invalid_setting', 'AVG 权重必须非负')
+            _, index = full_index(doc)
+            _local_edits(doc, node, [(index[node.id].spans.fields['avg_weight']['value'], _number(value))])
+        elif kind == 'SetLoraStrength':
+            from .lora_block import invocation, strengths, token
+            reference = invocation(node)
+            if not reference: raise CommandError('invalid_lora', '请选择 LoRA block')
+            model, clip = strengths(node)
+            reference[0].raw = token(node.meta['lora']['relative'], command.get('model', model), command.get('clip', clip))
+        elif kind == 'InsertLora':
+            from .lora_block import token
+            lora = command['lora']
+            if not isinstance(lora, dict) or not isinstance(lora.get('id'), str) or not isinstance(command.get('pool_id'), str):
+                raise CommandError('invalid_lora', '需要 LoRA 身份和触发词池')
+            reference = token(lora.get('relative'))
+            existing = next((part for part in doc.root.walk() if part.meta.get('lora', {}).get('id') == lora['id']), None)
+            if existing:
+                parents = _parents(doc)
+                target = existing
+                while target is not doc.root:
+                    target.enabled = True
+                    target = parents[target.id]
+                _locate(result, existing.id)
+            else:
+                part = _clone_ids(doc, _fragment('{ ' + reference + ' }'))
+                part.meta.update(lora=deepcopy(lora), name=lora.get('name') or lora['relative'], pool=command['pool_id'])
+                part.children[0].meta['lora_invocation'] = True
+                _separate(part)
+                doc.root.children.append(part)
+                format_new_block(doc, part)
+                _locate(result, part.id)
         elif kind == "SetPromptSettings":
             changed = _prompt_settings(doc, node, command["patch"])
             if changed and changed.form != 'paren':
@@ -609,6 +663,8 @@ def apply_command(state: EditorState, command: dict) -> EditorState:
             format_new_block(doc, group)
             _locate(result, group.id)
         elif kind == "MoveBlock":
+            if node.form == 'avg_entry':
+                raise CommandError('entry_owner', 'AVG entry 不能拖拽，请移动其正文 subblock 或完整容器')
             if node is doc.root or node.kind != "group" or node.form == "paren":
                 raise CommandError("invalid_move", "move a complete block")
             parent = _node(doc, command["parent_id"])
@@ -617,7 +673,9 @@ def apply_command(state: EditorState, command: dict) -> EditorState:
             if command.get("before_id") == node.id or command.get("after_id") == node.id:
                 raise CommandError("invalid_boundary", "the source cannot also be the adjacent target")
             owner = _parents(doc)[node.id]
-            if owner is parent and owner.form in ("schedule", "region"):
+            if node.form in ("schedule_entry", "region_entry", "avg_entry") and owner is not parent:
+                raise CommandError("entry_owner", "entry 只能在所属容器内排序")
+            if owner is parent and owner.form in ("schedule", "region", "avg"):
                 # Reordering a timeline moves bodies between the existing time
                 # slots. A region reorder keeps each body with its own head.
                 _, original = full_index(doc)
@@ -632,22 +690,26 @@ def apply_command(state: EditorState, command: dict) -> EditorState:
                 _locate(result, node.id)
                 result.revision += 1
                 return result
-            # Convert heads while the node still has a parsable source context.
-            _detach_entry(doc, node)
+            _ordinary_parent(parent)
             owner.children.remove(node)
             _normalise_schedule(doc, owner)
-            # Temporarily attach to a regular root for shell setting edits.
-            doc.root.children.append(node)
-            _attach_entry(doc, parent, node, command.get("entry"))
-            doc.root.children.remove(node)
             position = _position(parent, command)
+            if parent.meta.get('lora'): position = max(1, position)
             _separate(node)
             parent.children.insert(position, node)
             _normalise_schedule(doc, parent)
             _locate(result, node.id)
-        elif kind in ("InsertBlock", "InsertLibraryBlock", "EnableCandidate", "InsertLibraryPrompts"):
+        elif kind in ("InsertBlock", "InsertEntry", "InsertLibraryBlock", "EnableCandidate", "InsertLibraryPrompts"):
             parent = _node(doc, command["parent_id"])
             position = _position(parent, command)
+            if parent.meta.get('lora'): position = max(1, position)
+            if kind == "InsertEntry":
+                if parent.form not in ("schedule", "region", "avg"):
+                    raise CommandError("special_boundary", "只能在 Schedule、Region 或 AVG 容器内新建 entry")
+                if any(key in command for key in ("snapshot", "text", "form")):
+                    raise CommandError("special_boundary", "entry 必须新建，不能由外部 block 转换")
+            else:
+                _ordinary_parent(parent)
             if kind == "EnableCandidate":
                 occurrence = command["occurrence"]
                 matches = [n for n in parent.children if n.meta.get("occurrence") == occurrence]
@@ -660,12 +722,18 @@ def apply_command(state: EditorState, command: dict) -> EditorState:
                     result.check()
                     result.revision += 1
                     return result
-            if "snapshot" in command:
+            if kind == "InsertEntry":
+                source = _fragment("{ }")
+            elif kind == "InsertBlock" and "form" in command:
+                source = _new_container(command["form"])
+            elif "snapshot" in command:
                 source = DocNode.from_json(command["snapshot"])
             else:
                 source = _fragment(command.get("text", "{ }"))
             if kind != "EnableCandidate" and (source.kind != "group" or source.form == "paren"):
                 raise CommandError("invalid_asset", "insertion needs an expanded block snapshot")
+            if source.form in ("schedule_entry", "region_entry", "avg_entry"):
+                raise CommandError("entry_owner", "entry 不能独立插入，请插入完整容器或正文 subblock")
             if kind == "InsertLibraryPrompts":
                 _ordinary_parent(parent)
                 pieces = _flatten(source)
@@ -714,7 +782,7 @@ def apply_command(state: EditorState, command: dict) -> EditorState:
             parent.children[parent.children.index(node)] = part
             _locate(result, part.id)
         elif kind == "UpdateLibraryBlock":
-            if node.kind != 'group' or node.form in ('root', 'paren', 'schedule_entry', 'region_entry'):
+            if node.kind != 'group' or node.form in ('root', 'paren', 'schedule_entry', 'region_entry', 'avg_entry'):
                 raise CommandError('invalid_asset', '请选择完整 Library block')
             parsed = _clone_ids(doc, DocNode.from_json(command['snapshot']))
             if parsed.kind != 'group' or parsed.form == 'paren': raise CommandError('invalid_asset', '需要完整 block 快照')
@@ -754,6 +822,8 @@ def apply_command(state: EditorState, command: dict) -> EditorState:
         elif kind == "EditTextRun":
             ids = command["ids"]
             parent, a, b = _selected(doc, ids)
+            if any(part.meta.get('lora_invocation') for part in parent.children[a:b+1]):
+                raise CommandError('fixed_lora', 'LoRA 调用项不能作为正文编辑')
             if any(n.kind == "group" and n.form != "paren" for n in parent.children[a:b+1]):
                 raise CommandError("invalid_text_run", "TextRun cannot include a child block")
             tree = projection(result)["tree"]

@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from ..diagnostics import Diag, Diagnostics
-from ..ir import Segment, build_segments
+from ..ir import Segment, RenderCtx, render as render_part, build_segments, FULL, num
 from ..parser import Group, Item, parse
 from ..validate import validate
 from . import couple as couple_backend
@@ -64,6 +64,8 @@ def compile_text(
     recover: bool = False,
     ignore_regions: bool = False,
     ignore_group_seeds: bool = False,
+    centralize_loras: bool = False,
+    lora_block_positions=(),
 ) -> CompileResult:
     """Compile PLv3 source into a prompt-control string.
 
@@ -102,9 +104,68 @@ def compile_text(
     if ignore_regions:
         strip_regions(root)
     validate(root, diags, allow_region=(polarity != "negative"), src=text)
-    segments = build_segments(root, seed, diags)
-
     backend = BACKENDS.get(region_mode, couple_backend.render)
-    out = backend(segments, diags)
+    def groups(node):
+        if isinstance(node, Group):
+            yield node
+            if node.settings.avg_weight == 0:
+                return
+            for child in node.children:
+                yield from groups(child)
+        elif isinstance(node, Item):
+            for atom in node.atoms:
+                yield from groups(atom)
+    all_groups = list(groups(root))
+    has_avg = any(g.average for g in all_groups)
+    loras = [] if centralize_loras or has_avg else None
+    if has_avg:
+        random_plan = {}
+        build_segments(root, seed, Diagnostics(), lora_output=[],
+                       lora_block_positions=lora_block_positions, random_plan=random_plan)
+        # A timed region can disappear, revealing an implicit full-image base
+        # that was absent in the full-tree pass. Plan that ambient view too.
+        render_part(root, RenderCtx(seed=seed, diags=Diagnostics(),
+                    segment=Segment(kind='base', key=('base',)), centralize_loras=True,
+                    lora_block_positions=frozenset(lora_block_positions), random_plan=random_plan))
+        # Prompt Control resolves schedules before AVG/COUPLE/AND. Rendering each
+        # active interval first keeps operator scope and renormalises only active
+        # entries, including schedules in their nested content.
+        boundaries = sorted({0.0, 1.0, *(v for g in all_groups if g.settings.schedule
+                                       for v in g.settings.schedule)})
+        pieces, segments = [], []
+        for interval in zip(boundaries, boundaries[1:]):
+            current = build_segments(root, seed, diags, lora_output=loras,
+                                     lora_block_positions=lora_block_positions, time_slice=interval, random_plan=random_plan)
+            segments.extend(current)
+            text = backend(current, diags)
+            if pieces and pieces[-1][0] == text:
+                pieces[-1] = (text, (pieces[-1][1][0], interval[1]))
+            else:
+                pieces.append((text, interval))
+        out = ' '.join(text if interval == FULL else
+                       f'[{text}, :{num(interval[0])},{num(interval[1])}]'
+                       for text, interval in pieces if text)
+        if loras:
+            # Ambient LoRA tokens are copied across alternatives/regions/time
+            # slices. Their provenance collapses those copies, but never two
+            # explicit source invocations (even when names and weights agree).
+            merged = {}
+            for identity, token, interval in loras:
+                merged.setdefault((identity, token), []).append(interval)
+            loras = []
+            for (identity, token), intervals in merged.items():
+                windows = []
+                for start, end in sorted(set(intervals)):
+                    if windows and start <= windows[-1][1]:
+                        windows[-1] = (windows[-1][0], max(windows[-1][1], end))
+                    else:
+                        windows.append((start, end))
+                loras.extend((identity, token, interval) for interval in windows)
+    else:
+        segments = build_segments(root, seed, diags, lora_output=loras, lora_block_positions=lora_block_positions)
+        out = backend(segments, diags)
+    if loras:
+        tail = ' '.join(token if interval == FULL else f'[{token}, :{num(interval[0])},{num(interval[1])}]' for _, token, interval in loras)
+        out = (out + '\n' + tail) if out else tail
 
     return CompileResult(out.strip(), diags.items, segments, root)

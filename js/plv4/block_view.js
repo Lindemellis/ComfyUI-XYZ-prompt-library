@@ -2,8 +2,8 @@ import { element, button, check, menu, report } from './ui.js';
 import { indexTree, isBlock, nameOf } from './details.js';
 import { blockFrame, blockLibraryPath } from './design_adapter.js';
 import { attachInlineAutocomplete } from './inline_input.js';
-import { blockPlacement, nearestBlockBoundary, dropLocation, DropPreview } from './drop_preview.js';
-import { inlineText, inlineOffset, inlinePoint, insertInlineNewline, deleteInlineNewline, syncInlineEnd } from './text_input.js';
+import { blockPlacement, nearestBlockBoundary, dropLocation, DropPreview, isEntry, isContainer, canInsertContainer, canDropBlock } from './drop_preview.js';
+import { inlineText, inlineOffset, inlinePoint, renderInlineEnd } from './text_input.js';
 import { promptDisplay, displayRun, scheduleSource, separatorDisplay, normalizePromptInput, runEnd } from './prompt_text.js';
 
 // A focused TextRun is only a view into the parent session. Its IDs and history
@@ -17,7 +17,9 @@ class RunSession {
     this.range = insertion ? [insertion.at, insertion.at] : [rows[0].span[0], runEnd(rows, owner, parent.text)];
     this.prefix = insertion?.prefix || ''; this.activePrefix = '';
     this.source = parent.text; this.editing = false;
-    this.owner = rows[0]?.parent_id;
+    this.owner = rows[0]?.parent_id || insertion?.owner;
+    const map = indexTree(parent.projection.tree);
+    this.canInsertRegion = canInsertContainer(map.get(this.owner), 'region', map);
     this.display = displayRun(rows, parent.text, this.contentStart, this.range[1]);
   }
   rows() { const map = indexTree(this.parent.projection.tree); return this.ids.map(id => map.get(id)).filter(Boolean); }
@@ -59,7 +61,11 @@ class RunSession {
   }
   subscribe(listener) { return this.parent.subscribe(event => {
     if (!this.editing && this.parent.text !== this.source) {
-      this.host.blockView.closeEditor(); this.host.blockView.render(this.host.context); return;
+      const view = this.host.blockView;
+      const bookmark = view.captureFocus();
+      view.closeEditor(); view.render(this.host.context);
+      if (bookmark && !['Undo', 'Redo', 'LoadDocument'].includes(event.reason)) view.restoreFocus(bookmark);
+      return;
     }
     listener(event);
   }); }
@@ -71,14 +77,6 @@ class RunSession {
 export class BlockView {
   constructor(container, host) {
     this.container = container; this.host = host; this.cache = new Map(); this.inlineEditors = new Set();
-    container.addEventListener('beforeinput', event => {
-      if (!event.cancelable || event.isComposing) return;
-      const field = event.target.closest?.('[data-run-input],[data-empty]');
-      if (field?.contentEditable !== 'true') return;
-      const handled = ['insertParagraph', 'insertLineBreak'].includes(event.inputType) ? insertInlineNewline(field)
-        : ['deleteContentBackward', 'deleteContentForward'].includes(event.inputType) && deleteInlineNewline(field, event.inputType);
-      if (handled) event.preventDefault();
-    });
     XYZPLv4Design.bindInlineInput(container, { capture: target => this.beginInline(target), input: (target, event) => { if (!event.isComposing) this.typeInline(target); }, commit: target => this.finishInline(target) });
     container.addEventListener('compositionend', event => this.typeInline(event.target.closest?.('[data-run-input],[data-empty]') || event.target));
     container.addEventListener('keydown', event => {
@@ -122,62 +120,111 @@ export class BlockView {
     }
     if (root.form === 'root') this.contents(root, this.container, 0);
     else this.container.append(this.block(root, 0));
-    if (root.children.length) {
-      const target = this.context.asset && root.form === 'root' ? root.children[0] : root;
-      this.container.append(button('＋ 添加 block', '添加 block', () => this.host.addBlock(target.id, true), 'small-add'));
-    }
-    if (!root.children.length) this.container.append(button('+ Block', '添加 block', () => this.host.addBlock(root.id, true)));
+    const target = context.asset && root.form === 'root' && root.children.length ? root.children[0] : root;
+    this.container.append(this.addFooter(target));
     this.container.scrollTop = scroll;
     for (const id of this.cache.keys()) if (!map.has(id)) this.cache.delete(id);
   }
+  addFooter(target) {
+    const footer = element('div', 'block-add-footer');
+    const entry = isContainer(target);
+    footer.append(button(entry ? '＋ 添加 entry' : '＋ 添加 block', entry ? '添加 entry' : '添加普通 block',
+      () => this.host.addBlock(target.id, true), 'small-add'));
+    const forms = ['region', 'schedule', 'avg'].filter(form => canInsertContainer(target, form, this.map));
+    if (forms.length) {
+      const labels = { region: 'Region 容器', schedule: 'Schedule 容器', avg: 'AVG 容器' };
+      const toggle = button('▾', '选择添加 block 的类型', () => menu(toggle,
+        [['普通 block', () => this.host.addBlock(target.id, true)],
+          ...forms.map(form => [labels[form], () => this.host.addBlock(target.id, true, form)])]), 'small-add block-add-types');
+      toggle.setAttribute('aria-haspopup', 'menu');
+      toggle.setAttribute('aria-label', '选择添加 block 的类型');
+      footer.append(toggle);
+    }
+    return footer;
+  }
   contents(row, container, depth) {
+    const children = row.children.filter(child => !child.meta?.lora_invocation);
     let run = [];
     const flush = next => { if (!run.length) return; container.append(this.textRun(run, depth, next)); run = []; };
-    for (const [index, child] of row.children.entries()) {
+    for (const [index, child] of children.entries()) {
       if (isBlock(child)) {
         flush(child.id); container.append(this.boundary(row.id, child.id), this.block(child, depth));
-        const next = row.children[index + 1]; if (next && !isBlock(next)) container.append(this.boundary(row.id, next.id));
+        const next = children[index + 1]; if (next && !isBlock(next)) container.append(this.boundary(row.id, next.id));
       }
       else run.push(child);
     }
     flush();
-    if (!['schedule', 'region'].includes(row.form) && !row.children.length) container.append(this.emptyInput(row));
+    if (!['schedule', 'region', 'avg'].includes(row.form) && !children.length) container.append(this.emptyInput(row));
     container.append(this.boundary(row.id));
   }
   block(row, depth) {
     const key = this.signatures.get(row.id);
     const libraryPath = blockLibraryPath(row, this.host.library);
+    const poolAsset = this.host.library.data?.assets?.find(asset => asset.kind === 'folder' && asset.id === row.meta?.pool);
+    const folder = poolAsset ? { name: poolAsset.name, path: this.host.library.path(poolAsset) } : null;
+    const poolLabel = JSON.stringify(folder);
     const cached = this.cache.get(row.id);
-    if (cached?.key === key && cached.depth === depth && cached.libraryPath === libraryPath) {
+    if (cached?.key === key && cached.depth === depth && cached.libraryPath === libraryPath && cached.poolLabel === poolLabel) {
       cached.box.classList.toggle('selected', this.context.session.state.selection.block_id === row.id);
       return cached.box;
     }
     const folded = this.context.folded.has(row.id);
     const libraryRoot = this.context.asset && row.parent_id === this.context.session.projection.tree.id;
-    const box = blockFrame(row, depth, folded, this.context.session.state.selection.block_id, libraryRoot, libraryPath);
+    const box = blockFrame(row, depth, folded, this.context.session.state.selection.block_id, libraryRoot, libraryPath, folder);
+    for (const link of box.querySelectorAll('[data-open-folder]')) link.onclick = event => {
+      event.stopPropagation(); this.host.run(() => this.host.openFolder(link.dataset.openFolder));
+    };
+    const lora = box.querySelector('[data-open-lora]');
+    if (lora) lora.onclick = event => { event.stopPropagation(); this.host.run(() => this.host.openLoraDetails(lora.dataset.openLora)); };
     const fold = box.querySelector('[data-fold]');
     fold.onclick = () => { if (folded) this.context.folded.delete(row.id); else this.context.folded.add(row.id); this.render(this.context); };
     box.querySelector('[data-header-toggle]').onclick = () => this.host.run(() => this.host.command({ type: 'SetEnabled', id: row.id, enabled: !row.enabled }));
-    box.querySelector('[data-detail]').onclick = () => this.host.run(() => this.host.locate(row.id));
+    box.querySelector('[data-detail]').onclick = () => this.host.run(() => this.selectBlock(row.id));
     const sibling = box.querySelector('[data-sibling]');
-    if (sibling) { sibling.title = '添加同级 block'; sibling.onclick = () => this.host.run(() => this.host.addBlock(row.id, false)); }
-    box.querySelector('[data-child]').onclick = () => this.host.run(() => this.host.addBlock(row.id, true));
-    box.querySelector('[data-block-menu]').onclick = e => menu(e.currentTarget, [
-      ['Save', () => this.host.libraryAction('save', row)], ['Delete', () => this.host.command({ type: 'Delete', id: row.id })],
-      ['绑定池', () => this.host.libraryAction('pool', row)],
-    ]);
+    if (sibling) {
+      sibling.title = sibling.ariaLabel = isEntry(row) ? ({ schedule_entry: '添加同级阶段', region_entry: '添加同级区域', avg_entry: '添加同级 AVG entry' }[row.form]) : '添加同级 block';
+      sibling.onclick = () => this.host.run(() => this.host.addBlock(row.id, false));
+    }
+    const child = box.querySelector('[data-child]');
+    child.title = child.ariaLabel = isContainer(row) ? ({ schedule: '添加阶段', region: '添加区域', avg: '添加 AVG entry' }[row.form]) : '添加子 block';
+    child.onclick = () => this.host.run(() => this.host.addBlock(row.id, true));
+    const more = box.querySelector('[data-block-menu]');
+    // Blur can rebuild this header between pointerdown and click. Keep the
+    // text host focused until the menu opens, then commit its blur normally.
+    more.onpointerdown = e => { if (e.button === 0 && this.inline?.element === document.activeElement) e.preventDefault(); };
+    more.onclick = e => {
+      menu(e.currentTarget, this.menuItems(row, libraryRoot));
+      this.inline?.element.blur();
+    };
     const handle = box.querySelector('.plv4-handle'); handle.dataset.dragId = row.id;
-    if (!libraryRoot) handle.onpointerdown = e => this.startDrag(e, row, handle);
+    if (!libraryRoot && row.form !== 'avg_entry') handle.onpointerdown = e => this.startDrag(e, row, handle);
+    if (row.form === 'avg_entry') { handle.disabled = true; handle.hidden = true; }
     const body = box.querySelector('.block-body');
     if (body) {
       this.contents(row, body, depth + 1);
     }
-    box.onclick = e => { e.stopPropagation(); if (!e.target.closest('button,input,[contenteditable],.plv4-handle')) this.host.run(() => this.host.locate(row.id)); };
+    box.onclick = e => { e.stopPropagation(); if (!e.target.closest('button,input,[contenteditable],.plv4-handle')) this.host.run(() => this.selectBlock(row.id)); };
     box.oncontextmenu = e => {
       if (e.target.closest('.plv4-block') !== box || e.target.closest('.plv4-prompt')) return;
       e.preventDefault(); e.stopPropagation(); this.contextMenu(e, row);
     };
-    this.cache.set(row.id, { key, depth, libraryPath, box }); return box;
+    this.cache.set(row.id, { key, depth, libraryPath, poolLabel, box }); return box;
+  }
+  menuItems(row, libraryRoot = false) {
+    const items = [], parent = this.map.get(row.parent_id);
+    for (const [label, child, target] of [['添加同级 Block', false, libraryRoot ? null : parent], ['添加子 Block', true, row]]) {
+      const options = ['schedule', 'region', 'avg'].filter(form => canInsertContainer(target, form, this.map));
+      if (!options.length) continue;
+      items.push([label, [
+        ['普通 Block', () => this.host.addBlock(row.id, child)],
+        ...options.map(form => [{ schedule: 'Schedule 容器', region: 'Region 容器', avg: 'AVG 容器' }[form], () => this.host.addBlock(row.id, child, form)]),
+      ]]);
+    }
+    if (items.length) items.push(['', null]);
+    if (!isEntry(row)) items.push(['Save', () => this.host.libraryAction('save', row)]);
+    items.push(['Delete', () => this.host.command({ type: 'Delete', id: row.id })]);
+    if (!isContainer(row) && !row.meta?.lora) items.push(['绑定池', () => this.host.libraryAction('pool', row)]);
+    return items;
   }
   boundary(parent, before = '', inline = false) {
     const template = document.createElement('template'); template.innerHTML = XYZPLv4Design.boundaryHTML(parent, before, inline);
@@ -191,7 +238,7 @@ export class BlockView {
   }
   clearDrop() { this.container.querySelectorAll('.boundary.drop-active').forEach(slot => slot.classList.remove('drop-active')); }
   showDrop(parent, command, inline = false) { this.clearDrop(); const slot = this.dropBoundary(parent, command, inline); slot?.classList.add('drop-active'); return slot; }
-  dropTarget(x, y, excluded = new Set()) {
+  dropTarget(x, y, excluded = new Set(), moving = null) {
     const hit = document.elementFromPoint(x, y);
     if (!hit || !this.container.contains(hit)) return null;
     const box = hit.closest('[data-block-id]');
@@ -235,6 +282,7 @@ export class BlockView {
       highlight = [...this.container.querySelectorAll('[data-block-id]')].find(n => n.dataset.blockId === parent.id);
     }
     if (!parent || excluded.has(parent.id) || excluded.has(command.before_id) || excluded.has(command.after_id)) return null;
+    if (!canDropBlock(parent, moving)) return null;
     if (placement === 'inside' && !highlight && box) highlight = box;
     const names = []; for (let row = parent; row; row = this.map.get(row.parent_id)) names.unshift(nameOf(row) || (row.form === 'root' ? 'Document' : 'Block'));
     const anchor = this.map.get(command.before_id || command.after_id);
@@ -243,7 +291,7 @@ export class BlockView {
   textRun(rows, depth, next = '') {
     const run = element('div', 'plv4-run'); run.dataset.runIds = rows.map(n => n.id).join(','); run.dataset.depth = depth;
     run.dataset.runInput = ''; run.dataset.runParent = rows[0].parent_id;
-    run.contentEditable = rows.some(row => row.effective) ? 'true' : 'false';
+    run.contentEditable = rows.some(row => row.effective) ? 'plaintext-only' : 'false';
     run.setAttribute('role', 'textbox'); run.setAttribute('aria-multiline', 'true'); run.setAttribute('aria-label', 'Block prompt'); run.spellcheck = false;
     const live = rows.filter(row => row.effective && row.span), lastLive = rows.findLastIndex(row => row.effective);
     let liveIndex = 0;
@@ -272,7 +320,7 @@ export class BlockView {
     const last = live.at(-1), tail = runEnd(rows, this.map.get(rows[0].parent_id), this.context.session.text);
     if (last && tail > last.span[1]) run.append(document.createTextNode(this.context.session.text.slice(last.span[1], tail)));
     run.append(this.boundary(rows[0].parent_id, next, true));
-    syncInlineEnd(run);
+    renderInlineEnd(run);
     run.onclick = e => {
       e.stopPropagation(); if (!getSelection()?.isCollapsed) return;
       const id = e.target.closest?.('[data-prompt-id]')?.dataset.promptId || run.dataset.runParent;
@@ -289,7 +337,8 @@ export class BlockView {
     return field;
   }
   beginInline(element) {
-    if (this.inline?.element === element || element.contentEditable !== 'true') return;
+    if (this.inline?.element === element || element.contentEditable !== 'plaintext-only') return;
+    if (!this.context.session.valid && this.inline?.element.isConnected) { this.inline.element.focus({ preventScroll: true }); return; }
     const previous = this.inline;
     this.inline?.off?.();
     const context = this.context;
@@ -298,12 +347,17 @@ export class BlockView {
     this.inline = active;
     active.ready = (previous?.pending || Promise.resolve()).then(() => context.session.whenIdle()).then(() => {
       if (active.closed || this.context !== context) return null;
+      if (!context.session.valid && previous?.element.isConnected) {
+        active.closed = true; this.inlineEditors.delete(active); this.inline = previous;
+        previous.off = previous.run?.subscribe(() => {}); previous.element.focus({ preventScroll: true });
+        return null;
+      }
       const map = indexTree(context.session.projection.tree); let insertion = null;
       if (element.dataset.empty) {
         const row = map.get(element.dataset.empty); const content = row?.ast?.spans.content;
         if (!content) throw new Error('请先启用该 block');
         const last = row.children.filter(n => n.effective).at(-1);
-        insertion = { at: content[1], prefix: last ? (last.source.trimEnd().endsWith('.') ? ' ' : ', ') : '' };
+        insertion = { at: content[1], owner: row.id, prefix: last ? (last.source.trimEnd().endsWith('.') ? ' ' : ', ') : '' };
       }
       const ids = element.dataset.runIds?.split(',').filter(Boolean) || (element.dataset.prompt ? [element.dataset.prompt] : []);
       active.run = new RunSession(context.session, ids, this.host, insertion);
@@ -315,7 +369,6 @@ export class BlockView {
   }
   typeInline(element) {
     const active = this.inline; if (!active || active.element !== element) return;
-    if (element.childNodes) syncInlineEnd(element);
     const text = normalizePromptInput(inlineText(element)); active.changed = true;
     active.pending = active.pending.then(async () => {
       if (active.closed) return;
@@ -329,14 +382,30 @@ export class BlockView {
   }
   async finishInline(element) {
     const active = this.inline; if (!active || active.element !== element) return;
+    let keepDraft = false;
     try {
       if (active.changed) this.typeInline(element);
       await active.pending;
       if (active.closed) return;
+      // An unfinished construct stays editable in place. Switching to Source
+      // still retires this run through the normal view/navigation lifecycle.
+      if (!active.context.session.valid) { keepDraft = true; return; }
       await active.context.session.commitPool();
       if (this.inline === active) { this.closeEditor(); this.render(active.context); }
     } catch (error) { if (!active.closed) report(error); }
-    finally { active.closed = true; active.off?.(); active.run?.dispose(); this.inlineEditors.delete(active); }
+    finally { if (!keepDraft) { active.closed = true; active.off?.(); active.run?.dispose(); this.inlineEditors.delete(active); } }
+  }
+  async selectBlock(id) {
+    const context = this.context; await this.host.locate(id);
+    if (this.context !== context) return;
+    this.focusInput(id);
+    // Containers have no direct prompt: keep their selection while giving the
+    // IME an actual text host in their first enabled entry.
+    if (!this.container.contains(document.activeElement) || document.activeElement.contentEditable !== 'plaintext-only') {
+      const box = [...this.container.querySelectorAll('[data-block-id]')].find(box => box.dataset.blockId === id);
+      const field = [...(box?.querySelectorAll('[data-run-input],[data-empty]') || [])].find(field => field.contentEditable === 'plaintext-only');
+      field?.focus({ preventScroll: true });
+    }
   }
   captureFocus(field = document.activeElement) {
     if (!this.container.contains(field) || !field.matches('[data-run-input],[data-prompt],[data-empty]')) return null;
@@ -354,7 +423,7 @@ export class BlockView {
   }
   restoreFocus(bookmark) {
     const fields = [...this.container.querySelectorAll('[data-run-input],[data-prompt],[data-empty]')];
-    let field = fields.find(node => node.contentEditable === 'true' && (bookmark.runIds?.length ? node.dataset.runIds?.split(',').some(id => bookmark.runIds.includes(id)) : bookmark.prompt ? node.dataset.prompt === bookmark.prompt : node.dataset.empty === bookmark.empty));
+    let field = fields.find(node => node.contentEditable === 'plaintext-only' && (bookmark.runIds?.length ? node.dataset.runIds?.split(',').some(id => bookmark.runIds.includes(id)) : bookmark.prompt ? node.dataset.prompt === bookmark.prompt : node.dataset.empty === bookmark.empty));
     if (!field) {
       const map = indexTree(this.context.session.projection.tree);
       const parent = bookmark.ancestors.map(id => map.get(id)).find(row => row && (row.form === 'root' || isBlock(row)));
@@ -372,10 +441,10 @@ export class BlockView {
   }
   focusInput(id) {
     const box = [...this.container.querySelectorAll('[data-block-id]')].find(n => n.dataset.blockId === id) || this.container;
-    let field = [...box.querySelectorAll('[data-empty],[data-run-input],[data-prompt]')].filter(n => n.closest('[data-block-id]') === (box === this.container ? null : box) && n.contentEditable === 'true').at(-1);
+    let field = [...box.querySelectorAll('[data-empty],[data-run-input],[data-prompt]')].filter(n => n.closest('[data-block-id]') === (box === this.container ? null : box) && n.contentEditable === 'plaintext-only').at(-1);
     if (!field) {
       const row = indexTree(this.context.session.projection.tree).get(id);
-      if (!row?.effective || ['schedule', 'region'].includes(row.form)) return;
+      if (!row?.effective || ['schedule', 'region', 'avg'].includes(row.form)) return;
       const body = box === this.container ? box : box.querySelector(':scope > .block-content > .block-body');
       if (!body) return;
       field = this.emptyInput(row); body.append(field);
@@ -447,7 +516,7 @@ export class BlockView {
     const move = ev => {
       if (!started && Math.hypot(ev.clientX - e.clientX, ev.clientY - e.clientY) < 5) return;
       started = true; sourceBox.classList.add('dragging'); trackPointer(ev);
-      destination = this.context === context ? this.dropTarget(ev.clientX, ev.clientY, descendants) : null;
+      destination = this.context === context ? this.dropTarget(ev.clientX, ev.clientY, descendants, row) : null;
       const label = destination ? `移动 block · ${dropLocation(destination)}` : '';
       preview.show(destination, label, ev.clientX, ev.clientY);
       const hover = destination?.placement === 'inside' && context.folded.has(destination.parent.id) ? destination.parent.id : null;
@@ -464,7 +533,7 @@ export class BlockView {
       const target = destination; cancel(); if (!target || !started || this.context !== context) return;
       try {
         const revision = await prepared;
-        const entry = ['schedule', 'region'].includes(target.parent.form) ? await this.host.entryTarget(target.parent, target.command) : null;
+        const entry = isContainer(target.parent) ? await this.host.entryTarget(target.parent, target.command, true) : null;
         if (entry === false) return;
         await this.host.command({ type: 'MoveBlock', id: row.id, ...target.command, ...(entry ? { entry } : {}) }, revision);
       } catch (error) { report(error); }

@@ -17,9 +17,11 @@ export function button(text, title, action, cls = '') {
 }
 export function report(error) { toast(error.message || String(error), 'error'); console.error('[PLv4]', error); }
 export function input(value, action, { type = 'text', step = 'any', min, max, title = '' } = {}) {
-  const node = element('input'); node.type = type; node.value = value ?? ''; node.title = title;
-  if (type === 'number') { node.step = step; if (min != null) node.min = min; if (max != null) node.max = max; }
-  node.onchange = () => Promise.resolve().then(() => action(type === 'number' ? (node.value === '' ? null : Number(node.value)) : node.value)).catch(report);
+  const node = element('input'); node.type = type; node.title = title;
+  const numeric = type === 'number' || type === 'range';
+  if (numeric) { node.step = step; if (min != null) node.min = min; if (max != null) node.max = max; }
+  node.value = value ?? '';
+  node.onchange = () => Promise.resolve().then(() => action(numeric ? (node.value === '' ? null : Number(node.value)) : node.value)).catch(report);
   return node;
 }
 export function check(value, action, title = '') {
@@ -28,16 +30,55 @@ export function check(value, action, title = '') {
   node.onchange = () => Promise.resolve().then(() => action(node.checked)).catch(report);
   return node;
 }
+let closeMenu = null;
 export function menu(anchor, items) {
+  closeMenu?.();
   document.querySelectorAll('.plv4-popover').forEach(n => n.remove());
-  const box = element('div', 'plv4 plv4-popover');
-  const close = e => { if (!box.contains(e.target)) { box.remove(); document.removeEventListener('pointerdown', close, true); } };
-  for (const [label, action] of items) box.append(button(label, label, async () => { box.remove(); document.removeEventListener('pointerdown', close, true); await action(); }));
-  document.body.append(box);
+  const box = element('div', 'plv4 plv4-popover'); box.role = 'menu';
+  const outside = e => { if (!box.contains(e.target)) dismiss(); };
+  const dismiss = () => {
+    box.remove(); document.removeEventListener('pointerdown', outside, true);
+    document.removeEventListener('keydown', escape, true);
+    if (closeMenu === dismiss) closeMenu = null;
+  };
+  const escape = e => { if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); dismiss(); anchor.focus?.({ preventScroll: true }); } };
+  closeMenu = dismiss;
+  const fill = (panel, rows) => {
+    let hideChild = () => {};
+    for (const [label, action] of rows) {
+      if (!action) { panel.append(element(label ? 'div' : 'hr', label ? 'plv4-menu-group' : 'plv4-menu-separator', label)); continue; }
+      if (Array.isArray(action)) {
+        const row = element('div', 'plv4-menu-branch');
+        const child = element('div', 'plv4 plv4-popover plv4-submenu'); child.role = 'menu'; child.hidden = true;
+        const trigger = button(label, label, () => show()); trigger.role = 'menuitem';
+        trigger.setAttribute('aria-haspopup', 'menu'); trigger.setAttribute('aria-expanded', 'false');
+        trigger.append(element('span', 'plv4-menu-arrow', '›'));
+        const hide = () => { child.hidden = true; trigger.setAttribute('aria-expanded', 'false'); };
+        const show = () => {
+          hideChild(); hideChild = hide; child.hidden = false; trigger.setAttribute('aria-expanded', 'true');
+          const r = row.getBoundingClientRect(), width = child.offsetWidth;
+          const x = r.right + width <= innerWidth - 8 ? r.right - 1 : r.left - width + 1;
+          child.style.left = `${Math.max(8, Math.min(innerWidth - width - 8, x))}px`;
+          child.style.top = `${Math.max(8, Math.min(innerHeight - child.offsetHeight - 8, r.top))}px`;
+        };
+        row.onpointerenter = show; row.onpointerleave = hide;
+        trigger.onfocus = show;
+        row.onfocusout = e => { if (!row.contains(e.relatedTarget)) hide(); };
+        trigger.onkeydown = e => { if (e.key === 'ArrowRight') { e.preventDefault(); show(); child.querySelector('button')?.focus(); } };
+        child.onkeydown = e => { if (e.key === 'ArrowLeft') { e.preventDefault(); e.stopPropagation(); trigger.focus(); hide(); } };
+        fill(child, action); row.append(trigger, child); panel.append(row);
+      } else {
+        const item = button(label, label, async () => { dismiss(); await action(); }); item.role = 'menuitem';
+        item.onpointerenter = () => hideChild(); panel.append(item);
+      }
+    }
+  };
+  fill(box, items); document.body.append(box);
   const r = anchor.getBoundingClientRect();
-  box.style.left = `${Math.min(innerWidth - box.offsetWidth - 8, Math.max(8, r.right - box.offsetWidth))}px`;
-  box.style.top = `${Math.min(innerHeight - box.offsetHeight - 8, r.bottom + 2)}px`;
-  queueMicrotask(() => document.addEventListener('pointerdown', close, true));
+  box.style.left = `${Math.max(8, Math.min(innerWidth - box.offsetWidth - 8, r.right - box.offsetWidth))}px`;
+  box.style.top = `${Math.max(8, Math.min(innerHeight - box.offsetHeight - 8, r.bottom + 2))}px`;
+  queueMicrotask(() => { if (box.isConnected) { document.addEventListener('pointerdown', outside, true); document.addEventListener('keydown', escape, true); } });
+  return box;
 }
 
 
