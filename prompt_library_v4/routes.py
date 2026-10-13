@@ -16,7 +16,10 @@ def dispatch(operation, body):
     if operation == "command":
         return command_response(state, body["command"])
     if operation == "compile":
-        return dict(ok=True, **compile_document(state, seed=body["seed"], region_mode=body["region_mode"]))
+        result = compile_document(state, seed=body["seed"], region_mode=body["region_mode"])
+        from .mask_resources import metadata
+        result['mask_bundle'] = metadata(result['mask_bundle'])
+        return dict(ok=True, **result)
     raise CommandError("unknown_operation", "unknown document operation")
 
 
@@ -44,6 +47,9 @@ post_compile = handler("compile")
 
 
 def register(server):
+    if getattr(server, '_xyz_plv4_document_registered', False):
+        return
     server.routes.post("/xyz/plv4/document/open")(post_open)
     server.routes.post("/xyz/plv4/document/command")(post_command)
     server.routes.post("/xyz/plv4/document/compile")(post_compile)
+    server._xyz_plv4_document_registered = True

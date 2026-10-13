@@ -20,3 +20,8 @@ export async function attachPromptAutocomplete(element) {
   if (!api || (!immediate && !element.isConnected)) return;
   api.attach(element, { related: true, getDelimiter: () => ', ' });
 }
+
+export async function attachPromptPreview(slot, name) {
+  const api = window.xyzTagAC || await tagacReady();
+  api?.attachPreview?.(slot, name);
+}

@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<title>PLv4 P1 文档一致性检查</title>
+<style>
+  body { margin: 0; background: #151b25; color: #e5eaf2; font: 13px system-ui; }
+  nav { display: flex; gap: 8px; padding: 12px; align-items: center; }
+  button { background: #29364b; color: inherit; border: 1px solid #506584; padding: 6px 12px; cursor: pointer; }
+  main { display: grid; grid-template-columns: 1fr 360px; height: calc(100vh - 100px); }
+  #editor { min-width: 0; }
+  #tree { overflow: auto; white-space: pre-wrap; padding: 12px; border-left: 1px solid #506584; }
+  #status { padding: 0 12px 8px; }
+</style>
+<nav>
+  <strong>P1 文档检查页</strong>
+  <button id="syntax">PLv3</button><button id="block">文档树</button>
+  <button id="undo">撤销</button><button id="redo">重做</button>
+  <span>正式窗口仍以 nested.html 的定稿为准</span>
+</nav>
+<div id="status">加载现有 PromptEditor…</div>
+<main><div id="editor"></div><div id="tree"></div></main>
+<script type="module">
+import { PromptEditor } from '/js/plv3/editor_core.js';
+import { loadMonaco } from '/js/plv3/monaco.js';
+import { DocumentSession } from '/js/plv4/document_session.js';
+import { bindPromptEditor } from '/js/plv4/prompt_editor_binding.js';
+
+const errors = [];
+const report = error => { errors.push(error.message); document.querySelector('#status').textContent = error.message; };
+await loadMonaco();
+const vendor = new URL('/xyz/plv3/monaco/', location.href).href;
+window.MonacoEnvironment.getWorkerUrl = () => URL.createObjectURL(new Blob([
+  'self.MonacoEnvironment={baseUrl:' + JSON.stringify(vendor) + '};importScripts(' + JSON.stringify(vendor + 'vs/base/worker/workerMain.js') + ');',
+], { type: 'text/javascript' }));
+
+// Test fixture standing in for a host node's resolved inputs. No seed UI/storage.
+const nodeInputs = { seed: 42, region_mode: 'couple' };
+const session = await DocumentSession.open({ text: '😀, { a, off, b, { nested }, tail }, end' });
+const pane = new PromptEditor(document.querySelector('#editor'), {
+  syncOnBlur: false, params: () => nodeInputs,
+  onCompiled: result => { window.p1.lastCompiled = result; },
+});
+await pane.init();
+const model = pane.createModel(session.text);
+pane.setModel(model);
+const binding = bindPromptEditor(pane, session, { onError: report });
+window.p1 = { session, pane, binding, model, errors, nodeInputs };
+const update = () => {
+  document.querySelector('#status').textContent = session.valid ? '文档版本 ' + session.revision : '错误原稿已保留；结构命令暂停';
+  document.querySelector('#tree').textContent = JSON.stringify(session.projection, null, 2);
+};
+session.subscribe(update);
+document.querySelector('#syntax').onclick = () => { session.setView('syntax'); pane.focus(); };
+document.querySelector('#block').onclick = () => session.setView('block');
+document.querySelector('#undo').onclick = () => session.undo().catch(report);
+document.querySelector('#redo').onclick = () => session.redo().catch(report);
+pane.editor.addAction({ id: 'plv4.wrap', label: 'PLv4: 将选中内容组成 block', contextMenuGroupId: 'modification',
+  run: () => {
+    const selection = pane.editor.getSelection();
+    session.dispatch({ type: 'WrapSelection', span: [model.getOffsetAt(selection.getStartPosition()), model.getOffsetAt(selection.getEndPosition())] }).catch(report);
+  },
+});
+update();
+pane.scheduleLint();
+</script>
+</html>

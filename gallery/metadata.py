@@ -34,6 +34,10 @@ from PIL.PngImagePlugin import PngInfo
 
 from . import paths as _paths
 from . import video as _video
+if '.' in __package__:
+    from ..prompt_shared.image_metadata import decode_parameters as _decode_plv4, selected_text as _plv4_text
+else:
+    from prompt_shared.image_metadata import decode_parameters as _decode_plv4, selected_text as _plv4_text
 
 
 _KEY_PROMPT = "prompt"          # ComfyUI: API workflow JSON (executable form)
@@ -195,6 +199,26 @@ def read_comfy_metadata(path) -> ComfyMeta:
         if not derived and _KEY_PARAMETERS in chunks:
             derived = _derive_from_parameters(str(chunks[_KEY_PARAMETERS]))
 
+    # Read our parameters extension independently of the legacy whole-source
+    # fallback: a workflow chunk must not hide an explicitly saved snapshot.
+    try:
+        plv4 = _decode_plv4(chunks.get(_KEY_PARAMETERS))
+    except (ValueError, TypeError, RecursionError) as exc:
+        errors.append(f'XYZ PLV4 metadata: {exc}')
+        plv4 = None
+    if plv4 is not None:
+        generation = json.loads(derived.get('generation_data_json') or '{}')
+        generation['plv4'] = plv4
+        derived['generation_data_json'] = json.dumps(generation, ensure_ascii=False, separators=(',', ':'))
+        if generation.get('provider') != 'novelai':
+            # Sampling values may be inferred from workflow or parameters;
+            # PLV4's node seed must never replace the sampler's seed.
+            fallback = _derive_from_parameters(str(chunks.get(_KEY_PARAMETERS) or ''))
+            for key in ('model', 'seed', 'cfg', 'steps', 'sampler', 'scheduler'):
+                if derived.get(key) is None and key in fallback:
+                    derived[key] = fallback[key]
+            derived['positive_prompt'] = _plv4_text(plv4['positive'])
+            derived['negative_prompt'] = _plv4_text(plv4.get('negative'))
     has_workflow = bool(chunks.get(_KEY_WORKFLOW))
 
     tags_raw = chunks.get(_KEY_XYZ_TAGS)

@@ -17,8 +17,9 @@ export async function assetPreview(asset) {
     const data = await libraryRequest('expand', { id: asset.id });
     return previewTags(data.snapshot);
   }
+  if (asset.kind === 'folder') return [];
   const data = await libraryRequest('candidates', { pool: asset.id });
-  const walk = nodes => nodes.flatMap(node => node.kind === 'folder'
+  const walk = nodes => nodes.flatMap(node => node.kind === 'class'
     ? walk(node.children) : previewTags(node.snapshot));
   return walk(data.candidates);
 }

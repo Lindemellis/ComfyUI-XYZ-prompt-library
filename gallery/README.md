@@ -31,6 +31,8 @@ Sort by time, filename, size, or folder (ascending / descending).
 - **Line** — grouped rows (by size / date / first letter).
 - **Detail** — full metadata for a single image (open by clicking an image).
 
+PNG images saved through **PLV4 metadata → XYZ PLV4 Image Metadata → Aaalice Conditional Save Image** offer **Source / Prompt / Plain** in detail, defaulting to Source with highlighting and copy. LoRAs use the merged positive/additional records. Workflow embedding and the original Library are unnecessary. Install Lora Manager and update Aaalice to the PLV4-aware version. **Re-read metadata** refreshes only this file's parser result without rewriting it. See [PLV4 image saving](../prompt_library_v4/README.md#image-source-snapshots-and-xyz-gallery).
+
 ## Videos
 
 `.mp4`, `.webm`, `.mkv`, `.mov` and `.m4v` are indexed alongside images and share the

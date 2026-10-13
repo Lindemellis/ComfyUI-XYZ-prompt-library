@@ -31,13 +31,22 @@ let _focused = null;
 // rebuilds the whole model and blows away that editor's folding, which is exactly the
 // "click away and the other side loses its collapsed groups" bug. Ref-counted: the model
 // outlives any single editor and is disposed only when the last one lets go.
-const _nodeModels = new Map(); // nodeId -> { model, refs }
+const _nodeModels = new Map(); // node object (legacy callers: ID) -> { model, refs }
+
+// A model seeded with Windows line ends would keep CRLF for every Enter and
+// paste; the PLv4 Blocks view cannot place a caret on a blank line whose
+// break contains a CR. Prompt source is always LF.
+function lfModel(monaco, model) {
+  const lf = monaco.editor.EndOfLineSequence?.LF;
+  if (lf != null) model.setEOL?.(lf);
+  return model;
+}
 
 export function acquireNodeModel(monaco, nodeId, initialText) {
-  const key = String(nodeId);
+  const key = typeof nodeId === 'object' ? nodeId : String(nodeId);
   let entry = _nodeModels.get(key);
   if (!entry || entry.model.isDisposed()) {
-    entry = { model: monaco.editor.createModel(initialText ?? '', LANG_ID), refs: 0 };
+    entry = { model: lfModel(monaco, monaco.editor.createModel(initialText ?? '', LANG_ID)), refs: 0 };
     _nodeModels.set(key, entry);
   }
   entry.refs += 1;
@@ -45,7 +54,7 @@ export function acquireNodeModel(monaco, nodeId, initialText) {
 }
 
 export function releaseNodeModel(nodeId) {
-  const key = String(nodeId);
+  const key = typeof nodeId === 'object' ? nodeId : String(nodeId);
   const entry = _nodeModels.get(key);
   if (!entry) return;
   entry.refs -= 1;
@@ -148,7 +157,7 @@ export class PromptEditor {
    */
   constructor(container, {
     params, onCompiled, onAst, onLibrarySynced, onEdited, onBlur,
-    syncOnBlur = true, options = {}, docStore = null,
+    syncOnBlur = false, options = {}, docStore = null,
   } = {}) {
     this.container = container;
     this.params = params || (() => ({}));
@@ -211,12 +220,9 @@ export class PromptEditor {
         const target = _focused;
         if (!target) return;
         try {
-          if (typeof groupId === 'object' && window.xyzPLv4ExpandReference && target.editSession) return await window.xyzPLv4ExpandReference(target, groupId);
-          const { text } = await post('library/expand', {
-            group_id: groupId,
-            preset_id: presetId || null,
-          });
-          if (text) target.replaceRefAtCursor(text);
+          if (groupId && typeof groupId === 'object' && target.editSession) {
+            return await window.xyzPLv4ExpandReference?.(target, groupId);
+          }
         } catch (err) {
           console.warn('[PLv3] could not expand the library block', err);
         }
@@ -327,47 +333,6 @@ export class PromptEditor {
       run: () => this.adjustWeight(-1),
     });
 
-    // Right-click a selection -> it becomes a library group, and the selection is
-    // replaced by a reference to it. Without this the only way into the library is to
-    // create a group in the other window and retype what you already wrote.
-    this.editor.addAction({
-      id: 'plv3.selectionToGroup',
-      label: 'PLv3: Save selection as a library group…',
-      contextMenuGroupId: 'modification',
-      contextMenuOrder: 2,
-      run: () => this.selectionToGroup(),
-    });
-  }
-
-  /** The selection -> a new library group -> a `[path]: { … }` block in its place.
-   *
-   *  Replacing the text is the point: a document never points back at the library except
-   *  through a block header, so a selection left as it was would be a copy that starts
-   *  drifting from the group the moment either is edited. */
-  async selectionToGroup() {
-    const model = this.model();
-    const sel = this.editor?.getSelection();
-    if (!model || !sel || sel.isEmpty()) {
-      toast('Select the part of the prompt you want to save first.', 'error');
-      return;
-    }
-    // Imported here, not at the top: library.js imports this module, and a static cycle
-    // between the two would leave one of them half-initialised at load time.
-    const { libraryWindow } = await import('./library.js');
-    const block = await libraryWindow.saveSelectionAsGroup(model.getValueInRange(sel));
-    if (!block) return;
-
-    // The selection may have moved while the dialog was open (the detail page rewrites
-    // spans). Re-read it, and bail rather than overwrite whatever is there now.
-    const now = this.editor.getSelection();
-    if (!now || !now.equalsRange(sel)) {
-      toast(`Created the group, but the selection moved — the text was left alone.`, 'warn');
-      return;
-    }
-    this.editor.executeEdits('plv3-to-group', [{ range: sel, text: block }]);
-    this.editor.pushUndoStop();
-    this.onEdited();
-    this.scheduleLint();
   }
 
   // --- weight nudging (Ctrl+↑/↓) ---------------------------------------------
@@ -425,7 +390,7 @@ export class PromptEditor {
 
   // --- model ---
   createModel(text) {
-    return this.monaco.editor.createModel(text ?? '', LANG_ID);
+    return lfModel(this.monaco, this.monaco.editor.createModel(text ?? '', LANG_ID));
   }
 
   setModel(model) {
@@ -603,26 +568,9 @@ export class PromptEditor {
     toast(n ? `Replaced ${n} occurrence(s).` : 'Nothing to replace.');
   }
 
-  /** Spec §5.3 — blur-sync: items typed into a `[path]: { … }` block that the library
-   *  group does not have get appended to it. Nothing is ever deleted: "disabled" just
-   *  means "not in the text", which the DB does not store. */
-  async syncLibrary() {
-    const text = this.text();
-    if (!text.includes(']: {')) return; // no library block in sight
-    try {
-      const report = await post('library/sync', { text });
-      // The group just grew. Anyone holding a picture of it — the detail page's
-      // enable/disable list above all — is now looking at a stale library, and an item
-      // it does not know about simply VANISHES when you delete it from the text instead
-      // of moving to "disabled".
-      const changed = (report.blocks || [])
-        .filter((b) => b.found && b.added > 0)
-        .map((b) => b.path);
-      if (changed.length) this.onLibrarySynced(changed);
-    } catch (err) {
-      console.warn('[PLv3] library sync failed', err);
-    }
-  }
+  // Historical API only. V4 pools commit through DocumentSession; compatibility
+  // editors must never write back into a retired V3 personal Library.
+  async syncLibrary() {}
 
   // --- lint ---
   scheduleLint() {

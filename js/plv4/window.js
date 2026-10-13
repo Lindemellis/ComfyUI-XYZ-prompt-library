@@ -1,20 +1,25 @@
 import { PromptEditor, acquireNodeModel, releaseNodeModel } from '../plv3/editor_core.js';
 import { showForm, toast, showConfirm } from '../plv3/ui.js';
 import { bindPromptEditor } from './prompt_editor_binding.js';
-import { NodeSessions, NODE_TYPES } from './host_sessions.js';
+import { NodeSessions, NODE_TYPES, maskBindings } from './host_sessions.js';
 import { WindowShell, element, button, menu, report } from './ui.js';
-import { DetailsPane, indexTree } from './details.js';
+import { DetailsPane, indexTree, isBlock } from './details.js';
 import { BlockView } from './block_view.js';
 import { LibraryPanel } from './library_panel.js';
 import { FolderPage } from './folder_page.js';
 import { libraryRequest } from './asset_client.js';
+import { showLibraryClass } from './library_dialogs.js';
 import './completion.js';
 import { ownHistoryKey, installWorkflowUndoGuard } from './history_shortcuts.js';
-import { showEditorContextMenu, showEditorFind } from '../plv3/text_editing.js';
+import { NativeEditorInput, showEditorContextMenu, showEditorFind } from '../plv3/text_editing.js';
 import { inlineText, inlineOffset, inlinePoint } from './text_input.js';
 import { displayRun } from './prompt_text.js';
 import { blockFindSpans, highlightBlockFindMatch, clearBlockFindHighlight } from './block_find.js';
 import { isEntry, isContainer, canInsertContainer, canDropBlock } from './drop_preview.js';
+import { createRegionModeControl } from './region_mode.js';
+import { MaskLibraryPanel, maskStyles, MASK_EVENT, maskRequest } from './mask_library.js';
+import { closeMaskSelector } from './mask_region.js';
+import { maskIconButton } from './mask_ui.js';
 
 export class PLv4Window {
   constructor(app) { this.app = app; this.sessions = new NodeSessions(app); this.generation = 0; this.visible = false; this.context = null; this.seedNode = null; this.libraryTabs = new Map(); this.closedNodes = new Set(); window.xyzPLv4OpenFolder = id => this.run(() => this.openFolder(id)); }
@@ -33,6 +38,14 @@ export class PLv4Window {
     this.folderNameControl = element('div'); this.folderNameControl.id = 'folder-name-setting'; this.folderNameControl.hidden = true; this.modes.append(this.folderNameControl);
     for (const [mode, label] of [['block', 'Blocks'], ['syntax', 'Source'], ['preview', 'Preview']]) this.modes.append(button(label, label, () => this.setView(mode), `mode plv4-mode-${mode}`));
     const right = element('div', 'modebar-right');
+    this.regionModeControl = createRegionModeControl(this);
+    this.generalSettingsButton = button('⚙', 'General Settings · 当前节点设置', () => this.openGeneralSettings(), 'tiny-button plv4-general-settings');
+    this.generalSettingsButton.setAttribute('aria-label', 'General Settings');
+    this.generalSettingsButton.setAttribute('aria-pressed', 'false');
+    this.generalSettingsButton.onpointerdown = event => { if (event.button === 0) event.preventDefault(); };
+    right.append(this.generalSettingsButton);
+    this.saveNodeButton = button('保存为 Block', '将当前节点的全部内容保存到 Library', () => this.saveNodeAsBlock(), 'outline-button plv4-save-node');
+    right.append(this.saveNodeButton);
     right.append(button('↶', '撤销', () => this.undo(), 'tiny-button'), button('↷', '重做', () => this.redo(), 'tiny-button')); this.modes.append(right);
     this.syntax = element('div', 'plv4-scroll'); this.syntax.style.position = 'relative';
     this.blocks = element('div', 'plv4-scroll plv4-blocks');
@@ -40,11 +53,31 @@ export class PLv4Window {
     this.output = element('div', 'plv4-scroll'); this.status = element('div', 'plv4-status');
     this.shell.center.append(this.tabs, this.modes, this.syntax, this.blocks, this.output);
     this.status.classList.add('window-statusbar'); this.shell.win.el.insertBefore(this.status, this.shell.win.body.nextSibling);
-    this.details = new DetailsPane(this.shell.details, this); this.blockView = new BlockView(this.blocks, this); this.library = new LibraryPanel(this.shell.library, this);
+    maskStyles();
+    const nav=element('div','mask-nav');
+    const libraryHost=element('div','mask-pane'),masksHost=element('div','mask-pane');
+    for(const pane of [libraryHost,masksHost]){pane.style.cssText='display:flex;flex-direction:column;flex:1;min-height:0;overflow:hidden';}
+    masksHost.style.display='none';
+    const switchPane=kind=>{libraryHost.style.display=kind==='library'?'flex':'none';masksHost.style.display=kind==='masks'?'flex':'none';nav.querySelectorAll('button').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.pane===kind)));(kind==='library'?this.library.title:this.masks.title).append(nav);};
+    for(const [kind,icon,title]of [['library','library','Library'],['masks','masks','Mask Library']]){const b=maskIconButton(icon,title,()=>switchPane(kind));b.dataset.pane=kind;nav.append(b);}
+    this.shell.library.append(libraryHost,masksHost);
+    this.details = new DetailsPane(this.shell.details, this); this.blockView = new BlockView(this.blocks, this); this.library = new LibraryPanel(libraryHost, this);this.masks=new MaskLibraryPanel(masksHost);
+    switchPane('library');
+    window.addEventListener(MASK_EVENT,()=>{for(const tab of this.libraryTabs.values()){const session=tab.context?.session;if(session&&JSON.stringify(session.state.doc).includes('mask_library'))session.resolveMasks(maskRequest).catch(report);}});
     this.folderContainer = element('div', 'plv4-scroll notebook'); this.folderContainer.hidden = true; this.shell.center.append(this.folderContainer);
     this.folderPage = new FolderPage(this.folderContainer, this);
+    // ComfyUI's document clipboard handlers do not recognise plaintext-only
+    // fields. Keep native/editor clipboard handling inside this window.
+    for (const type of ['copy', 'cut', 'paste']) this.shell.win.el.addEventListener(type, event => {
+      if (this.visible) event.stopPropagation();
+    });
     const modifier = event => {
-      if (this.visible && this.shell.win.el.contains(event.target) && event.key === 'Shift') event.stopPropagation();
+      if (!this.visible || !this.shell.win.el.contains(event.target)) return;
+      if (event.key === 'Shift') event.stopPropagation();
+      const clipboard = (event.ctrlKey || event.metaKey) && !event.altKey && ['c', 'x', 'v'].includes(event.key.toLowerCase());
+      // Leave Monaco's target key handlers in place. Native fields use the
+      // browser default clipboard action, even when key propagation stops.
+      if (clipboard && !event.target.closest?.('.monaco-editor')) event.stopPropagation();
     };
     window.addEventListener('keydown', modifier, true); window.addEventListener('keyup', modifier, true);
     window.addEventListener('keydown', e => {
@@ -73,7 +106,7 @@ export class PLv4Window {
         else this.run(() => this.openBlockFind(false));
       } else if (ctrl && ['arrowup', 'arrowdown'].includes(key) && this.blocks.contains(e.target)) {
         e.preventDefault(); e.stopImmediatePropagation();
-        this.run(() => this.runTextAction(key === 'arrowup' ? 'plv3.weightUp' : 'plv3.weightDown'));
+        this.queueTextAction(key === 'arrowup' ? 'plv3.weightUp' : 'plv3.weightDown');
       }
     }, true);
   }
@@ -83,20 +116,28 @@ export class PLv4Window {
     const run = (this._transition || Promise.resolve()).then(action);
     this._transition = run.catch(() => {}); return run;
   }
-  open(node = null) { return this.transition(() => this._open(node)); }
-  async _open(node = null) {
+  cancelTabSwitch() { this.tabRequest = null; }
+  open(node = null) { this.cancelTabSwitch(); return this.transition(() => this._open(node)); }
+  async _open(node = null, tabRequest = null) {
     this.build(); await this.shell.designReady; this.sessions.prune();
     node ??= this.context?.node && this.nodes().includes(this.context.node) ? this.context.node : this.nodes()[0];
     if (!node) { this.visible = true; this.shell.win.show(); this.status.textContent = '工作流中暂无 Prompt Library 节点'; return; }
     if (this.context?.asset && !this.context.session.valid) throw new Error('Library block 原稿必须保留一个有效根 block；请先修复');
-    const token = ++this.generation; await this.flushEditor();
+    if (this.context?.node === node && !this.folderContext && this.visible && this.unsubscribe && this.nodes().includes(node)) { this.renderTabs(); return; }
+    const token = ++this.generation;
     const context = await this.sessions.get(node); if (token !== this.generation) return;
+    if (tabRequest && this.tabRequest !== tabRequest) return;
     this.closedNodes.delete(node);
-    this.seedNode = node; await this.activate(context);
+    await this.activate(context, tabRequest);
   }
-  async activate(context) {
+  async activate(context, tabRequest = null) {
     this.build(); await this.shell.designReady;
-    await this.detach(); this.context = context;
+    if (tabRequest && this.tabRequest !== tabRequest) return;
+    await this.detach();
+    if (tabRequest && this.tabRequest !== tabRequest) return;
+    this.context = context;
+    if (!context.node) context.maskBindings = maskBindings(context.session.projection.tree);
+    if (context.node) this.seedNode = context.node;
     this.folderContext = null; this.folderContainer.hidden = true; this.folderContainer.style.display = 'none'; this.modes.style.display = 'flex';
     this.visible = true; this.shell.win.show();
     if (!this.pane) {
@@ -110,11 +151,11 @@ export class PLv4Window {
       this.pane.editor.addAction({ id: 'plv4.locateDetails', label: 'PLv4: 定位详细设置', contextMenuGroupId: 'navigation', run: () => {
         const offset = this.pane.model().getOffsetAt(this.pane.editor.getPosition());
         const rows = [...indexTree(this.context.session.projection.tree).values()].filter(n => n.span && n.span[0] <= offset && n.span[1] >= offset);
-        const row = rows.at(-1); if (row) return this.locate(row.id);
+        const row = rows.at(-1); if (row) return this.locate(row.id, { reveal: true });
       } });
     }
     if (context.node) {
-      this.pane.setModel(acquireNodeModel(this.pane.monaco, context.node.id, context.session.text));
+      this.pane.setModel(acquireNodeModel(this.pane.monaco, context.node, context.session.text));
       this.modelNode = context.node; this.sessions.bind(context, this.pane);
     } else {
       this.libraryModel = this.pane.createModel(context.session.text); this.pane.setModel(this.libraryModel);
@@ -122,19 +163,26 @@ export class PLv4Window {
     }
     if (context.syntaxState) this.pane.editor.restoreViewState(context.syntaxState);
     this.unsubscribe = context.session.subscribe(({ reason }) => this.changed(reason));
-    if (!this.shell.library.hidden || [...indexTree(context.session.projection.tree).values()].some(row => row.meta?.pool)) await this.library.reload();
+    const refreshLibrary = !this.shell.library.hidden || [...indexTree(context.session.projection.tree).values()].some(row => row.meta?.pool);
+    const initialLibrary = refreshLibrary && !this.library.data;
+    if (initialLibrary) await this.library.reload();
     this.renderTabs(); this.renderView(true); this.details.render(context.session); this.pane.scheduleLint();
+    if (refreshLibrary && !initialLibrary) this.library.reload();
   }
   async detach() {
+    closeMaskSelector();for(const controller of this.details?.maskControllers||[])controller.abort();this.details?.maskControllers?.clear();
     this.findBinding?.dispose(); this.findBinding = null;
     if (this.folderContext) { await this.folderPage.whenIdle(); this.folderPage.rememberView(); }
     if (!this.context) return;
     await this.flushEditor(); this.context.scroll = this.blocks.scrollTop; this.context.syntaxState = this.pane?.editor.saveViewState();
     this.unsubscribe?.(); this.unsubscribe = null; this.blockView?.closeEditor();
-    if (this.modelNode) { this.sessions.unbind(this.context, this.pane); this.pane.setModel(null); releaseNodeModel(this.modelNode.id); this.modelNode = null; }
+    if (this.modelNode) { this.sessions.unbind(this.context, this.pane); this.pane.setModel(null); releaseNodeModel(this.modelNode); this.modelNode = null; }
     if (this.libraryModel) { this.libraryBinding.dispose(); this.pane.setModel(null); this.libraryModel.dispose(); this.libraryBinding = null; this.libraryModel = null; }
   }
-  hide() { return this.transition(async () => { await this.detach(); this.library.preview?.close(); this.visible = false; this.generation++; this.shell.win.hide(); }); }
+  hide() {
+    this.cancelTabSwitch(); this.visible = false; this.generation++; this.shell.win.hide();
+    return this.transition(async () => { await this.detach(); this.library.preview?.close(); });
+  }
   async setView(mode) {
     this.findBinding?.dispose(); this.findBinding = null;
     await this.flushEditor(); this.blockView.closeEditor();
@@ -144,15 +192,21 @@ export class PLv4Window {
   }
   changed(reason) {
     if (!this.visible || !this.context) return;
-    if (this.context.asset && !['View', 'LocateDetails', 'SyncPool'].includes(reason)) {
+    if (reason === 'LocateDetails') { this.context.generalSettings = false; this.updateGeneralSettingsButton(); }
+    if (this.context.asset && !['View', 'LocateDetails', 'SyncPool', 'MaskResources'].includes(reason)) {
       this.context.edited = true; this.pinLibraryTab(`block:${this.context.key}`);
+    }
+    if (this.context.asset && this.context.session.valid) {
+      const signature = maskBindings(this.context.session.projection.tree), changed = signature !== this.context.maskBindings;
+      this.context.maskBindings = signature;
+      if (changed && !['View', 'LocateDetails', 'MaskResources'].includes(reason) && signature !== '[]') this.context.session.resolveMasks(maskRequest).catch(report);
     }
     if (reason !== 'LocateDetails') this.renderView(reason === 'View');
     else for (const node of this.blocks.querySelectorAll('[data-block-id],[data-prompt-id]')) {
       const id = node.dataset.blockId || node.dataset.promptId; node.classList.toggle('selected', id === this.context.session.state.selection.node_id || (node.dataset.blockId && id === this.context.session.state.selection.block_id));
     }
     if (reason !== 'View' && !this.shell.details.hidden) this.details.render(this.context.session, {
-      keepOwner: !['LocateDetails', 'InsertBlock', 'InsertEntry', 'InsertLora', 'InsertLibraryBlock', 'InsertLibraryPrompts', 'WrapSelection', 'CreateAsBlock', 'MoveBlock', 'LoadDocument'].includes(reason),
+      keepOwner: !['LocateDetails', 'InsertBlock', 'InsertEntry', 'InsertLora', 'InsertLibraryBlock', 'InsertLibraryPrompts', 'WrapSelection', 'CreateAsBlock', 'MoveBlock', 'LoadDocument', 'SaveLibrary'].includes(reason),
     });
     if (this.findBinding && this.context.session.view === 'block' && this.pane.editor.getContribution('editor.contrib.findController').getState().isRevealed) {
       this.findBinding.refreshScope(); this.showBlockMatch(this.pane.editor.getSelection());
@@ -162,6 +216,9 @@ export class PLv4Window {
     this.tabNodes ??= new Map(); const rendered = [];
     this.shell.center.dataset.editorSource = this.folderContext ? 'library-folder' : this.context?.asset ? 'library-block' : 'workflow';
     this.folderNameControl.hidden = !this.folderContext;
+    this.saveNodeButton.hidden = !!this.folderContext || !this.context?.node;
+    this.regionModeControl.update();
+    this.updateGeneralSettingsButton();
     for (const mode of this.modes.querySelectorAll('.mode')) mode.hidden = !!this.folderContext;
     this.shell.win.bar.querySelector('[title="展开 / 收起 Details"]').disabled = !!this.folderContext;
     if (this.folderContext && this.folderPage.asset) {
@@ -174,6 +231,8 @@ export class PLv4Window {
     this.shell.center.classList.toggle('plv4-library-context', !!(this.folderContext || this.context?.asset));
     let active;
     for (const tab of this.tabEntries()) {
+      const pending = this.tabRequest?.tab;
+      if (pending) tab.active = tab.kind === pending.kind && (tab.kind === 'node' ? tab.node === pending.node : tab.kind === 'folder' ? tab.id === pending.id : tab.context === pending.context);
       const key = `${tab.kind}:${tab.id}`;
       let node = this.tabNodes.get(key);
       if (!node) {
@@ -218,12 +277,21 @@ export class PLv4Window {
       ...[...this.libraryTabs.values()].map(tab => {
         const name = tab.kind === 'folder' ? tab.name : tab.context.name;
         const label = tab.kind === 'folder' ? tab.labelName : tab.context.asset.name || name;
-        return { ...tab, id: tab.kind === 'folder' ? tab.id : tab.context.key, label: `${tab.kind === 'folder' ? '▱' : '▤'} ${label}`, title: `LIBRARY ${tab.kind.toUpperCase()} · ${name}`, active: tab.kind === 'folder' ? this.folderContext === tab.id : !this.folderContext && this.context === tab.context };
+        return { ...tab, id: tab.kind === 'folder' ? tab.id : tab.context.key, label: `${tab.kind === 'folder' ? (tab.assetKind === 'class' ? '◇' : '▱') : '▤'} ${label}`, title: `LIBRARY ${(tab.assetKind || tab.kind).toUpperCase()} · ${name}`, active: tab.kind === 'folder' ? this.folderContext === tab.id : !this.folderContext && this.context === tab.context };
       }),
     ];
   }
-  selectTab(tab) { return tab.kind === 'node' ? this.open(tab.node) : tab.kind === 'folder' ? this.openFolder(tab.id) : this.openLibrary(tab.context); }
-  closeTab(tab) { return this.transition(async () => {
+  selectTab(tab) {
+    const request = this.tabRequest = { tab };
+    this.renderTabs();
+    return this.transition(async () => {
+      if (this.tabRequest !== request) return;
+      if (tab.kind === 'node') await this._open(tab.node, request);
+      else if (tab.kind === 'folder') await this._openFolder(tab.id);
+      else await this._openLibrary(tab.context);
+    }).finally(() => { if (this.tabRequest === request) { this.tabRequest = null; this.renderTabs(); } });
+  }
+  closeTab(tab) { this.cancelTabSwitch(); return this.transition(async () => {
     const entries = this.tabEntries(), index = entries.findIndex(entry => entry.kind === tab.kind && entry.id === tab.id);
     if (index < 0) return;
     const active = entries[index].active;
@@ -246,14 +314,34 @@ export class PLv4Window {
     this.blocks.style.display = 'block'; this.syntax.style.display = this.output.style.display = 'none';
     this.details.render(null); this.renderTabs(); this.status.textContent = message;
   }
+  removeLibraryAssets(ids) { return this.transition(async () => {
+    const active = ids.has(this.folderContext) || ids.has(this.context?.asset?.id);
+    if (active) { await this.detach(); this.context = null; this.folderContext = null; }
+    for (const [key, tab] of this.libraryTabs) {
+      if (ids.has(tab.kind === 'folder' ? tab.id : tab.context?.asset?.id)) this.libraryTabs.delete(key);
+    }
+    for (const [key, context] of this.library.contexts) {
+      if (ids.has(context.asset.id)) { context.session.dispose(); this.library.contexts.delete(key); }
+    }
+    for (const id of ids) { this.folderPage.histories.delete(id); this.folderPage.views.delete(id); }
+    if (active) {
+      this.folderPage.asset = null;
+      const next = this.tabEntries()[0];
+      if (next?.kind === 'node') await this._open(next.node);
+      else if (next?.kind === 'folder') await this._openFolder(next.id);
+      else if (next) await this._openLibrary(next.context);
+      else this.clearPage('请选择 Library 内容或打开节点。');
+    } else this.renderTabs();
+  }); }
   beginGraphRestore() {
+    this.cancelTabSwitch();
     this.graphEpoch = (this.graphEpoch || 0) + 1;
     this._graphRestoring = true;
     return this.transition(async () => {
       const identity = node => node && ({ id: String(node.id), type: node.comfyClass });
       const context = this.context;
       this._graphRestore = { visible: this.visible, node: identity(context?.node), seed: identity(this.seedNode),
-        view: context?.session.view, folded: new Set(context?.folded), focus: context?.focus, scroll: this.blocks?.scrollTop ?? context?.scroll,
+        view: context?.session.view, generalSettings: context?.generalSettings, folded: new Set(context?.folded), focus: context?.focus, scroll: this.blocks?.scrollTop ?? context?.scroll,
         syntaxState: this.pane?.editor?.saveViewState(), closed: [...this.closedNodes].map(identity) };
       // Release the old model before replacement nodes acquire a model with the
       // same ID. Never carry the old editing document into restored widget values.
@@ -273,7 +361,7 @@ export class PLv4Window {
       const node = match(saved.node) || this.nodes().find(node => !this.closedNodes.has(node));
       if (!node) { this.clearPage('当前工作流中没有打开的 Prompt Library 节点。'); return; }
       const context = await this.sessions.get(node);
-      context.session.view = saved.view || 'block'; context.folded = saved.folded; context.focus = saved.focus;
+      context.session.view = saved.view || 'block'; context.generalSettings = saved.generalSettings; context.folded = saved.folded; context.focus = saved.focus;
       context.scroll = saved.scroll || 0; context.syntaxState = saved.syntaxState;
       this.closedNodes.delete(node); this.seedNode = node; await this.activate(context);
     } finally { this._graphRestoring = false; }
@@ -305,13 +393,29 @@ export class PLv4Window {
     } catch (error) { if (context === this.context && token === this.previewToken) this.output.replaceChildren(element('div', 'plv4-empty plv4-error', error.message)); }
   }
   async inputs() { if (!this.seedNode) throw new Error('请选择工作流节点，以使用其 seed 输入'); return this.sessions.inputs(this.seedNode); }
-  async flushEditor(syncPool = true) { await this.folderPage?.whenIdle(); await this.blockView?.flush(); await this.context?.session.whenIdle(); if (syncPool) await this.context?.session.commitPool(); }
-  async command(command, revision) {
-    if (!this.context) throw new Error('请先选择节点');
-    await this.flushEditor(!(command.type === 'SetMetadata' && Object.hasOwn(command.patch || {}, 'pool'))); if (command.type !== 'LocateDetails') this.blockView.closeEditor();
-    return this.context.session.dispatch(command, revision ?? this.context.session.revision);
+  async flushEditor(syncPool = true, waitCommands = true) { const context = this.context; if (waitCommands) await this._commandQueue; await this.folderPage?.whenIdle(); await this.blockView?.flush(); await context?.session.flushDrafts(); await context?.session.whenIdle(); if (syncPool) await context?.session.commitPool(); }
+  command(command, revision) {
+    const context = this.context;
+    if (!context) return Promise.reject(new Error('请先选择节点'));
+    const run = (this._commandQueue || Promise.resolve()).then(async () => {
+      if (this.context === context) {
+        await this.flushEditor(!(command.type === 'SetMetadata' && Object.hasOwn(command.patch || {}, 'pool')), false);
+        if (command.type !== 'LocateDetails') this.blockView.closeEditor();
+      } else {
+        await context.session.flushDrafts(); await context.session.whenIdle(); await context.session.commitPool();
+      }
+      return context.session.dispatch(command, revision ?? context.session.revision);
+    });
+    this._commandQueue = run.catch(() => {}); return run;
   }
   run(action) { return Promise.resolve().then(action).catch(report); }
+  // Keyboard text actions read the DOM selection and map it onto the source.
+  // A repeated Ctrl+Up started before the previous edit re-rendered would map
+  // stale offsets onto the new text, so every keyboard action runs in order.
+  queueTextAction(id) {
+    const run = (this._textAction || Promise.resolve()).then(() => this.runTextAction(id)).catch(report);
+    this._textAction = run; return run;
+  }
   refreshLibraryBindings() {
     if (!this.visible || !this.context) return;
     if (this.context.session.view === 'block') this.blockView.render(this.context);
@@ -362,7 +466,46 @@ export class PLv4Window {
       }
     }
     if (span.some(at => at == null)) throw new Error('请先输入或选择 prompt');
-    return { context, span, row: row && map.get(row.id), bookmark, copied, offsets };
+    return { context, span, row: row && map.get(row.id), bookmark, copied, offsets, field };
+  }
+  nativeInput(event, field) {
+    if (this.applyingNativeEdit || event.defaultPrevented || !event.cancelable || event.isComposing || event.inputType !== 'insertText' || !event.data || field.contentEditable !== 'plaintext-only') return;
+    this.nativeEdit(event, field, 'type', { text: event.data });
+  }
+  nativeEdit(event, field, command, args = null) {
+    const selection = getSelection();
+    if (!selection?.rangeCount || !field.contains(selection.anchorNode) || !field.contains(selection.focusNode)) return;
+    this.nativeEditorInput ||= new NativeEditorInput(this.pane);
+    const before = inlineText(field);
+    const result = this.nativeEditorInput.edit(field, before, inlineOffset(field, selection.anchorNode, selection.anchorOffset), inlineOffset(field, selection.focusNode, selection.focusOffset), command, args);
+    event.preventDefault();
+    this.applyNativeEdit(field, before, result);
+  }
+  applyNativeEdit(field, before, result) {
+    const selection = getSelection();
+    if (result.text !== before) {
+      let start = 0, end = before.length, nextEnd = result.text.length;
+      while (start < end && start < nextEnd && before[start] === result.text[start]) start++;
+      while (end > start && nextEnd > start && before[end - 1] === result.text[nextEnd - 1]) { end--; nextEnd--; }
+      const range = document.createRange(); range.setStart(...inlinePoint(field, start)); range.setEnd(...inlinePoint(field, end));
+      selection.removeAllRanges(); selection.addRange(range);
+      this.applyingNativeEdit = true;
+      try { document.execCommand('insertText', false, result.text.slice(start, nextEnd)); }
+      finally { this.applyingNativeEdit = false; }
+    }
+    selection.setBaseAndExtent(...inlinePoint(field, result.anchor), ...inlinePoint(field, result.focus));
+  }
+  nativeKey(event) {
+    if (event.isComposing || event.keyCode === 229) return;
+    if (event.key === 'Tab' && !event.ctrlKey && !event.metaKey && !event.altKey) {
+      this.nativeEdit(event, event.target, event.shiftKey ? 'outdent' : 'tab');
+      return;
+    }
+    if (!event.ctrlKey && !event.metaKey && !event.altKey) return;
+    this.nativeEditorInput ||= new NativeEditorInput(this.pane);
+    const id = this.nativeEditorInput.actionForKey(event);
+    if (!id || ['undo', 'redo', 'editor.action.clipboardCopyAction', 'editor.action.clipboardCutAction', 'editor.action.clipboardPasteAction', 'editor.action.selectAll', 'editor.action.quickCommand'].includes(id)) return;
+    event.preventDefault(); event.stopImmediatePropagation(); this.queueTextAction(id);
   }
   setTextSelection(span) {
     const model = this.pane.model();
@@ -379,15 +522,45 @@ export class PLv4Window {
     return this.command(exact ? { type: 'WrapSelection', ids: [exact.id] } : { type: 'CreateAsBlock', span });
   }
   async runTextAction(id, target = null) {
+    // Text-only actions edit the focused native draft too. They must not flush
+    // Settings merely to map a caret onto the committed document.
+    if (!target && ((!id.startsWith('plv3.') && !id.startsWith('plv4.')) || ['plv3.weightUp', 'plv3.weightDown'].includes(id))) {
+      const field = document.activeElement, selection = getSelection();
+      if (field?.matches?.('[data-run-input],[data-empty]') && this.blocks.contains(field) && selection?.rangeCount && field.contains(selection.anchorNode) && field.contains(selection.focusNode)) {
+        this.nativeEditorInput ||= new NativeEditorInput(this.pane);
+        if (id.startsWith('plv3.') || this.nativeEditorInput.editor.getAction(id)) {
+          const before = inlineText(field), context = this.context;
+          const result = await this.nativeEditorInput.action(field, before, inlineOffset(field, selection.anchorNode, selection.anchorOffset), inlineOffset(field, selection.focusNode, selection.focusOffset), id);
+          if (result && this.context === context && field.isConnected && inlineText(field) === before) this.applyNativeEdit(field, before, result);
+          return;
+        }
+      }
+    }
     target ||= await this.textTarget();
     if (target.context !== this.context) return;
     if (id === 'plv3.createAsBlock' || id === 'plv4.wrapSelection') return this.createAsBlock(target);
     if (['plv3.findText', 'plv3.replaceText', 'actions.find', 'editor.action.startFindReplaceAction'].includes(id)) return this.openBlockFind(id === 'plv3.replaceText' || id === 'editor.action.startFindReplaceAction', target);
+    if (target.field && target.bookmark && !id.startsWith('plv3.') && !id.startsWith('plv4.')) {
+      this.nativeEditorInput ||= new NativeEditorInput(this.pane);
+      if (this.nativeEditorInput.editor.getAction(id)) {
+        this.blockView.restoreFocus(target.bookmark);
+        const field = document.activeElement, before = inlineText(field);
+        const selection = getSelection();
+        const result = await this.nativeEditorInput.action(field, before, inlineOffset(field, selection.anchorNode, selection.anchorOffset), inlineOffset(field, selection.focusNode, selection.focusOffset), id);
+        if (this.context === target.context && field.isConnected && inlineText(field) === before) this.applyNativeEdit(field, before, result);
+        return;
+      }
+    }
     this.setTextSelection(target.span);
     this.blockView.closeEditor();
     const action = this.pane.editor.getAction(id);
     if (action) await action.run(); else this.pane.editor.trigger('block-ui', id, null);
-    await this.context.session.whenIdle();
+    await this.pane.flushDraft?.();
+    await target.context.session.whenIdle();
+    if (this.context === target.context && target.bookmark && this.context.session.view === 'block') {
+      const model = this.pane.model(), selection = this.pane.editor.getSelection();
+      this.blockView.restoreTextSelection([model.getOffsetAt(selection.getStartPosition()), model.getOffsetAt(selection.getEndPosition())]);
+    }
   }
   async textContextMenu(event, row) {
     const target = await this.textTarget(row);
@@ -409,7 +582,7 @@ export class PLv4Window {
     showEditorContextMenu(this.pane, { x: event.clientX, y: event.clientY }, action => ({
       enabled: ids.has(action.id) ? action.id === 'undo' ? this.context.session.canUndo : action.id === 'redo' ? this.context.session.canRedo : ['editor.action.clipboardCopyAction', 'editor.action.clipboardCutAction'].includes(action.id) ? !!target.copied : true : action.enabled,
       run: () => { invoked = true; return this.run(() => ids.has(action.id) ? native(action.id) : this.runTextAction(action.id, target)); },
-    }), () => { if (!invoked && target.bookmark && this.context === target.context) this.run(async () => { await this.flushEditor(false); this.blockView.restoreFocus(target.bookmark); }); });
+    }), () => { if (!invoked && target.bookmark && this.context === target.context) this.run(async () => { await this.flushEditor(false); this.blockView.restoreFocus(target.bookmark); }); }, this.shell.center);
   }
   async openBlockFind(replace, target = null) {
     target ||= await this.textTarget();
@@ -429,6 +602,14 @@ export class PLv4Window {
           this.pane.monaco.Range.fromPositions(model.getPositionAt(start), model.getPositionAt(end)));
       },
     });
+    // Replace in Blocks is an explicit document command from the borrowed
+    // hidden model, rather than typing in the Source field.
+    const binding = this.findBinding, model = this.pane.model();
+    const edits = model.onDidChangeContent(() => {
+      if (this.findBinding === binding && model.getValue() !== this.context.session.text) this.pane.flushDraft?.().catch(report);
+    });
+    const dispose = binding.dispose;
+    binding.dispose = () => { edits.dispose(); dispose(); };
   }
   showBlockMatch(selection) {
     clearBlockFindHighlight();
@@ -477,15 +658,38 @@ export class PLv4Window {
     }
     return result;
   }
-  async locate(id) { await this.command({ type: 'LocateDetails', id }); this.toggleDetails(true); }
-  toggleDetails(force) { this.shell.toggle('details', force); this.details.render(this.context?.session); }
+  async locate(id, { reveal = false } = {}) {
+    const general = this.context?.generalSettings;
+    if (this.context) this.context.generalSettings = false;
+    this.updateGeneralSettingsButton();
+    const hidden = this.shell.details.hidden;
+    if (hidden && reveal) this.shell.toggle('details', true);
+    if (this.context?.session.state.selection.node_id === id) { if (general || (hidden && reveal)) this.details.render(this.context.session); return; }
+    this.context?.session.locate(id);
+  }
+  updateGeneralSettingsButton() {
+    if (!this.generalSettingsButton) return;
+    this.generalSettingsButton.hidden = !this.context?.node?.comfyClass?.includes('Library V4') || !!this.folderContext;
+    this.generalSettingsButton.setAttribute('aria-pressed', String(!!this.context?.generalSettings && !this.shell.details.hidden));
+  }
+  async openGeneralSettings() {
+    const context = this.context;
+    if (!context?.node?.comfyClass?.includes('Library V4') || this.folderContext) return;
+    await this.flushEditor();
+    if (!this.visible || this.context !== context || this.folderContext) return;
+    context.generalSettings = true;
+    this.shell.toggle('details', true); this.details.render(context.session); this.updateGeneralSettingsButton();
+  }
+  toggleDetails(force) { this.shell.toggle('details', force); this.details.render(this.context?.session); this.updateGeneralSettingsButton(); }
   async addBlock(id, child, form = null) {
+    const context = this.context, selectionEpoch = context.session.selectionEpoch;
     const map = indexTree(this.context.session.projection.tree); const row = map.get(id);
     const parent = child ? row : map.get(row.parent_id); const target = { parent_id: parent.id, ...(child ? { edge: 'end' } : { after_id: row.id }) };
     if (form && !canInsertContainer(parent, form, map)) throw new Error('此处不能创建该类型的容器');
     const entry = isContainer(parent) ? await this.entryTarget(parent, target, true) : null; if (entry === false) return;
     const result = await this.command({ type: entry ? 'InsertEntry' : 'InsertBlock', ...target,
       ...(entry ? { entry } : form ? { form } : { text: '{ }' }) });
+    if (this.context !== context || context.session.selectionEpoch !== selectionEpoch) return result;
     const inserted = indexTree(this.context.session.projection.tree).get(result.state.selection.node_id);
     const focus = isContainer(inserted) ? inserted.children[0].id : result.state.selection.node_id;
     await this.locate(focus);
@@ -547,15 +751,17 @@ export class PLv4Window {
   }
   async _openFolder(id, permanent = false) {
     this.build(); await this.shell.designReady;
+    const target = this.library.data?.assets.find(asset => asset.id === id) || await libraryRequest('get', { id });
+    if (target.kind === 'folder') return this.library.openAsset(target);
     if (this.context?.asset && !this.context.session.valid) throw new Error('请先修复当前 Library block 原稿');
     await this.flushEditor(); await this.detach(); this.context = null; this.folderContext = null;
     await this.folderPage.open(id); this.folderContext = id;
-    this.registerLibraryTab({ kind: 'folder', id, name: this.library.path(this.folderPage.asset), labelName: this.folderPage.asset.name }, permanent);
+    this.registerLibraryTab({ kind: 'folder', id, name: this.library.path(this.folderPage.asset), labelName: this.folderPage.asset.name, assetKind: this.folderPage.asset.kind }, permanent);
     this.visible = true; this.shell.win.show(); this.folderContainer.hidden = false; this.folderContainer.style.display = 'block';
     this.folderPage.restoreView();
     this.syntax.style.display = this.blocks.style.display = this.output.style.display = 'none'; this.modes.style.display = 'flex';
     this.shell.toggle('details', false);
-    this.details.render(null); this.renderTabs(); this.status.textContent = 'Folder 池 · 修改即时保存';
+    this.details.render(null); this.renderTabs(); this.status.textContent = `${this.folderPage.asset.kind === 'class' ? 'Class 池' : 'Folder'} · 修改即时保存`;
   }
   async libraryAction(action, row) {
     await this.flushEditor(action === 'save'); if (!this.context) throw new Error('请先选择 block');
@@ -563,24 +769,34 @@ export class PLv4Window {
     row = indexTree(this.context.session.projection.tree).get(row.id) || row;
     if (action === 'save') return this.saveBlock(row);
     if (row.form === 'root') throw new Error('请选择一个 block');
-    if (isContainer(row)) throw new Error('Schedule / Region / AVG 容器不能绑定 Folder');
-    if (row.meta?.lora) throw new Error('LoRA 的触发词 Folder 为固定绑定');
+    if (isContainer(row)) throw new Error('Schedule / Region / AVG 容器不能绑定 Class');
+    if (row.meta?.lora) throw new Error('LoRA 的触发词 Class 为固定绑定');
     await this.library.reload();
-    const folders = this.library.data.assets.filter(a => a.kind === 'folder');
-    const result = await showForm('绑定池', [{ key: 'id', label: 'Folder', value: row.meta?.pool || '', options: [{ value: '', label: '不绑定' }, ...folders.map(a => ({ value: a.id, label: this.library.path(a) }))] }]);
+    const result = await showLibraryClass(row.meta?.pool || '', this.library.data.assets);
     if (result) return this.command({ type: 'SetMetadata', id: row.id, patch: { pool: result.id || null } });
   }
 
-  async saveBlock(row) {
-    await this.flushEditor(); row = indexTree(this.context.session.projection.tree).get(row.id) || row;
+  async saveNodeAsBlock() {
+    if (!this.context?.node || this.folderContext) throw new Error('请选择工作流节点');
+    const context = this.context;
+    await this.flushEditor();
+    if (this.context !== context || this.folderContext) throw new Error('当前标签已切换，请重新保存');
+    const root = context.session.projection.tree;
+    const row = root.children.length === 1 && isBlock(root.children[0]) ? root.children[0] : root;
+    return this.saveBlock(row, { wholeNode: true });
+  }
+  async saveBlock(row, { wholeNode = false } = {}) {
+    const context = this.context;
+    await this.flushEditor(); row = indexTree(context.session.projection.tree).get(row.id) || row;
     if (isEntry(row)) throw new Error('entry 不能单独保存，请保存完整容器或正文 subblock');
-    if (row.form === 'root') return this.saveDocument();
+    if (row.form === 'root' && !wholeNode) return this.saveDocument();
     await this.library.reload(); const source = row.meta?.source;
     const linked = source?.kind === 'block' && this.library.data.assets.some(a => a.id === source.id);
     const modes = linked ? [{ value: 'overwrite', label: '覆盖来源' }, { value: 'new', label: '另存为新 block' }] : [{ value: 'new', label: '保存为新 block' }];
     const folder = linked ? this.library.data.assets.find(a => a.id === source.id).folder_id : '';
-    const result = await showForm('保存 block', [{ key: 'mode', label: '保存方式', value: linked ? 'overwrite' : 'new', options: modes }, { key: 'name', label: '名称', value: row.meta?.name || this.context.name || 'Block' }, { key: 'folder', label: '位置', value: folder || '', options: this.library.folderOptions() }]); if (!result) return;
-    const response = await this.command({ type: 'SaveLibrary', id: row.id, name: result.name, folder_id: result.folder || null, ...(linked && result.mode === 'overwrite' ? { asset_id: source.id, version: source.version } : {}) });
+    const result = await showForm('保存 block', [{ key: 'mode', label: '保存方式', value: linked ? 'overwrite' : 'new', options: modes }, { key: 'name', label: '名称', value: row.meta?.name || context.name || context.node?.title || 'Block' }, { key: 'folder', label: '位置', value: folder || '', options: this.library.folderOptions() }]); if (!result) return;
+    if (this.context !== context || this.folderContext) throw new Error('当前标签已切换，请重新保存');
+    const response = await this.command({ type: 'SaveLibrary', id: row.id, ...(wholeNode ? { whole_block: true } : {}), name: result.name, folder_id: result.folder || null, ...(linked && result.mode === 'overwrite' ? { asset_id: source.id, version: source.version } : {}) });
     if (this.context.asset && row.id === this.context.session.state.doc.root.children[0].id) {
       this.context.asset = response.asset; this.context.name = response.asset.path; this.context.savedRevision = this.context.session.revision; this.renderTabs();
     }

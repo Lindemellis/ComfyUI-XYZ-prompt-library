@@ -94,8 +94,28 @@ def normalise_metadata(doc: Document):
     from .lora_block import normalise
     normalise(doc)
     for node in doc.root.walk():
+        if node.form != 'region':
+            node.meta.pop('region_enabled', None)
         if node.form in ('schedule', 'region', 'avg'):
             node.meta.pop('pool', None)
+
+
+def lf(value):
+    """Windows line ends become plain newlines. A CR left in the source sits in
+    the Blocks view's native text as an invisible character: clicks and arrow
+    keys cannot land on a blank line whose break is `CR LF` + `LF` (Source
+    pasted from Windows next to an Enter typed in Blocks)."""
+    return value.replace("\r\n", "\n").replace("\r", "\n") if isinstance(value, str) else value
+
+
+def normalise_newlines(doc: Document) -> Document:
+    for node in doc.root.walk():
+        for key in ("raw", "sep", "open", "lead", "close", "header"):
+            value = getattr(node, key, None)
+            if isinstance(value, str) and "\r" in value:
+                setattr(node, key, lf(value))
+    doc.draft = lf(doc.draft)
+    return doc
 
 
 def refresh_document(doc: Document) -> Document:
@@ -141,14 +161,14 @@ class EditorState:
     def create(cls, text: str | None = None, doc: dict | None = None, scope: str = "document"):
         if scope not in ("document", "block"):
             raise CommandError("invalid_scope", "unknown editing scope")
-        state = cls(Document.from_json(doc) if doc else from_text("", recover=False), scope=scope)
+        state = cls(normalise_newlines(Document.from_json(doc)) if doc else from_text("", recover=False), scope=scope)
         # With a supplied snapshot the document wins unless text was explicitly supplied.
         state.replace_text(state.text if text is None else text)
         return state
 
     @classmethod
     def from_json(cls, value: dict):
-        state = cls(Document.from_json(value["doc"]), int(value["revision"]),
+        state = cls(normalise_newlines(Document.from_json(value["doc"])), int(value["revision"]),
                     deepcopy(value.get("selection", {})), value.get("scope", "document"))
         if state.revision < 0 or state.scope not in ("document", "block"):
             raise CommandError("invalid_state", "invalid revision or editing scope")
@@ -157,7 +177,7 @@ class EditorState:
             raise CommandError("invalid_state", "document IDs must be unique")
         state.doc.next_id = max(state.doc.next_id, 1 + max(
             (int(i[1:]) for i in ids if i.startswith("i") and i[1:].isdigit()), default=0))
-        if "text" in value and state.text != value["text"]:
+        if "text" in value and state.text != lf(value["text"]):
             raise CommandError("invalid_state", "text differs from the document projection")
         normalise_metadata(state.doc)
         if state.valid:
@@ -167,6 +187,7 @@ class EditorState:
     def replace_text(self, text: str):
         if not isinstance(text, str):
             raise CommandError("invalid_text", "source must be a string")
+        text = lf(text)
         _, diags = diagnostics(text)
         if any(d["severity"] == "error" for d in diags):
             self.doc.draft = text
@@ -182,6 +203,8 @@ class EditorState:
             raise CommandError("roundtrip_mismatch", "reconciliation changed the original source")
         self.doc = merged
         normalise_metadata(self.doc)
+        from .mask_resources import detach_changed
+        detach_changed(self.doc)
 
     @staticmethod
     def single_root(doc: Document) -> bool:
@@ -231,7 +254,7 @@ def projection(state: EditorState) -> dict:
             span = [js_offset(text, start), js_offset(text, end)]
         out = dict(id=node.id, parent_id=parent, kind=node.kind, form=node.form,
                    enabled=node.enabled, effective=effective, span=span,
-                   meta=deepcopy(node.meta), source=render(full_document(Document(node))),
+                   meta=deepcopy(node.meta), source=render(full_document(Document(node))), sep=node.sep,
                    settings=info.get("settings"), implicit=info.get("implicit", False))
         if current is not None:
             # Root carries the complete AST once for the shared PromptEditor.

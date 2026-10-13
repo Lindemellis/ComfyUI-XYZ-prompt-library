@@ -12,7 +12,6 @@ export async function attachInlineAutocomplete(element, session) {
   element._xyzPoolSuggestions = async query => {
     const current = element._xyzInlineSession;
     if (!current || current.disposed || !element.isConnected) return [];
-    await current.whenIdle();
     if (current.disposed || element._xyzInlineSession !== current || !element.isConnected) return [];
     return window.xyzPLv4Suggestions?.(query, { __plv4Pane: { editSession: current } }) || [];
   };
@@ -35,10 +34,12 @@ export async function attachInlineAutocomplete(element, session) {
   };
   const adapter = {
     getValue: () => autocompleteText(inlineText(element)), getCaret: () => selectionOffset(false), getSelEnd: () => selectionOffset(true),
-    splice(start, end, text) {
+    splice(start, end, text, completion = null) {
       const range = document.createRange(); range.setStart(...point(start)); range.setEnd(...point(end));
       const selection = getSelection(); selection.removeAllRanges(); selection.addRange(range);
-      document.execCommand('insertText', false, text);
+      element._xyzTagCompletion = completion;
+      try { document.execCommand('insertText', false, text); }
+      finally { delete element._xyzTagCompletion; }
     },
     caretCoords() {
       const selection = getSelection(); const rect = selection?.rangeCount ? selection.getRangeAt(0).getBoundingClientRect() : element.getBoundingClientRect();
@@ -48,7 +49,6 @@ export async function attachInlineAutocomplete(element, session) {
   element._xyzSourceSuggestions = async () => {
     const current = element._xyzInlineSession, text = inlineText(element), caret = selectionOffset(false);
     if (!current || current.disposed || !element.isConnected) return null;
-    await current.whenIdle();
     const candidates = await nativeCompletions(autocompleteText(text), caret, current);
     if (current.disposed || element._xyzInlineSession !== current || !element.isConnected || inlineText(element) !== text || selectionOffset(false) !== caret) return [];
     return candidates?.map(candidate => ({ ...candidate, insert: async () => {

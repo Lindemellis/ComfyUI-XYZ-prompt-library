@@ -46,16 +46,38 @@ def test_include_in_base_adds_the_content_to_base_at_its_text_position():
 
 def test_include_in_base_works_on_a_fill_region_too():
     # §4.2's walk never looks at the kind: a fill's background text can be asked into
-    # the base as well, and — like any other region — it conjures the base segment
-    # when no `region: base` group was written.
+    # the base as well — when the same group holds a base region.
     src = (
-        "A, {C}.set{region: {imask: 1}} "
+        "A, {B}.set{region: base} {C}.set{region: {imask: 1}} "
         "{E}.set{region: {kind: fill, include_in_base: true}} D"
     )
     got = segs(src)
-    assert got[("base",)] == "A, E, D"
+    assert got[("base",)] == "A, B, E, D"
     assert got[("fill",)] == "A, E, D"
     assert got[("imask", 1)] == "A, C, D"
+
+
+def test_include_in_base_never_conjures_a_base():
+    # user decision 2026-10-13: without a live base region (absent, or switched
+    # off — which removes it from the text) the flag does nothing at all.
+    src = "A, {C}.set{region: {imask: 1, include_in_base: true}} D"
+    got = segs(src)
+    assert ("base",) not in got
+    assert got[("imask", 1)] == "A, C, D"
+    r = compile_text("[@region]: { [mask: [0, 0.5, 0, 1], include_in_base: true]: { b } [fill]: { c } }")
+    assert not any(s.kind == "base" for s in r.segments)
+
+
+def test_include_in_base_needs_a_base_in_its_own_region_group():
+    src = (
+        "[@region]: { base: { x } [imask: 0]: { y } } "
+        "[@region]: { [imask: 1, include_in_base: true]: { z } }"
+    )
+    got = segs(src)
+    assert got[("base",)] == "x"
+    assert got[("imask", 1)] == "z"
+    src = "[@region]: { base: { x } [imask: 0, include_in_base: true]: { y } }"
+    assert segs(src)[("base",)] == "x, y"
 
 
 def test_ambient_alone_no_longer_conjures_a_base_segment():
@@ -108,16 +130,18 @@ def test_schedule_wraps_with_the_comma_inside_the_bracket():
     assert r.text == "[1girl, :0,0.2] [2girls, yuri, :0.2,1]"
 
 
-def test_an_interval_an_ancestor_already_wrapped_is_not_wrapped_again():
-    # a [@region] block with a schedule wraps its content once; the region groups
-    # inside inherit that same interval and must not bracket it a second time
+def test_a_scheduled_region_block_exists_only_inside_its_window():
+    # decision 2026-10-13: a schedule on (or above) a region decides whether the
+    # region exists. Outside the window there is no region syntax at all, only the
+    # ambient text; inside it nothing is bracketed twice.
     r = compile_text(
         "q, [@region]: { base: { 2girls, } [imask: 0, include_in_base: true]: { illya, } }"
         ".set{schedule: {0.2, 0.5}}"
     )
-    got = {s.key: s.text for s in r.segments}
-    assert got[("base",)] == "q, [2girls, illya, :0.2,0.5]"
-    assert got[("imask", 0)] == "[q, illya, :0.2,0.5]"
+    assert r.text == (
+        "[q, :0,0.2] [q, 2girls, illya\n"
+        "COUPLE IMASK(0, 1) q, illya, :0.2,0.5] [q, :0.5,1]"
+    )
 
 
 def test_full_interval_is_not_wrapped():
@@ -131,31 +155,85 @@ def test_nested_schedules_intersect_and_empty_ones_warn_W05():
     assert any(d.code == W05 for d in r.diagnostics)
 
 
-def test_a_scheduled_region_wraps_the_whole_segment():
-    # spec §4.4: the region is hoisted to a top-level segment and the time window
-    # travels with it — the entire segment text is wrapped exactly once
+def test_a_scheduled_region_is_absent_outside_its_window():
+    # Outside its window the region is gone, not an empty prompt holding its mask.
+    # Inside it the area no region covers gets the ambient text (FILL), never an
+    # empty full-image base that would take half of every region.
     r = compile_text("quality, {illya}.set{region: {imask: 0}, schedule: {0.2, 0.5}}")
-    seg = next(s for s in r.segments if s.key == ("imask", 0))
-    assert seg.text == "[quality, illya, :0.2,0.5]"
-    # no `region: base` group and no include_in_base -> no base segment
-    assert not any(s.kind == "base" for s in r.segments)
+    assert r.text == (
+        "[quality, :0,0.2] [FILL() quality\n"
+        "COUPLE IMASK(0, 1) quality, illya, :0.2,0.5] [quality, :0.5,1]"
+    )
+    # the compiler's own fill is not reported as a region the user wrote
+    assert not any(s.kind == "fill" for s in r.segments)
 
 
-def test_a_scheduled_region_block_pushes_the_window_onto_each_region():
+def test_a_scheduled_region_block_takes_every_region_with_it():
     r = compile_text(
         "[@region]: { [imask: 0]: { a, } [imask: 1]: { b, } }.set{schedule: {0.2, 0.5}}"
     )
-    got = {s.key: s.text for s in r.segments}
-    assert got[("imask", 0)] == "[a, :0.2,0.5]"
-    assert got[("imask", 1)] == "[b, :0.2,0.5]"
+    assert r.text == "[FILL()\nCOUPLE IMASK(0, 1) a\nCOUPLE IMASK(1, 1) b, :0.2,0.5]"
 
 
-def test_base_segment_is_never_time_limited_as_a_whole():
-    # a base group's schedule wraps only its own content, never the ambient text —
-    # an empty base prompt outside the window is never what the user meant
+def test_a_scheduled_base_is_absent_outside_its_window_too():
+    # The same rule as every other region: outside the window there is no base;
+    # what it covered falls to the ambient text, never to an empty prompt.
     r = compile_text("quality, {a}.set{region: base, schedule: {0, 0.5}}")
-    base = next(s for s in r.segments if s.kind == "base")
-    assert base.text == "quality, [a, :0,0.5]"
+    assert r.text == "[quality, a, :0,0.5] [quality, :0.5,1]"
+    r = compile_text("quality, [@region]: { [base]: { a }.set{schedule: {0, 0.5}}, [imask: 0]: { b } }")
+    assert r.text == (
+        "[quality, a\nCOUPLE IMASK(0, 1) quality, b, :0,0.5] "
+        "[FILL() quality\nCOUPLE IMASK(0, 1) quality, b, :0.5,1]"
+    )
+
+
+def test_a_schedule_inside_a_region_only_times_that_content():
+    r = compile_text("q, [@region]: { [imask: 0]: { a, { early }.set{schedule: {0, 0.4}} } }")
+    assert r.text == "FILL() q\nCOUPLE IMASK(0, 1) q, a, [early, :0,0.4]"
+
+
+def test_a_later_schedule_stage_reaches_the_area_a_region_left():
+    # A region inside a [@schedule] stage lives in that stage only; the next stage's
+    # content is ambient and reaches every area, including the one it left.
+    r = compile_text(
+        "q, [@schedule]: { 0 - 0.4: { { A }.set{region: {mask: [0, 0.5, 0, 1]}} }, 0.4 - 1: { C } },"
+        " { B }.set{region: {mask: [0.5, 1, 0, 1]}}"
+    )
+    assert r.text == (
+        "[FILL() q\nCOUPLE MASK(0 0.5, 0 1, 1) q, A\nCOUPLE MASK(0.5 1, 0 1, 1) q, B, :0,0.4] "
+        "[FILL() q, C\nCOUPLE MASK(0.5 1, 0 1, 1) q, C, B, :0.4,1]"
+    )
+    assert not any(d.code == W05 for d in r.diagnostics)  # a slice is not an empty window
+
+
+def test_region_window_turns_the_block_into_plain_text_outside_it():
+    src = ("m, 2girls, [@region]: { [mask: [0, 0.5, 0, 1]]: { stelle }, [mask: [0.5, 1, 0, 1]]: { kafka } }"
+           ".set{schedule: {0, 0.8}, region_window: {0, 0.4}}")
+    split = "COUPLE MASK(0 0.5, 0 1, 1) m, 2girls, stelle\nCOUPLE MASK(0.5 1, 0 1, 1) m, 2girls, kafka"
+    assert compile_text(src).text == (
+        f"[FILL() m, 2girls\n{split}, :0,0.4] [m, 2girls, stelle, kafka, :0.4,0.8] [m, 2girls, :0.8,1]"
+    )
+
+
+def test_region_window_does_not_duplicate_include_in_base_content():
+    src = ("q, [@region]: { [base]: { g }, [imask: 0, include_in_base: true]: { a }, [imask: 1]: { b } }"
+           ".set{region_window: {0, 0.4}}")
+    assert compile_text(src).text.endswith("[q, g, a, b, :0.4,1]")
+
+
+def test_region_window_keeps_one_random_draw_across_slices():
+    src = ("q, [@region]: { [imask: 0]: { {x, y, z, w}.set{random_select: 1} }, [imask: 1]: { b } }"
+           ".set{region_window: {0, 0.4}}")
+    for seed in range(8):
+        text = compile_text(src, seed=seed).text
+        picked = [t for t in "xyzw" if f"q, {t}\n" in text]
+        assert len(picked) == 1 and f"q, {picked[0]}, b, :0.4,1]" in text
+
+
+def test_region_window_only_applies_to_a_region_block():
+    r = compile_text("q, { a }.set{region_window: {0, 0.4}}")
+    assert r.text == "q, a"
+    assert any(d.code == "W08" for d in r.diagnostics)
 
 
 # --- §3.3 group settings ----------------------------------------------------
@@ -230,12 +308,12 @@ def test_a_group_randomises_identically_in_every_segment_it_lands_in():
     # include_in_base renders the same group twice — the picks must agree,
     # otherwise base and the region would disagree about what is in the picture
     src = (
-        "{a, b, c, d, e, f}.set{region: {imask: 0, include_in_base: true}, "
+        "{base}.set{region: base} {a, b, c, d, e, f}.set{region: {imask: 0, include_in_base: true}, "
         "random_select: 3}"
     )
     r = compile_text(src, seed=5)
     got = {s.key: s.text for s in r.segments}
-    assert got[("base",)] == got[("imask", 0)]
+    assert got[("base",)] == "base, " + got[("imask", 0)]
 
 
 # --- escaping ---------------------------------------------------------------

@@ -1,4 +1,4 @@
-"""Folder pools and self-contained block copies. All writes use one transaction."""
+"""Folder storage, Class pools and block copies. Writes use one transaction."""
 from __future__ import annotations
 from copy import deepcopy
 from dataclasses import dataclass
@@ -11,14 +11,12 @@ from urllib.parse import quote
 from ._v3 import DocNode, Document, render
 from .model import CommandError, EditorState, full_document, projection, refresh_document, normalise_metadata
 from .commands import apply_command, text_edit
-from .hierarchy import UNSET, asset_path, ancestors, placement_check, set_header
+from .hierarchy import UNSET, asset_path, ancestors, placement_check, set_header, legacy_pools, pool_asset
 from .lora_triggers import trigger_groups
 if '.' in __package__:
-    from ..prompt_library_v3.repo import WriteQueue
-    from ..prompt_library_v3.db import connect_read
+    from ..prompt_shared.storage import WriteQueue, connect_read
 else:
-    from prompt_library_v3.repo import WriteQueue
-    from prompt_library_v3.db import connect_read
+    from prompt_shared.storage import WriteQueue, connect_read
 
 def encode(value): return json.dumps(value, ensure_ascii=False, separators=(',', ':'))
 def identity(): return uuid.uuid4().hex
@@ -93,7 +91,7 @@ def name_snapshot(snapshot, disambiguate=False):
 def names_check(conn):
     siblings, paths = {}, {}
     for asset in catalog(conn):
-        if asset['kind'] not in ('folder', 'block'): continue
+        if asset['kind'] not in ('folder', 'class', 'block'): continue
         name = asset['name']; check_name(name)
         key = (asset['parent_id'], name)
         if key in siblings or asset['path'] in paths:
@@ -112,14 +110,14 @@ def disambiguate_library_names(conn):
     while True:
         siblings, paths = set(), set(); conflict = None
         for asset in catalog(conn):
-            if asset['kind'] not in ('folder', 'block'): continue
+            if asset['kind'] not in ('folder', 'class', 'block'): continue
             key = (asset['parent_id'], asset['name'])
             if key in siblings or asset['path'] in paths: conflict = asset; break
             siblings.add(key); paths.add(asset['path'])
         if conflict is None: break
         original = conflict['name']; index = 2; name = f'{original} {index}'
-        namespace = {(a['parent_id'], a['name']) for a in catalog(conn) if a['kind'] in ('folder', 'block')}
-        full_paths = {a['path'] for a in catalog(conn) if a['kind'] in ('folder', 'block')}
+        namespace = {(a['parent_id'], a['name']) for a in catalog(conn) if a['kind'] in ('folder', 'class', 'block')}
+        full_paths = {a['path'] for a in catalog(conn) if a['kind'] in ('folder', 'class', 'block')}
         prefix = conflict['path'][:-len(original)]
         while (conflict['parent_id'], name) in namespace or prefix + name in full_paths:
             index += 1; name = f'{original} {index}'
@@ -205,7 +203,26 @@ def catalog(conn):
 class SchemaOp:
     def apply(self, conn):
         conn.execute('CREATE TABLE IF NOT EXISTS library_meta(revision INTEGER NOT NULL)')
-        conn.execute("CREATE TABLE IF NOT EXISTS assets(id TEXT PRIMARY KEY,kind TEXT NOT NULL CHECK(kind IN ('folder','tag','block','document')),name TEXT NOT NULL,parent_id TEXT REFERENCES assets(id) ON DELETE RESTRICT,position INTEGER NOT NULL DEFAULT 0,version INTEGER NOT NULL DEFAULT 1,data_json TEXT NOT NULL)")
+        existing = conn.execute("SELECT sql FROM sqlite_master WHERE name='assets'").fetchone()
+        conn.execute('CREATE TABLE IF NOT EXISTS library_structure(version INTEGER NOT NULL)')
+        if not conn.execute('SELECT 1 FROM library_structure').fetchone():
+            old = bool(existing and conn.execute('SELECT 1 FROM assets').fetchone())
+            conn.execute('INSERT INTO library_structure VALUES(?)', (1 if old else 2,))
+        schema = "CREATE TABLE {table}(id TEXT PRIMARY KEY,kind TEXT NOT NULL CHECK(kind IN ('folder','class','tag','block','document')),name TEXT NOT NULL,parent_id TEXT REFERENCES assets(id) ON DELETE RESTRICT,position INTEGER NOT NULL DEFAULT 0,version INTEGER NOT NULL DEFAULT 1,data_json TEXT NOT NULL)"
+        if existing and "'class'" not in existing['sql']:
+            # Extend the CHECK without changing data. Deferred DROP bookkeeping
+            # is cleared only after checking every real foreign key explicitly.
+            indexes = [r['sql'] for r in conn.execute("SELECT sql FROM sqlite_master WHERE type='index' AND tbl_name='assets' AND sql IS NOT NULL")]
+            conn.execute('PRAGMA defer_foreign_keys=ON')
+            conn.execute(schema.format(table='assets_new'))
+            conn.execute('INSERT INTO assets_new SELECT * FROM assets')
+            conn.execute('DROP TABLE assets')
+            conn.execute('ALTER TABLE assets_new RENAME TO assets')
+            for statement in indexes: conn.execute(statement)
+            if conn.execute('PRAGMA foreign_key_check').fetchone(): raise CommandError('invalid_library', 'Library 外键检查失败')
+            conn.execute('PRAGMA defer_foreign_keys=OFF')
+        elif not existing:
+            conn.execute(schema.format(table='assets'))
         conn.execute('CREATE INDEX IF NOT EXISTS assets_parent ON assets(parent_id,position)')
         conn.execute('CREATE TABLE IF NOT EXISTS pool_observations(owner TEXT NOT NULL,node_id TEXT NOT NULL,pool TEXT NOT NULL,fingerprint TEXT NOT NULL,PRIMARY KEY(owner,node_id,pool))')
         if not conn.execute('SELECT 1 FROM library_meta').fetchone(): conn.execute('INSERT INTO library_meta VALUES(0)')
@@ -221,8 +238,8 @@ def store(conn, asset_id, kind, name, data, folder_id=None, expected=None, paren
     previous = row(conn, asset_id, kind) if asset_id else None
     if previous and expected != previous['version']: raise CommandError('asset_conflict', '来源已变化，请重新读取')
     if parent_id is UNSET: parent_id = previous['parent_id'] if previous else folder_id
-    if parent_id: row(conn, parent_id, 'folder')
-    if kind == 'tag' and not parent_id: raise CommandError('invalid_parent', '散装 tag 必须放在 Folder 中')
+    if parent_id: row(conn, parent_id) # placement_check owns type rules
+    if kind == 'tag' and not parent_id: raise CommandError('invalid_parent', '散装 prompt 必须放在 Class 中')
     if previous:
         conn.execute('UPDATE assets SET name=?,data_json=?,parent_id=?,version=version+1 WHERE id=?', (name, encode(data), parent_id, asset_id))
     else:
@@ -278,20 +295,20 @@ def expand(conn, asset_id, versions=None):
 
 
 def descendants(conn, folder_id):
-    row(conn, folder_id, 'folder')
-    return {r[0] for r in conn.execute('WITH RECURSIVE tree(id) AS (SELECT ? UNION ALL SELECT a.id FROM assets a JOIN tree t ON a.parent_id=t.id WHERE a.kind=\'folder\') SELECT id FROM tree',(folder_id,))}
+    kind = pool_asset(conn, folder_id)['kind']
+    return {r[0] for r in conn.execute('WITH RECURSIVE tree(id) AS (SELECT ? UNION ALL SELECT a.id FROM assets a JOIN tree t ON a.parent_id=t.id WHERE a.kind=?) SELECT id FROM tree', (folder_id, kind))}
 
 
 def pool_keys(conn, folder_id):
     folders = descendants(conn, folder_id); result = set()
-    for value in conn.execute("SELECT parent_id,data_json FROM assets WHERE kind IN ('tag','block')"):
+    for value in conn.execute("SELECT parent_id,data_json FROM assets WHERE kind='tag'"):
         if value['parent_id'] in folders:
             result.update(tag_key(n) for n in tags(DocNode.from_json(json.loads(value['data_json'])['snapshot'])))
     return result
 
 
 def add_tag(conn, folder_id, snapshot, asset_id=None, expected=None, automatic=False):
-    row(conn, folder_id, 'folder'); snapshot = tag_snapshot(snapshot); key = tag_key(DocNode.from_json(snapshot))
+    pool_asset(conn, folder_id); snapshot = tag_snapshot(snapshot); key = tag_key(DocNode.from_json(snapshot))
     if asset_id and row(conn, asset_id, 'tag')['version'] != expected: raise CommandError('asset_conflict', 'tag 已变化')
     existing = [dict(r) for r in conn.execute("SELECT * FROM assets WHERE kind='tag' AND id IS NOT ?", (asset_id,)) if tag_key(DocNode.from_json(json.loads(r['data_json'])['snapshot'])) == key]
     subtree = descendants(conn, folder_id)
@@ -350,52 +367,57 @@ def move_into_block(conn, previous, destination, expected):
 
 
 def folder_block(conn, folder_id, fill=False):
-    asset = row(conn, folder_id, 'folder')
+    pool_asset(conn, folder_id); asset = row(conn, folder_id)
     node = EditorState.create(text='{ }').doc.root.children[0]
     node.meta = {'name':asset['name'], 'pool':folder_id}
     if fill:
         for value in conn.execute("SELECT data_json FROM assets WHERE kind='tag' AND parent_id=? ORDER BY position,id",(folder_id,)):
             child = DocNode.from_json(json.loads(value['data_json'])['snapshot']); child.enabled = True; child.sep = ', '; node.children.append(child)
     renumber(node); set_header_dict = set_header(node.to_json(), asset['path'])
-    return {'snapshot':set_header_dict, 'source':{'kind':'folder','id':folder_id,'version':asset['version'],'path':asset['path']}}
+    return {'snapshot':set_header_dict, 'source':{'kind':'class','id':folder_id,'version':asset['version'],'path':asset['path']}}
 
 
 def bind_paths(conn, state):
     if not state.valid: return
+    pending = [node for node in state.doc.root.walk()
+               if node.form not in ('schedule', 'region', 'avg') and not node.meta.get('lora')
+               and node.header and not node.meta.get('source') and not node.meta.get('pool')
+               and node.meta.get('full_path') != node.header]
+    if not pending: return
     lookup = {}
     for asset in catalog(conn):
-        if asset['kind'] in ('folder','block'): lookup.setdefault(asset['path'],[]).append(asset)
-    for node in state.doc.root.walk():
-        if node.form in ('schedule', 'region', 'avg') or node.meta.get('lora'): continue
-        if not node.header or node.meta.get('source') or node.meta.get('pool'): continue
-        # expand() labels contained snapshots for display. They already have IDs
-        # and content; resolving their labels creates accidental references and
-        # rejects legitimate same-name siblings (including unnamed "Block"s).
-        if node.meta.get('full_path') == node.header: continue
+        if asset['kind'] in ('class','block') or (asset['kind']=='folder' and legacy_pools(conn)): lookup.setdefault(asset['path'],[]).append(asset)
+    for node in pending:
         matches = lookup.get(node.header, [])
         if len(matches)>1: raise CommandError('ambiguous_path', 'Library 路径不唯一')
         if matches:
             target = matches[0]
-            if target['kind']=='folder': node.meta['pool']=target['id']
+            if target['kind'] in ('folder','class'): node.meta['pool']=target['id']
             else: node.meta['source']={'kind':'block','id':target['id'],'version':target['version'],'path':node.header}
 
 
 def observe(conn, state, owner, collect=False, suppress=False):
     if not isinstance(owner,str) or not owner: raise CommandError('invalid_owner', '需要稳定文档身份')
+    changed = False
     for block in state.doc.root.walk():
         if block.form in ('schedule', 'region', 'avg'): continue
         pool = block.meta.get('pool')
         if not pool: continue
         # A portable or deleted pool never prevents editing/compilation.
-        if not conn.execute("SELECT 1 FROM assets WHERE id=? AND kind='folder'",(pool,)).fetchone(): continue
-        known = pool_keys(conn, pool) if collect and not suppress else set()
+        value = conn.execute('SELECT kind FROM assets WHERE id=?', (pool,)).fetchone()
+        if not value or (value['kind'] != 'class' and not (value['kind']=='folder' and legacy_pools(conn))): continue
+        known = None
         for node in tags(block, stop_pools=True):
             key = tag_key(node); digest = hashlib.sha256(key.encode()).hexdigest()
             found = conn.execute('SELECT fingerprint FROM pool_observations WHERE owner=? AND node_id=? AND pool=?',(owner,node.id,pool)).fetchone()
-            if collect and not suppress and (not found or found[0]!=digest) and key not in known:
-                add_tag(conn,pool,node.to_json(),automatic=True)
-                known.add(key)
+            if found and found[0] == digest: continue
+            if collect and not suppress:
+                if known is None: known = pool_keys(conn, pool)
+                if key not in known:
+                    changed = bool(add_tag(conn,pool,node.to_json(),automatic=True)) or changed
+                    known.add(key)
             conn.execute('INSERT OR REPLACE INTO pool_observations VALUES(?,?,?,?)',(owner,node.id,pool,digest))
+    return changed
 
 
 @dataclass
@@ -403,18 +425,21 @@ class MutationOp:
     body: dict
     def apply(self, conn):
         body=self.body; action=body['action']; response={}; asset_id=None
+        library_changed = action not in ('edit', 'sync_pool', 'observe')
+        if legacy_pools(conn) and action in ('save_class', 'ensure_lora'):
+            raise CommandError('library_upgrade_required', '请先在 Library 菜单执行“转换旧 Folder 池”，备份后再使用 Class')
         if action=='save_block':
             asset_id=save_block(conn,body['snapshot'],body['name'],body.get('folder_id'),body.get('id'),body.get('version'),body.get('parent_id',UNSET))
         elif action=='ensure_lora':
             lora = body['lora']
             if not isinstance(lora, dict) or not isinstance(lora.get('id'), str) or len(lora['id']) != 64:
                 raise CommandError('invalid_lora', '无效 LoRA 身份')
-            existing = next((asset for asset in catalog(conn) if asset['kind'] == 'folder' and asset['data'].get('lora', {}).get('id') == lora['id']), None)
+            existing = next((asset for asset in catalog(conn) if asset['kind'] == 'class' and asset['data'].get('lora', {}).get('id') == lora['id']), None)
             if existing:
                 asset_id = existing['id']
             else:
                 name = 'LoRA · ' + ''.join(char if char not in '[]\\\n\r' else '_' for char in str(lora.get('name', 'LoRA'))) + ' (' + lora['id'][:12] + ')'
-                asset_id = store(conn, None, 'folder', name, {'autocomplete': False, 'lora': deepcopy(lora)})
+                asset_id = store(conn, None, 'class', name, {'autocomplete': False, 'lora': deepcopy(lora)})
             if not existing or body.get('import_triggers') or body.get('regroup_existing'):
                 groups = trigger_groups(body.get('triggers', []))
                 allowed = None
@@ -423,7 +448,7 @@ class MutationOp:
                     # deleted tag, touch an already grouped pool or move custom
                     # edits whose wording no longer matches source metadata.
                     children = [child for child in catalog(conn) if child['parent_id'] == asset_id]
-                    if any(child['kind'] == 'folder' and child['data'].get('lora_trigger_group') for child in children):
+                    if any(child['kind'] == 'class' and child['data'].get('lora_trigger_group') for child in children):
                         groups = []
                     allowed = {tag_key(DocNode.from_json(child['data']['snapshot'])) for child in children if child['kind'] == 'tag'}
                     groups = [group for group in groups if group['key']]
@@ -434,15 +459,15 @@ class MutationOp:
                     if group['key']:
                         marker = {'lora_id': lora['id'], 'key': group['key']}
                         children = [child for child in catalog(conn) if child['parent_id'] == asset_id]
-                        matched = next((child for child in children if child['kind'] == 'folder' and child['data'].get('lora_trigger_group') == marker), None)
+                        matched = next((child for child in children if child['kind'] == 'class' and child['data'].get('lora_trigger_group') == marker), None)
                         if matched:
                             destination = matched['id']
                         else:
-                            occupied = {child['name'] for child in children if child['kind'] in ('folder', 'block')}
+                            occupied = {child['name'] for child in children if child['kind'] in ('folder', 'class', 'block')}
                             name, suffix = group['name'], 2
                             while name in occupied:
                                 name = f'{group["name"]} {suffix}'; suffix += 1
-                            destination = store(conn, None, 'folder', name, {'autocomplete': False, 'lora_trigger_group': marker}, parent_id=asset_id)
+                            destination = store(conn, None, 'class', name, {'autocomplete': False, 'lora_trigger_group': marker}, parent_id=asset_id)
                     present = pool_keys(conn, destination)
                     for key, item in items.items():
                         if key not in present:
@@ -463,13 +488,14 @@ class MutationOp:
                 saved.append(add_tag(conn,body.get('parent_id') or body.get('folder_id'),snapshot,body.get('id') if index==0 else None,body.get('version') if index==0 else None))
             asset_id=saved[0]
             response['assets']=[row(conn,ident) for ident in saved]
-        elif action in ('save_folder','save_document'):
+        elif action in ('save_folder','save_class','save_document'):
             kind=action[5:]; data=body.get('data',{})
-            if kind=='folder':
+            if kind=='class' or (kind=='folder' and legacy_pools(conn)):
                 data={'autocomplete':bool(data.get('autocomplete',False))}
-                previous = row(conn, body['id'], 'folder') if body.get('id') else None
+                previous = row(conn, body['id'], kind) if body.get('id') else None
                 if previous and previous['data'].get('lora'): data['lora'] = previous['data']['lora']
                 if previous and previous['data'].get('lora_trigger_group'): data['lora_trigger_group'] = previous['data']['lora_trigger_group']
+            elif kind=='folder': data={}
             else: EditorState.create(doc=data['doc']).check()
             asset_id=store(conn,body.get('id'),kind,body['name'],data,body.get('folder_id'),body.get('version'),body.get('parent_id',UNSET))
         elif action=='create_block':
@@ -503,18 +529,39 @@ class MutationOp:
                 asset_id=save_block(conn,root.to_json(),owner['name'],asset_id=owner['id'],expected=owner['version'])
                 if action=='rename': asset_id=previous['id']
             elif action=='delete':
-                if conn.execute('SELECT 1 FROM assets WHERE parent_id=?',(previous['id'],)).fetchone(): raise CommandError('asset_in_use','Folder 仍有内容，请先移出或删除')
-                conn.execute('DELETE FROM assets WHERE id=?',(previous['id'],))
+                # Keep the RESTRICT foreign key: explicitly delete children first,
+                # in the same writer transaction as the version check.
+                descendants = list(conn.execute('''WITH RECURSIVE subtree(id,depth) AS (
+                    SELECT id,0 FROM assets WHERE id=?
+                    UNION ALL SELECT a.id,s.depth+1 FROM assets a JOIN subtree s ON a.parent_id=s.id
+                ) SELECT id FROM subtree ORDER BY depth DESC''', (previous['id'],)))
+                for item in descendants:
+                    conn.execute('DELETE FROM assets WHERE id=?', (item['id'],))
             elif previous['kind']=='tag': asset_id=add_tag(conn,body.get('parent_id',previous['parent_id']),body.get('snapshot') or tag_snapshot(EditorState.create(text=body.get('name',previous['name'])).doc.root.children[0].to_json()),previous['id'],body['version'])
             else: asset_id=store(conn,previous['id'],previous['kind'],body.get('name',previous['name']),previous['data'],expected=body['version'],parent_id=body.get('parent_id',previous['parent_id']))
         elif action in ('edit','sync_pool','observe','save_instance'):
             previous=EditorState.from_json(body['state']); state=deepcopy(previous); command=body.get('command',{})
-            if action=='edit': state=apply_command(previous,command); bind_paths(conn,state)
+            if action=='edit':
+                requested = command.get('patch', {}).get('pool')
+                if command.get('type') == 'SetMetadata' and requested:
+                    pool_asset(conn, requested)
+                state=apply_command(previous,command); bind_paths(conn,state)
             if action=='save_instance':
                 state.check()
                 if command['revision']!=state.revision: raise CommandError('stale_revision','文档已变化')
                 if command.get('document'): asset_id=store(conn,command.get('asset_id'),'document',command['name'],{'doc':state.doc.to_json()},command.get('folder_id'),command.get('version'))
                 else:
+                    if command.get('whole_block'):
+                        children = state.doc.root.children
+                        single = children[0] if len(children) == 1 else None
+                        if single and single.kind == 'group' and single.form not in ('paren', 'schedule_entry', 'region_entry', 'avg_entry') and (single.meta.get('presentation') != 'prompt' or command.get('id') == single.id):
+                            command = {**command, 'id': single.id}
+                        else:
+                            # Wrap and save in the same writer transaction and undo step.
+                            wrap = {'type': 'WrapSelection', 'ids': [child.id for child in children]} if children else {'type': 'InsertBlock', 'parent_id': state.doc.root.id, 'edge': 'end'}
+                            state = apply_command(state, {**wrap, 'revision': state.revision})
+                            state.revision = previous.revision
+                            command = {**command, 'id': state.selection['block_id']}
                     node=state.doc.find(command['id'])
                     if not node: raise CommandError('unknown_node','目标 block 已移除')
                     asset_id=save_block(conn,node.to_json(),command['name'],command.get('folder_id'),command.get('asset_id'),command.get('version'),command.get('parent_id',UNSET))
@@ -522,15 +569,16 @@ class MutationOp:
                     node.__dict__.update(DocNode.from_json(set_header(node.to_json(),saved['path'])).__dict__); state.doc=refresh_document(state.doc)
                 state.revision+=1
             if state.valid and not command.get('defer_pool'):
-                observe(conn,state,body.get('owner'),collect=action!='observe',suppress=command.get('type') in ('Delete','SetEnabled','LocateDetails'))
+                library_changed = observe(conn,state,body.get('owner'),collect=action!='observe',suppress=command.get('type') in ('Delete','SetEnabled','LocateDetails')) or library_changed
             if action=='sync_pool': state.revision+=1
             if action!='observe': response={'state':state.to_json(),'projection':projection(state),'edit':text_edit(previous.text,state.text)}
         else: raise CommandError('invalid_action','未知 Library 操作')
-        placement_check(conn); loose_check(conn)
-        if action in ('save_block', 'save_folder', 'create_block', 'rename', 'move', 'save_instance', 'ensure_lora'): names_check(conn)
+        if library_changed:
+            placement_check(conn); loose_check(conn)
+        if action in ('save_block', 'save_folder', 'save_class', 'create_block', 'rename', 'move', 'save_instance', 'ensure_lora'): names_check(conn)
         # Observations are bookkeeping, not autocomplete data changes.
-        if action!='observe': bump(conn)
-        return {'id':asset_id,'revision':conn.execute('SELECT revision FROM library_meta').fetchone()[0],**response,**({'asset':row(conn,asset_id)} if asset_id else {})}
+        if library_changed: bump(conn)
+        return {'id':asset_id,'revision':conn.execute('SELECT revision FROM library_meta').fetchone()[0],'library_changed':library_changed,**response,**({'asset':row(conn,asset_id)} if asset_id else {})}
 
 
 class AssetLibrary:
@@ -545,21 +593,38 @@ class AssetLibrary:
             finally: conn.close()
         self.writer=WriteQueue(self.path); self.writer.start(); self.writer.enqueue(SchemaOp()).result(); self._completion_cache=None
     def close(self): self.writer.stop(timeout=3)
-    def mutate(self,body): return self.writer.enqueue(MutationOp(deepcopy(body))).result()
+    def mutate(self,body):
+        if body.get('action') == 'separate_types':
+            from .class_migration import SeparateTypesOp
+            return self.writer.enqueue(SeparateTypesOp(self.path, body.get('revision'))).result()
+        return self.writer.enqueue(MutationOp(deepcopy(body))).result()
     def read(self,action='tree',**args):
         conn=connect_read(self.path)
         try:
             conn.execute('BEGIN'); revision=conn.execute('SELECT revision FROM library_meta').fetchone()[0]
             if action=='get': return row(conn,args['id'])
+            if action=='structure_plan':
+                from .class_migration import structure_plan
+                return structure_plan(conn)
             if action=='tree':
                 assets=[]; documents=[]
-                for asset in catalog(conn):
-                    lora_root = asset['kind'] == 'folder' and bool(asset['data'].get('lora'))
+                entries = list(catalog(conn)); lookup = {a['id']:a for a in entries}
+                hidden = {}
+                def hidden_from_library(asset):
+                    if asset['id'] not in hidden:
+                        own = (asset['kind'] == 'class' and bool(asset['data'].get('lora'))) or (asset['kind'] == 'block' and bool(asset['data'].get('snapshot', {}).get('meta', {}).get('lora')))
+                        parent = lookup.get(asset['parent_id'])
+                        hidden[asset['id']] = bool(own or (parent and hidden_from_library(parent)))
+                    return hidden[asset['id']]
+                for asset in entries:
+                    lora_root = asset['kind'] == 'class' and bool(asset['data'].get('lora'))
+                    library_hidden = hidden_from_library(asset)
                     asset={k:v for k,v in asset.items() if k!='data'}; asset['folder_id']=asset['parent_id']
                     if lora_root: asset['lora_root'] = True
+                    if library_hidden: asset['library_hidden'] = True
                     if asset['kind']=='document': documents.append(asset); continue
                     assets.append(asset)
-                return {'revision':revision,'assets':assets,'saved_documents':documents}
+                return {'revision':revision,'assets':assets,'saved_documents':documents,'legacy_pools':legacy_pools(conn)}
             if action=='resolve':
                 matches=[a['id'] for a in catalog(conn) if a['kind']==args.get('kind','block') and a['path']==args['path']]
                 if len(matches)!=1: raise CommandError('ambiguous_path' if matches else 'missing_asset','Library 路径不存在或不唯一')
@@ -570,27 +635,40 @@ class AssetLibrary:
                     try: result[asset_id]=row(conn,asset_id)['version']
                     except CommandError: pass
                 return {'revision':revision,'versions':result}
-            if action=='folder_block': return {**folder_block(conn,args['id'],args.get('fill',False)),'revision':revision}
+            if action in ('class_block','folder_block'): return {**folder_block(conn,args['id'],args.get('fill',False)),'revision':revision}
             if action=='expand':
                 snapshot=expand(conn,args['id']); validate_snapshot(snapshot)
                 return {'snapshot':snapshot,'source':snapshot['meta']['source'],'revision':revision}
             if action in ('candidates','complete'):
-                all_folders = action == 'complete' and args.get('all_folders') is True
-                if action=='complete' and not all_folders and self._completion_cache and self._completion_cache['revision']==revision: return deepcopy(self._completion_cache)
-                pools=([args['pool']] if action=='candidates' else
-                       [r['id'] for r in conn.execute("SELECT id FROM assets WHERE kind='folder' AND parent_id IS NULL")] if all_folders else
-                       [r['id'] for r in conn.execute("SELECT id,data_json FROM assets WHERE kind='folder'") if json.loads(r['data_json']).get('autocomplete')])
-                def walk(folder_id):
-                    folder=row(conn,folder_id,'folder'); children=[]
-                    for record in conn.execute('SELECT id FROM assets WHERE parent_id=? ORDER BY position,id',(folder_id,)):
+                all_classes = action == 'complete' and (args.get('all_classes') is True or args.get('all_folders') is True)
+                legacy = legacy_pools(conn)
+                kind = 'folder' if legacy else 'class'
+                if action=='complete' and not all_classes and self._completion_cache and self._completion_cache['revision']==revision: return deepcopy(self._completion_cache)
+                pools = ([args['pool']] if action=='candidates' else
+                         [r['id'] for r in conn.execute('SELECT a.id FROM assets a LEFT JOIN assets p ON p.id=a.parent_id WHERE a.kind=? AND (p.kind IS NULL OR p.kind<>?) ORDER BY a.position,a.id', (kind,kind))] if all_classes else
+                         [r['id'] for r in conn.execute('SELECT id,data_json FROM assets WHERE kind=? ORDER BY position,id', (kind,)) if json.loads(r['data_json']).get('autocomplete')])
+                excluded = args.get('exclude_block')
+                excluded_owner = str(excluded).split('/')[0] if excluded else None
+                bindings = {}
+                if action == 'candidates':
+                    # Only explicitly saved assets enter the reverse binding index.
+                    # Contained projections are not independently saved assets.
+                    for record in conn.execute("SELECT id FROM assets WHERE kind='block' ORDER BY position,id"):
+                        if record['id'] == excluded_owner: continue
+                        item = row(conn, record['id']); pool = item['data']['snapshot'].get('meta', {}).get('pool')
+                        if pool: bindings.setdefault(pool, []).append(item)
+                def walk(pool_id):
+                    pool_asset(conn, pool_id); pool=row(conn,pool_id); children=[]
+                    for record in conn.execute('SELECT id FROM assets WHERE parent_id=? ORDER BY position,id',(pool_id,)):
                         item=row(conn,record['id'])
-                        if item['kind']=='folder': children.append(walk(item['id']))
-                        elif item['kind'] in ('tag','block'):
-                            snapshot=expand(conn,item['id']) if item['kind']=='block' else deepcopy(item['data']['snapshot'])
-                            children.append({'kind':item['kind'],'id':item['id'],'name':item['path'] if item['kind']=='block' else item['name'],'snapshot':snapshot,'occurrence':[folder_id,item['id']], 'source':{'kind':item['kind'],'id':item['id'],'version':item['version'],'path':item['path']}})
-                    return {'kind':'folder','id':folder_id,'name':folder['path'],'autocomplete':bool(folder['data'].get('autocomplete')),'children':children}
+                        if item['kind']==kind: children.append(walk(item['id']))
+                        elif item['kind']=='tag':
+                            children.append({'kind':'tag','id':item['id'],'name':item['name'],'snapshot':deepcopy(item['data']['snapshot']),'occurrence':[pool_id,item['id']], 'source':{'kind':'tag','id':item['id'],'version':item['version'],'path':item['path']}})
+                    for item in bindings.get(pool_id, []):
+                        children.append({'kind':'block','id':item['id'],'name':item['path'],'snapshot':expand(conn,item['id']),'occurrence':[pool_id,item['id']], 'source':{'kind':'block','id':item['id'],'version':item['version'],'path':item['path']}})
+                    return {'kind':'class','id':pool_id,'name':pool['path'],'autocomplete':bool(pool['data'].get('autocomplete')),'children':children}
                 result={'revision':revision,'candidates':[walk(pool) for pool in pools]}
-                if action=='complete' and not all_folders: self._completion_cache=result
+                if action=='complete' and not all_classes: self._completion_cache=result
                 return deepcopy(result)
             raise CommandError('invalid_action','未知读取操作')
         finally: conn.close()

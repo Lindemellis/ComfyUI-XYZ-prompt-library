@@ -89,7 +89,7 @@ def test_nested_snapshot_preset_and_region_document_survive(stores):
     assert len([a for a in new.read()['assets'] if a['kind'] == 'folder']) == 2
     parent_folder = report['mapping']['groups'][str(outer)]['folder']
     subfolder = new.read('get', id=report['mapping']['groups'][str(child)]['folder'])
-    assert subfolder['parent_id'] == parent_folder and subfolder['path'] == 'Outer.Child'
+    assert subfolder['parent_id'] == parent_folder and subfolder['path'] == 'Outer.Outer.Child'
     assert 'IMASK' in PromptLibraryV4Node().execute(render(DocNode.from_json(snapshot)), seed=3)[0]
 
 

@@ -282,6 +282,26 @@ async def _handle_search(request: web.Request) -> web.Response:
     return _ok(_repo.search_tags_multi(tuples, q, limit=limit, category=category))
 
 
+async def _handle_lookup(request: web.Request) -> web.Response:
+    """Batch exact Danbooru identities for non-editor prompt rows; no remote IO."""
+    body = await request.json()
+    names = body.get('names') if isinstance(body, dict) else None
+    if not isinstance(names, list) or len(names) > 500 or any(not isinstance(name, str) or len(name) > 512 for name in names):
+        return web.json_response({'error': 'names must be at most 500 tag names'}, status=400)
+    names = list(dict.fromkeys(names))
+    if not names: return _ok([])
+    conn, active = _search_connection()
+    if not active: return _ok([])
+    slots = ','.join('?' for _ in names)
+    rows = conn.execute(f'''SELECT name AS query, name, category FROM tags WHERE name IN ({slots})
+        UNION ALL SELECT a.alias AS query, t.name, t.category FROM aliases a
+        JOIN tags t ON t.name=a.canonical WHERE a.alias IN ({slots})''', [*names, *names])
+    result = {}
+    for row in rows:
+        result.setdefault(row['query'], {'query': row['query'], 'name': row['name'], 'category': row['category'], 'sources': ['danbooru']})
+    return _ok(list(result.values()))
+
+
 async def _handle_snapshots_list(request: web.Request) -> web.Response:
     if not _data_dir:
         return _ok([])
@@ -958,6 +978,7 @@ def register(server: Any, data_dir: Path) -> None:
 
     r = server.routes
     r.get("/xyz/tagdb/search")(_handle_search)
+    r.post("/xyz/tagdb/lookup")(_handle_lookup)
     r.get("/xyz/tagdb/related")(_handle_related)
     r.get("/xyz/tagdb/artist_posts")(_handle_artist_posts)
     r.get("/xyz/tagdb/tag_preview")(_handle_tag_preview)

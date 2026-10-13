@@ -1,7 +1,19 @@
-"""Folder containment paths; blocks own their nested content."""
+"""Folder/Class containment paths; blocks own their nested content."""
 from .model import CommandError
 
 UNSET = object()
+
+
+def legacy_pools(conn):
+    return conn.execute('SELECT version FROM library_structure').fetchone()[0] == 1
+
+
+def pool_asset(conn, asset_id):
+    value = conn.execute('SELECT kind FROM assets WHERE id=?', (asset_id,)).fetchone()
+    if value is None: raise CommandError('missing_asset', 'Class 不在本机')
+    if value['kind'] != 'class' and not (value['kind'] == 'folder' and legacy_pools(conn)):
+        raise CommandError('invalid_pool', '只能绑定 Class，Folder 仅用于存放资产')
+    return value
 
 
 def asset_path(conn, asset_id):
@@ -33,9 +45,13 @@ def placement_check(conn):
         parent = value['parent_id']
         if parent:
             target = conn.execute('SELECT kind FROM assets WHERE id=?', (parent,)).fetchone()
-            allowed = {'folder': ('folder',), 'tag': ('folder',), 'block': ('folder',), 'document': ('folder',)}
+            allowed = {'folder': ('folder',), 'class': ('folder', 'class'),
+                       'tag': ('folder',) if legacy_pools(conn) else ('class',),
+                       'block': ('folder',), 'document': ('folder',)}
             if target is None or target['kind'] not in allowed[value['kind']]:
                 raise CommandError('invalid_parent', '此对象不能存放在所选父级下')
+        elif value['kind'] == 'tag':
+            raise CommandError('invalid_parent', '散装 prompt 必须放在 Class 中')
         ancestors(conn, value['id'])
 
 

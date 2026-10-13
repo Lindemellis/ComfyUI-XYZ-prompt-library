@@ -16,7 +16,7 @@ def lib(tmp_path):
     value=AssetLibrary(tmp_path/'pools.db'); yield value; value.close()
 
 def write(lib, action, **body): return lib.mutate({'action':action,**body})
-def folder(lib,name,parent=None,autocomplete=False): return write(lib,'save_folder',name=name,parent_id=parent,data={'autocomplete':autocomplete})['id']
+def folder(lib,name,parent=None,autocomplete=False): return write(lib,'save_class',name=name,parent_id=parent,data={'autocomplete':autocomplete})['id']
 def tag(lib,pool,text): return write(lib,'save_tag',parent_id=pool,text=text)['asset']
 def snapshot(text): return EditorState.create(text=text).doc.root.children[0].to_json()
 def edit(lib,state,kind,**body):
@@ -40,8 +40,8 @@ def test_completion_memberships_include_opted_out_folders_without_polluting_enab
     assert lib.read('complete') == normal
 
 
-def test_class_api_and_metadata_removed(lib):
-    with pytest.raises(CommandError): write(lib,'save_class',name='old')
+def test_class_api_keeps_pool_metadata_and_rejects_old_association(lib):
+    assert write(lib,'save_class',name='Pool')['asset']['kind']=='class'
     state=EditorState.create(text='{ a }')
     with pytest.raises(CommandError): apply_command(state,{'type':'SetMetadata','id':state.doc.root.children[0].id,'revision':0,'patch':{'association':{'mode':'none'}}})
     for pool in ([],{},'',1):
@@ -75,10 +75,11 @@ def test_recursive_collection_stops_at_own_pool_and_never_saves_structure(lib):
 def test_subtree_dedupe_includes_saved_blocks_and_parked_children(lib):
     parent=folder(lib,'P'); child=folder(lib,'C',parent)
     tag(lib,child,'a'); block=snapshot('{ b, { c } }'); block['children'][1]['children'][0]['enabled']=False
-    write(lib,'save_block',name='combo',parent_id=child,snapshot=block)
+    block.setdefault('meta',{})['pool']=child
+    write(lib,'save_block',name='combo',snapshot=block)
     state=bind(EditorState.create(text='{ a, b, c, fresh }'),parent)
     edit(lib,state,'SetMetadata',id=state.doc.root.children[0].id,patch={'name':'P'})
-    assert names(lib,parent)==['fresh']
+    assert set(names(lib,parent))=={'b','c','fresh'}
 
 def test_chain_dedupe_moves_ancestor_and_rejects_descendant(lib):
     parent=folder(lib,'P'); child=folder(lib,'C',parent); grand=folder(lib,'G',child)
@@ -155,17 +156,18 @@ def test_folder_paste_and_edit_split_items_in_one_transaction_with_original_firs
 
 def test_candidates_include_recursive_folder_tags_and_whole_blocks(lib):
     root=folder(lib,'R'); child=folder(lib,'C',root); tag(lib,root,'a'); tag(lib,child,'b')
-    saved=write(lib,'save_block',name='Combo',parent_id=child,snapshot=snapshot('{ c, { d } }'))['id']
+    combo=snapshot('{ c, { d } }'); combo.setdefault('meta',{})['pool']=child
+    saved=write(lib,'save_block',name='Combo',snapshot=combo)['id']
     tree=lib.read('candidates',pool=root)['candidates'][0]
-    assert tree['kind']=='folder' and tree['name']=='R'
-    sub=next(n for n in tree['children'] if n['kind']=='folder')
+    assert tree['kind']=='class' and tree['name']=='R'
+    sub=next(n for n in tree['children'] if n['kind']=='class')
     assert {n['kind'] for n in sub['children']}=={'tag','block'}
     assert next(n for n in sub['children'] if n['kind']=='block')['source']['id']==saved
 
 def test_subfolder_button_inserts_only_direct_tags_as_temporary_block(lib):
     root=folder(lib,'R'); child=folder(lib,'C',root); deep=folder(lib,'D',child)
     tag(lib,child,'a'); tag(lib,child,'b'); tag(lib,deep,'c')
-    write(lib,'save_block',name='Combo',parent_id=child,snapshot=snapshot('{ d }'))
+    write(lib,'save_block',name='Combo',snapshot=snapshot('{ d }'))
     source=lib.read('folder_block',id=child,fill=True)
     assert source['snapshot']['meta']['pool']==child
     assert all(n['enabled'] for n in source['snapshot']['children'])
@@ -195,15 +197,17 @@ def test_folder_drag_snapshot_empty_and_no_inheritance(lib):
 def test_completion_calculated_from_enabled_folders_without_data_copy(lib):
     root=folder(lib,'R',autocomplete=True); child=folder(lib,'C',root); tag(lib,child,'a')
     snap=snapshot('{ b, { parked } }'); snap['children'][1]['enabled']=False
-    write(lib,'save_block',name='Combo',parent_id=child,snapshot=snap)
+    snap.setdefault('meta',{})['pool']=child
+    write(lib,'save_block',name='Combo',snapshot=snap)
     before=lib.read(); result=lib.read('complete')
-    assert result['candidates'][0]['children'][0]['children'][1]['snapshot']['children'][1]['enabled'] is False
+    assert [n['kind'] for n in result['candidates'][0]['children'][0]['children']]==['tag']
+    assert lib.read('candidates',pool=child)['candidates'][0]['children'][1]['snapshot']['children'][1]['enabled'] is False
     assert lib.read()==before and lib.read('complete')==result
-    current=lib.read('get',id=root); write(lib,'save_folder',id=root,version=current['version'],name='R',data={'autocomplete':False})
+    current=lib.read('get',id=root); write(lib,'save_class',id=root,version=current['version'],name='R',data={'autocomplete':False})
     assert lib.read('complete')['candidates']==[]
 
 def test_block_save_is_snapshot_with_no_internal_assets_and_overwrite_is_explicit(lib):
-    pool=folder(lib,'P'); first=write(lib,'save_block',name='A',parent_id=pool,snapshot=snapshot('{ a, { b, off } }'))['asset']
+    pool=write(lib,'save_folder',name='P')['id']; first=write(lib,'save_block',name='A',parent_id=pool,snapshot=snapshot('{ a, { b, off } }'))['asset']
     expanded=lib.read('expand',id=first['id']); second=write(lib,'save_block',name='B',parent_id=pool,snapshot=expanded['snapshot'])['asset']
     changed=deepcopy(expanded['snapshot']); changed['children'][0]['raw']='changed'
     write(lib,'save_block',name='A',id=first['id'],version=first['version'],snapshot=changed)

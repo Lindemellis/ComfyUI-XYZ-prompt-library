@@ -53,7 +53,7 @@ export async function attachTagAC(editor, container) {
       return s && model() ? model().getOffsetAt(s.getEndPosition()) : 0;
     },
     /** Replace [start, end) with `text` and put the caret after it. */
-    splice: (start, end, text) => {
+    splice: (start, end, text, completion = null) => {
       const m = model();
       if (!m) return;
       const range = window.monaco.Range.fromPositions(
@@ -64,7 +64,9 @@ export async function attachTagAC(editor, container) {
       // bridge below must not report it back to tagac, or the dropdown reopens on the
       // candidate that was just chosen.
       suppressNext = true;
-      editor.executeEdits('plv3-tagac', [{ range, text, forceMoveMarkers: true }]);
+      m.__plv4TagCompletion = completion;
+      try { editor.executeEdits('plv3-tagac', [{ range, text, forceMoveMarkers: true }]); }
+      finally { delete m.__plv4TagCompletion; }
       const at = m.getPositionAt(start + text.length);
       editor.setPosition(at);
       editor.focus();

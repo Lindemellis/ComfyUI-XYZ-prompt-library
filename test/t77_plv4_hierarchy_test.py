@@ -126,7 +126,7 @@ def test_folder_containment_cycle_and_chain_duplicate_move_rejected(lib):
     before=lib.read()
     with pytest.raises(CommandError): mutate(lib,'move',id=root['id'],version=root['version'],parent_id=child['id'])
     assert lib.read()==before
-    left=create(lib,'folder','Left'); right=create(lib,'folder','Right')
+    left=create(lib,'class','Left'); right=create(lib,'class','Right')
     mutate(lib,'save_tag',parent_id=left['id'],text='x'); mutate(lib,'save_tag',parent_id=right['id'],text='x')
     before=lib.read()
     with pytest.raises(CommandError): mutate(lib,'move',id=right['id'],version=right['version'],parent_id=left['id'])
@@ -164,14 +164,14 @@ def test_explicit_v4_conversion_preserves_original_and_expands_only_in_copy(lega
     assert legacy.read_bytes()==original and report['mapping']['C']=='C'
     lib=AssetLibrary(target)
     try:
-        assets=lib.read()['assets']; assert {a['kind'] for a in assets}=={'folder','tag','block'}
+        assets=lib.read()['assets']; assert {a['kind'] for a in assets}=={'folder','class','tag','block'}
         assert lib.read('get',id='D')['parent_id']=='C'
         block=lib.read('expand',id='B')['snapshot']; assert block['meta']['pool']=='C'
         assert block['children'][1]['children'][1]['enabled'] is False
         assert 'ref' not in block['children'][1]
         assert not any(a['name']=='a' and a['parent_id']=='C' and a['kind']=='tag' for a in assets)
         assert any(a['name']=='a' and a['parent_id']=='D' and a['kind']=='tag' for a in assets)
-        clones=[a for a in assets if a['kind']=='folder' and a['name']=='Light' and a['parent_id']=='C']; assert len(clones)==1 and clones[0]['id']!='E'
+        clones=[a for a in assets if a['kind']=='class' and a['name']=='Light' and a['parent_id']=='C']; assert len(clones)==1 and clones[0]['id']!='E'
     finally: lib.close()
     with pytest.raises(CommandError): convert(legacy,target)
     assert legacy.read_bytes()==original

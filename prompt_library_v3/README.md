@@ -1,8 +1,10 @@
 # Prompt Library V3
 
-A prompt language, an editor for it, and a library that feeds it.
+A shared prompt language and compiler, with compatibility nodes for older workflows.
 
-For the current Blocks / Source / Preview editor and Folder pools, see [Prompt Library V4](../prompt_library_v4/README.md) ([中文](../prompt_library_v4/README_zh.md)). V3 nodes, language and original Library remain supported. The node Editor button opens V4; the original V3 window is available in XYZ Tools. V4 Library migration is explicit and preserves V3 data.
+**V3 product retirement (2026-10-11):** use [Prompt Library V4](../prompt_library_v4/README.md) ([中文](../prompt_library_v4/README_zh.md)) for Blocks / Source / Preview and Folder pools. The standalone V3 Editor / Library and their menu entries are retired; the V3 Library database and writer no longer start automatically. Existing V3 nodes remain registered as deprecated compatibility nodes, with their original sockets and compiler behavior. Their Editor buttons open V4. Merely loading a V3 workflow preserves its compiler policy; opening a node in V4 adopts V4's node seed and LoRA policy while retaining IDs and disabled content. The old database is retained and explicit V4 backup import still works.
+
+The language, compiler, Document model and shared Monaco implementation remain in use. Library/window sections below describe the historical V3 product and migration source; they are not current UI instructions. See the [retirement record](../plv3_retirement_plan.md) for the retained compatibility boundary.
 
 PLv3 replaces the retired Prompt Library V2 runtime. Existing V2 personal data is left
 untouched, and a [one-shot migration tool](#migrating-from-v2) remains available.
@@ -217,7 +219,9 @@ Two rules that are easy to get wrong, and both are deliberate:
 position in the text — without leaking it into the *other* region segments. It works on any
 region kind, `fill` included (a background written in the fill is often wanted in the full-image
 base too); on a `base` group it would say nothing, so the detail page hides the switch there.
-A region asking for it also *creates* the base segment when no `base` group was written.
+It only takes effect when the same enclosing group (the `[@region]` block, or the parent group
+of inline regions) also holds an enabled `base` region; without one — or with the base switched
+off — the switch does nothing, and it never creates a base segment on its own.
 
 `region_mode` on the node picks the backend: `couple` (attention couple) or `mask` (latent
 mask, `AND` + `MASK`). When the kind is not stated it is *inferred* — a `mask:` field means a

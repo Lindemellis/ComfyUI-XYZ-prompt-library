@@ -31,6 +31,8 @@
 - **Line（行）** —— 分组行（按大小 / 日期 / 首字母）。
 - **Detail（详情）** —— 单张图片的完整元数据（点击图片打开）。
 
+使用 PLV4 的 **metadata → XYZ PLV4 Image Metadata → Aaalice 条件保存图像** 保存 PNG 后，详情页正负提示词可切换 **Source / Prompt / Plain**，默认 Source，支持高亮与复制；LoRA 显示正向与额外调用的最终汇总。无需嵌入 workflow 或保留原 Library。保存链路须安装 Lora Manager，Aaalice 须更新到支持 PLV4 数据包的版本。点击 **Re-read metadata** 只刷新当前图片的解析，不改原图。详见 [PLV4 图片保存说明](../prompt_library_v4/README_zh.md#图片-source-与-xyz-gallery)。
+
 ## 视频
 
 `.mp4` / `.webm` / `.mkv` / `.mov` / `.m4v` 会和图片一起被索引，用的是同一套详情页——右侧的

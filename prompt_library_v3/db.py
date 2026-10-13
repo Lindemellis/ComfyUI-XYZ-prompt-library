@@ -38,35 +38,10 @@ from typing import Callable, Dict, Union
 
 __all__ = ["connect_read", "connect_write", "migrate", "MIGRATIONS", "SCHEMA_VERSION"]
 
-_MMAP_BYTES = 256 * 1024 * 1024
-_BUSY_TIMEOUT_MS = 5000
-
-_PathLike = Union[str, Path]
-
-
-def _apply_pragmas(conn: sqlite3.Connection) -> None:
-    conn.execute("PRAGMA journal_mode = WAL")
-    conn.execute("PRAGMA synchronous = NORMAL")
-    conn.execute("PRAGMA temp_store = MEMORY")
-    conn.execute(f"PRAGMA mmap_size = {_MMAP_BYTES}")
-    conn.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MS}")
-    conn.execute("PRAGMA foreign_keys = ON")
-
-
-def connect_read(path: _PathLike) -> sqlite3.Connection:
-    """A short-lived read connection.  WAL allows many at once."""
-    conn = sqlite3.connect(str(path))
-    _apply_pragmas(conn)
-    conn.row_factory = sqlite3.Row
-    return conn
-
-
-def connect_write(path: _PathLike) -> sqlite3.Connection:
-    """The single writer's connection.  Only WriteQueue may hold one."""
-    conn = sqlite3.connect(str(path), isolation_level=None)
-    _apply_pragmas(conn)
-    conn.row_factory = sqlite3.Row
-    return conn
+if '.' in __package__:
+    from ..prompt_shared.storage import connect_read, connect_write, _apply_pragmas
+else:
+    from prompt_shared.storage import connect_read, connect_write, _apply_pragmas
 
 
 def _v1(conn: sqlite3.Connection) -> None:

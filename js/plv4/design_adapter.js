@@ -21,6 +21,7 @@ export async function mountDesign(style, onReady) {
     .replace(/\.context-menu\b/g, ':scope.context-menu')
     // The preview is itself a .plv4 scope root, mounted directly under body.
     .replace(/\.library-tag-preview\b/g, ':scope.library-tag-preview')
+    .replace(/\.library-dialog-overlay\b/g, ':scope.library-dialog-overlay')
     .replace(/:scope\.cards\s+:scope\.floating-shell/g, ':scope.floating-shell.cards');
   style.textContent = `@scope (.plv4) { ${css} }` + ADAPTER;
   onReady?.();
@@ -30,8 +31,8 @@ export function blockLibraryPath(row, library) {
     const source = row.meta.source, asset = library?.data?.assets?.find(asset => asset.id === source.id);
     return asset ? asset.path || library.path(asset) : source.path || row.meta?.full_path || '';
   }
-  // Only saved block paths belong here. A Folder binding is not a block asset.
-  return row.meta?.full_path && row.meta?.source?.kind !== 'folder' ? row.meta.full_path : '';
+  // Only saved block paths belong here. A Class binding is not a block asset.
+  return row.meta?.full_path && !['folder','class'].includes(row.meta?.source?.kind) ? row.meta.full_path : '';
 }
 
 export function blockFrame(row, depth, folded, selected, libraryRoot, libraryPath = '', folder = null) {
@@ -39,7 +40,7 @@ export function blockFrame(row, depth, folded, selected, libraryRoot, libraryPat
   const b = { ...row, name: row.meta?.name || row.ast?.header || '', libraryPath, collapsed: folded,
     type: ['schedule', 'region', 'avg'].includes(row.form) ? row.form : row.meta?.lora ? 'lora' : 'normal',
     avgWeight: settings.avg_weight,
-    poolName: folder?.name || 'Folder 不在本机', poolPath: folder?.path || '', poolAvailable: !!folder,
+    poolName: folder?.name || 'Class 不在本机', poolPath: folder?.path || '', poolAvailable: !!folder,
     schedule: !!settings.schedule, start: settings.schedule?.[0], end: settings.schedule?.[1],
     region: !!settings.region, regionKind: settings.region?.kind, mask: settings.region?.imask };
   const leaves = (node, enabled = true) => enabled && node.enabled ? (node.children || []).filter(child => !child.meta?.lora_invocation).flatMap(child =>
@@ -51,6 +52,10 @@ export function blockFrame(row, depth, folded, selected, libraryRoot, libraryPat
     childrenHTML: () => '', join: list => list.join(', '), leaves, text: node => node.source, esc,
   });
   const box = template.content.firstElementChild;
+  if (row.form === 'region' && row.meta?.region_enabled === false) {
+    const label = box.querySelector('.block-type[data-kind="region"]');
+    if (label) { label.textContent = 'Region · Off'; label.title = 'Region functionality is off. Enabled entries render as ordinary prompt content.'; label.style.color = 'var(--muted)'; }
+  }
   const map = { block: 'plv4-block', 'block-head': 'plv4-header', fold: 'plv4-fold',
     'block-title': 'plv4-name', 'block-content': 'plv4-content', 'drag-handle': 'plv4-handle' };
   for (const node of [box, ...box.querySelectorAll('*')]) for (const [from, to] of Object.entries(map)) if (node.classList.contains(from)) node.classList.add(to);

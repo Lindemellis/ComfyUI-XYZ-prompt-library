@@ -86,12 +86,7 @@ function createDropdownButton() {
       action: () => window.plv4?.window?.toggle(null)?.catch?.(err => console.error('[PLv4]', err)),
     },
     { label: 'Prompt Library V4 — LoRA Browser', action: () => window.plv4?.loras?.open()?.catch?.(err => console.error('[PLv4]', err)) },
-      // PLv3 windows open with no node selected: the editor lists whatever PLv3 nodes are
-      // in the graph, and the library does not need one at all.
-      { label: 'Prompt Library V3 — Editor',
-        action: () => { try { window.plv3?.window?.toggle(null)?.catch?.(() => {}); } catch {} } },
-      { label: 'Prompt Library V3 — Library',
-        action: () => { try { window.plv3?.library?.toggle()?.catch?.(() => {}); } catch {} } },
+    { label: 'Prompt Library V4 — Mask Library', action: () => window.plv4?.masks?.open() },
       { separator: true },
       // The agent panel is a sidebar in this page, but its orchestrator is a
       // separate Node process that the panel is not allowed to spawn itself.

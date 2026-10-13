@@ -283,3 +283,17 @@ Library 中 Class 和 Block 的全名包含实际 folder / class / subclass / bl
 - 不受影响：Block UI、P1 文档与命令层、拖拽、Region / Schedule、PLv3 语法与编译。
 - 需要改：P3 Library 数据模型（Class → Folder 池、block 增加 `pool` 设置、收录逻辑、候选树数据源、补全索引来源）；P4 迁移映射改为“旧 group → Folder，旧 preset → 该 Folder 下保存的 block，旧子组 → 子文件夹”。
 - `pool` 属于 block 元数据，随 Document 保存；它只影响候选和收录，不影响编译结果。
+
+
+# 2026-10-11：Folder / Class / Block 新修正
+
+用户要求开始实现，覆盖此前“池就是 Folder / 不再有 Class”的决定。Class 沿用 Folder 池逻辑；新 Folder 仅整理 Folder/Class/Block。Class 只容纳散装 prompt 和 Subclass，Block 保持既有内容结构。存放位置和绑定独立，每块最多一个 Class pool。
+
+Pool 列 Class/Subclass 的 prompt，以及绑定各 Class 的已保存 Library Block；候选由绑定反查生成，不由 Class 实际包含，不新建引用容器。工作流临时块与未独立保存的内部子块不作为独立候选；编辑来源排除自身。添加复制快照，保留关闭项、内部绑定，已加入防重复沿用。
+
+Class 的 prompt 去重只查散装 prompt，不因组合 Block 含有词而阻止收录。Folder 保留现有文件夹图标，Class 使用叠层图标。池页/自动收录/Source 语言/编辑器/编译不重写；LoRA 触发词池改用 Class。旧池通过备份、保留 ID 的显式转换分离存放关系。
+
+
+## 2026-10-13 用户新增：Region 容器功能开关
+
+Region 组 Block 的 Settings → Region entries 顶部提供 Region 开关，默认开启。关闭只忽略本容器各 entry 的 Region 参数，将启用 entry 内容按顺序放进 prompt；普通权重/Schedule/随机/LoRA 保留，其他 Region 组不受影响。容器和 Region entry 架构不变，仍不能直接写 prompt 或容纳普通 Block，entry 各自 Enable 和参数/库引用都保留。整个 Block 的 Enable 仍是独立开关。关闭的容器不向 mask_bundle 挂载资源，编译不读取其图片；旧连线保留 Unused 零遮罩输出。重新开启按当前库内容刷新引用。开关使用 Document 的 meta.region_enabled=false（缺省开启），随 workflow/保存 Block/metadata 保留，Source 继续保留 Region 结构；只有 Source 的拷贝不包含此开关。共享 parser/语法不新增标记，纯编译器仅接收 V4 明确提供的容器 AST paths。

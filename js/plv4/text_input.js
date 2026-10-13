@@ -1,10 +1,10 @@
 // Native editable runs contain prompt decoration and parked (disabled) items.
 // Value and caret offsets use the same visible source, including commas/spaces.
 function pieces(root, nativeTerminator = true) {
-  const result = []; let text = '';
+  const result = []; let text = '', parked = false;
   const append = (value, start, end) => {
     if (!value) return;
-    result.push({ text: value, offset: text.length, start, end }); text += value;
+    result.push({ text: value, offset: text.length, start, end, afterParked: parked }); text += value; parked = false;
   };
   const visit = node => {
     if (node.nodeType === 3) { append(node.data, [node, 0], [node, node.data.length]); return; }
@@ -15,7 +15,8 @@ function pieces(root, nativeTerminator = true) {
     }
     let previousBlock = false;
     for (const [index, child] of [...node.childNodes].entries()) {
-      if (child.matches?.('[data-parked],[data-editor-decoration]')) continue;
+      if (child.matches?.('[data-parked]')) { parked = true; continue; }
+      if (child.matches?.('[data-editor-decoration]')) continue;
       const block = ['DIV', 'P'].includes(child.nodeName);
       if ((block || previousBlock) && text && !text.endsWith('\n')) append('\n', [node, index], [child, 0]);
       visit(child); previousBlock = block;
@@ -50,9 +51,12 @@ export function inlinePoint(field, offset) {
   const value = pieces(field);
   for (const [index, part] of value.pieces.entries()) {
     if (offset <= part.offset + part.text.length) {
-      if (offset === part.offset + part.text.length && part.text.endsWith('\n')) {
+      if (offset === part.offset + part.text.length) {
+        // A disabled item has no value, so both of its sides share one offset.
+        // The document re-inserts it before text typed there: place the caret
+        // after it, or input appears before it and jumps behind it on redraw.
         const next = value.pieces[index + 1];
-        if (next) return next.start;
+        if (next && (part.text.endsWith('\n') || next.afterParked)) return next.start;
       }
       if (part.start[0].nodeType === 3) return [part.start[0], Math.max(0, offset - part.offset)];
       return offset <= part.offset ? part.start : part.end;

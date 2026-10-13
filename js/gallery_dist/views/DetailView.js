@@ -51,6 +51,7 @@ import { subscribeGalleryEvent, subscribeReconcile, EV } from '../stores/connect
 import { videoPrefs, setVideoPref } from '../stores/gallerySettings.js';
 import { vocabCacheClear } from '../stores/vocab.js';
 import { vocabAutocompleteMatch, developerMode } from '../stores/gallerySettings.js';
+import { PLV4Prompt } from '../components/PLV4Prompt.js';
 
 const MIN_SCALE = 0.05;
 const MAX_SCALE = 20;
@@ -90,12 +91,22 @@ export function joinNovelAIPromptParts(parts) {
 
 export const DetailView = defineComponent({
   name: 'DetailView',
-  components: { Autocomplete, ConfirmModal, IconButton },
+  components: { Autocomplete, ConfirmModal, IconButton, PLV4Prompt },
   props: { id: { type: Number, required: true } },
   setup(props) {
     const loading = ref(true);
     const error = ref(null);
     const record = ref(null);
+    const rereadBusy = ref(false), rereadError = ref('');
+    async function rereadMetadata() {
+      const id = props.id; rereadBusy.value = true; rereadError.value = '';
+      try {
+        const value = await api.post('/image/' + id + '/reread', {});
+        if (String(props.id) === String(id)) record.value = value;
+      } catch (error) {
+        if (String(props.id) === String(id)) rereadError.value = error.message || String(error);
+      } finally { rereadBusy.value = false; }
+    }
 
     const prevId = ref(null);
     const nextId = ref(null);
@@ -715,6 +726,7 @@ export const DetailView = defineComponent({
       // one soundtrack per item.
       stopVideo();
       posView.value = 'raw';
+      rereadError.value = '';
       nameEditing.value = false;
       renameErr.value = '';
       folderTreeFlat.value = null;
@@ -734,6 +746,7 @@ export const DetailView = defineComponent({
       const value = meta.value && meta.value.generation;
       return value && typeof value === 'object' ? value : {};
     });
+    const plv4 = computed(() => generation.value.plv4 || null);
     const isNovelAI = computed(() => generation.value.provider === 'novelai');
     const novelAICharacters = computed(() => {
       const rows = generation.value && generation.value.characters;
@@ -776,6 +789,14 @@ export const DetailView = defineComponent({
     // normalisation pipeline strips it, so we always parse the RAW prompt
     // (independent of the 原文/归一化 toggle) to surface it as its own row.
     const loras = computed(() => {
+      if (plv4.value) return (plv4.value.loras || []).map(row => {
+        const interval = row.schedule || [0, 1];
+        const weight = row.model_strength == null ? '' : row.clip_strength === row.model_strength
+          ? String(row.model_strength) : 'model ' + row.model_strength + ' · clip ' + row.clip_strength;
+        const schedule = interval[0] === 0 && interval[1] === 1 ? '' : interval.join('–');
+        return { name: row.name || row.raw, weight: [weight, schedule].filter(Boolean).join(' · '),
+          raw: schedule ? '[' + row.raw + ', :' + interval.join(',') + ']' : row.raw };
+      });
       const m = meta.value;
       const src = m && m.positive_prompt;
       if (!src) return [];
@@ -1043,7 +1064,7 @@ export const DetailView = defineComponent({
       loading, error, record, meta, generation, isNovelAI, novelAICharacters,
       novelAICombinedPositive, novelAICombinedNegative,
       gallery, size, folder,
-      posView, displayPositive, loras, lorasText,
+      posView, displayPositive, loras, lorasText, plv4, rereadBusy, rereadError, rereadMetadata,
       prevId, nextId, neighborsLoading,
       scale, tx, ty, scalePct,
       asideWidthPx, onAsideSplitDown,
@@ -1368,6 +1389,10 @@ export const DetailView = defineComponent({
 
             <section class="dv-sec-block" aria-label="generation data">
               <h3 class="dv-sec">{{ isNovelAI ? 'NovelAI data' : 'ComfyUI data' }}</h3>
+              <button type="button" class="dv-copy" :disabled="rereadBusy || gallerySaving || favSaving || gallery.sync_status === 'pending'"
+                      title="Re-read this file's generation metadata; the original file is unchanged"
+                      @click="rereadMetadata">{{ rereadBusy ? 'Reading…' : 'Re-read metadata' }}</button>
+              <p v-if="rereadError" class="error" role="alert">{{ rereadError }}</p>
               <dl class="dv-meta">
                 <dt>Model</dt>
                 <dd><code v-if="meta.model">{{ meta.model }}</code><span v-else class="muted">—</span></dd>
@@ -1422,7 +1447,7 @@ export const DetailView = defineComponent({
                 </dt>
                 <dt>
                   Positive prompt
-                  <span class="dv-prompt-mode" role="group" aria-label="positive prompt view">
+                  <span v-if="!plv4" class="dv-prompt-mode" role="group" aria-label="positive prompt view">
                     <button type="button"
                             class="dv-prompt-mode-btn"
                             :class="{ active: posView === 'raw' }"
@@ -1434,26 +1459,30 @@ export const DetailView = defineComponent({
                             :aria-pressed="posView === 'norm' ? 'true' : 'false'"
                             @click="posView = 'norm'">归一化</button>
                   </span>
-                  <button type="button" class="dv-copy"
+                  <button v-if="!plv4" type="button" class="dv-copy"
                           :disabled="!displayPositive"
                           @click="copy('positive', displayPositive)">
                     {{ copiedKey === 'positive' ? 'Copied!' : 'Copy' }}
                   </button>
                 </dt>
                 <dd>
-                  <pre v-if="displayPositive" class="dv-prompt">{{ displayPositive }}</pre>
+                  <PLV4Prompt v-if="plv4" :key="record.id + '-positive'" :snapshot="plv4.positive"
+                              :copied="copiedKey === 'positive'" @copy="copy('positive', $event)" />
+                  <pre v-else-if="displayPositive" class="dv-prompt">{{ displayPositive }}</pre>
                   <span v-else class="muted">—</span>
                 </dd>
                 <dt>
                   Negative prompt
-                  <button type="button" class="dv-copy"
+                  <button v-if="!plv4" type="button" class="dv-copy"
                           :disabled="!meta.negative_prompt"
                           @click="copy('negative', meta.negative_prompt)">
                     {{ copiedKey === 'negative' ? 'Copied!' : 'Copy' }}
                   </button>
                 </dt>
                 <dd>
-                  <pre v-if="meta.negative_prompt" class="dv-prompt">{{ meta.negative_prompt }}</pre>
+                  <PLV4Prompt v-if="plv4 && plv4.negative" :key="record.id + '-negative'" :snapshot="plv4.negative"
+                              :copied="copiedKey === 'negative'" @copy="copy('negative', $event)" />
+                  <pre v-else-if="!plv4 && meta.negative_prompt" class="dv-prompt">{{ meta.negative_prompt }}</pre>
                   <span v-else class="muted">—</span>
                 </dd>
                 <template v-if="isNovelAI && novelAICharacters.length">

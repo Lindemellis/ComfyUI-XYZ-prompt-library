@@ -967,6 +967,28 @@ def resync_image(image_id: int, *, db_path: Path) -> _repo.ImageRecord:
     return out
 
 
+def reread_image_metadata(image_id: int, *, db_path: Path) -> _repo.ImageRecord:
+    """Explicitly re-index one file with the current parser; never rewrite it."""
+    rec = _repo.get_image(int(image_id), db_path=db_path)
+    if rec is None:
+        raise KeyError(f'image {image_id} not found')
+    roots = _folders.list_roots(db_path=db_path)
+    _paths.assert_inside_root(rec.path, [root['path'] for root in roots])
+    root = next((root for root in roots if Path(rec.path).resolve().is_relative_to(
+        Path(root['path']).resolve())), None)
+    if root is None:
+        raise ValueError('Image has no registered root')
+    from . import indexer as _indexer
+    result = _indexer.index_one(rec.path, root=root, db_path=db_path,
+                               write_queue=_write_queue_handle(), force=True)
+    if result is None:
+        raise RuntimeError('Image could not be re-read; it may be missing or currently being indexed')
+    updated = _repo.get_image(int(image_id), db_path=db_path)
+    if updated is None:
+        raise KeyError(f'image {image_id} vanished while reading metadata')
+    return updated
+
+
 def backfill_missing_steps(*, db_path: Path) -> Dict[str, Any]:
     """Queue a real indexer re-read for every incomplete generation record.
 

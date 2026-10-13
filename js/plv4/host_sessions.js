@@ -2,14 +2,35 @@ import { DocumentSession } from './document_session.js';
 import { bindPromptEditor } from './prompt_editor_binding.js';
 import { report } from './ui.js';
 import { libraryDocumentRequest, ensureOwner } from './asset_client.js';
+import { maskRequest, MASK_EVENT } from './mask_library.js';
 
-export const NODE_TYPES = new Set(['XYZ Prompt Library V3', 'XYZ Prompt Library V3 Monaco', 'XYZ Prompt Library V4', 'XYZ Prompt Library V4 Monaco']);
+export { NODE_TYPES } from '../prompt_shared/node_types.js';
 export const widget = (node, name) => node?.widgets?.find(w => w.name === name);
 const copy = value => JSON.parse(JSON.stringify(value));
 
+export function maskBindings(tree) {
+  const bindings = [];
+  const visit = (row, regional = true) => {
+    if (!row) return;
+    regional &&= !(row.form === 'region' && row.meta?.region_enabled === false);
+    if (row.meta?.mask_library && row.settings?.region) bindings.push([row.id, row.effective, regional, row.settings.region, row.meta.mask_library]);
+    row.children.forEach(child => visit(child, regional));
+  };
+  visit(tree); return JSON.stringify(bindings);
+}
+
 // Sessions belong to node objects, not numeric IDs reused by another graph.
 export class NodeSessions {
-  constructor(app) { this.app = app; this.contexts = new Map(); this.opening = new Map(); this.writing = new Set(); }
+  constructor(app) {
+    this.app = app; this.contexts = new Map(); this.opening = new Map(); this.writing = new Set();
+    window.addEventListener(MASK_EVENT, () => {
+      for (const context of this.contexts.values()) {
+        if (!JSON.stringify(context.session.state.doc).includes('mask_library')) continue;
+        context.maskDirty = true;
+        if (context.raw == null && context.session.valid) this.refreshMasks(context);
+      }
+    });
+  }
   async get(node) {
     if (this.contexts.has(node)) return this.contexts.get(node);
     if (this.opening.has(node)) return this.opening.get(node);
@@ -29,12 +50,29 @@ export class NodeSessions {
     ensureOwner(session);
     await libraryDocumentRequest.observe(session);
     const context = { node, session, bindings: new Map(), folded: new Set(), focus: null, scroll: 0, syntaxState: null };
+    context.maskBindings = maskBindings(session.projection.tree);
     context.unsubscribe = session.subscribe(({ reason }) => {
       if (context.raw === session.text) context.raw = null;
-      if (reason !== 'View') this.persist(context);
+      if (!['View', 'LocateDetails'].includes(reason)) this.persist(context);
+      if (session.valid) {
+        const signature = maskBindings(session.projection.tree), changed = signature !== context.maskBindings;
+        context.maskBindings = signature;
+        if (!['View','LocateDetails','MaskResources'].includes(reason) && (changed || context.maskDirty) && context.raw == null && signature !== '[]') this.refreshMasks(context);
+      }
     });
     this.contexts.set(node, context); this.attachEmbedded(context); this.persist(context);
+    if (JSON.stringify(session.state.doc).includes('mask_library')) this.refreshMasks(context);
     return context;
+  }
+  refreshMasks(context) {
+    context.maskDirty = false;
+    return context.session.resolveMasks(maskRequest, () => {
+      if (context.raw != null) { context.maskDirty = true; return false; }
+      return true;
+    }).catch(error => {
+      context.maskDirty = true; context.maskError = error.message;
+      window.dispatchEvent(new CustomEvent('xyz-plv4-document-changed', { detail: { node: context.node, error: error.message } }));
+    });
   }
   persist(context, raw = null) {
     const { node, session } = context;
@@ -51,6 +89,7 @@ export class NodeSessions {
       const tw = widget(node, 'text'); if (tw && tw.value !== current) { tw.value = current; tw.callback?.call(node, current); }
       node.graph.setDirtyCanvas(true, false);
     } finally { this.writing.delete(node); }
+    window.dispatchEvent(new CustomEvent('xyz-plv4-document-changed', {detail:{node}}));
   }
   bind(context, pane) {
     if (context.bindings.has(pane)) return;
@@ -77,21 +116,27 @@ export class NodeSessions {
   async inputs(node) {
     const input = node.inputs?.find(i => i.name === 'seed');
     let seed = widget(node, 'seed')?.value;
-    if (input?.link != null) {
+    const modeInput = node.inputs?.find(i => i.name === 'region_mode');
+    let regionMode = widget(node, 'region_mode')?.value || 'couple';
+    if (input?.link != null || modeInput?.link != null) {
       // graphToPrompt propagates virtual widgets and calls their callbacks. Mark
       // the entire graph read before invoking it, and share concurrent readers,
       // so those callbacks cannot recursively start another Preview/lint read.
       this._inputPrompt ??= Promise.resolve().then(() => this.app.graphToPrompt()).finally(() => { this._inputPrompt = null; });
       const prompt = await this._inputPrompt;
-      seed = prompt.output[String(node.id)]?.inputs?.seed;
+      const resolved = prompt.output[String(node.id)]?.inputs;
+      seed = resolved?.seed;
+      regionMode = resolved?.region_mode;
       // Virtual/Primitive/global widget links are resolved by ComfyUI itself.
       // A backend-only upstream node is evaluated at execution, never guessed.
       if (Array.isArray(seed)) throw new Error('seed 由上游节点计算；运行工作流后查看实际输出。');
+      if (Array.isArray(regionMode)) throw new Error('region_mode 由上游节点计算；运行工作流后查看实际输出。');
     }
     if (!Number.isSafeInteger(Number(seed))) throw new Error('节点 seed 必须是可准确表示的整数');
-    return { seed: Number(seed), region_mode: widget(node, 'region_mode')?.value || 'couple' };
+    if (!['couple', 'mask'].includes(regionMode)) throw new Error('region_mode 必须为 couple 或 mask');
+    return { seed: Number(seed), region_mode: regionMode };
   }
-  async flush() { await Promise.all([...this.contexts.values()].map(async c => { await c.session.whenIdle(); await c.session.commitPool(); this.persist(c); })); }
+  async flush() { await Promise.all([...this.contexts.values()].map(async c => { await c.session.flushDrafts(); await c.session.whenIdle(); await c.session.commitPool(); this.persist(c); })); }
   remove(node) {
     const context = this.contexts.get(node); if (!context) return;
     for (const binding of context.bindings.values()) binding.dispose();

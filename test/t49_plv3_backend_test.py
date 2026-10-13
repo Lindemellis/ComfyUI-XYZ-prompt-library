@@ -50,13 +50,20 @@ def test_no_regions_means_a_single_line():
 def test_rectangle_mask_expression():
     src = "q, {illya}.set{region: {mask: [0, 0.2, 0.1, 0.3], mask_weight: 0.8}}"
     got = compile_text(src, region_mode="mask").text
-    assert got == "MASK(0 0.2, 0.1 0.3, 0.8) q, illya"
+    # the rectangle does not cover the image and nothing else was written, so the
+    # rest gets the ambient text: a pixel no chunk covers predicts zero in AND mode
+    assert got == ("MASK(0 1, 0 1, 1) MASK(0 0.2, 0.1 0.3, 0.8,subtract) q\n"
+                   "AND MASK(0 0.2, 0.1 0.3, 0.8) q, illya")
+    halves = "{a}.set{region: {mask: [0, 0.5, 0, 1]}} {b}.set{region: {mask: [0.5, 1, 0, 1]}}"
+    assert compile_text(halves, region_mode="mask").text == (
+        "MASK(0 0.5, 0 1, 1) a\nAND MASK(0.5 1, 0 1, 1) b")  # provably covered: no extra chunk
 
 
 def test_region_weight_is_a_legacy_alias_for_mask_weight():
     a = compile_text("{x}.set{region: {imask: 0, region_weight: 0.8}}", region_mode="couple").text
     b = compile_text("{x}.set{region: {imask: 0, mask_weight: 0.8}}", region_mode="couple").text
-    assert a == b == "COUPLE IMASK(0, 0.8) x"
+    # no base / fill text: FILL() leads, or prompt-control makes an empty full-image base
+    assert a == b == "FILL()\nCOUPLE IMASK(0, 0.8) x"
 
 
 def test_cond_weight_is_a_trailing_colon_w_on_every_kind():
@@ -95,7 +102,7 @@ def test_fill_carries_cond_weight_but_never_a_mask_weight():
 def test_feather_is_emitted_after_the_mask():
     src = "{x}.set{region: {imask: 3, feather: 12}}"
     got = compile_text(src, region_mode="couple").text
-    assert got == "COUPLE IMASK(3, 1) FEATHER(12 12 12 12) x"
+    assert got == "FILL()\nCOUPLE IMASK(3, 1) FEATHER(12 12 12 12) x"
 
 
 def test_couple_fill_takes_the_base_slot_and_base_becomes_a_couple_segment():
@@ -137,15 +144,15 @@ def test_mask_mode_synthesises_fill_and_warns_W12():
         "2girls\n"
         "AND IMASK(0, 1) illya\n"
         "AND MASK(0 0.5, 0 1, 1) miyu\n"
-        "AND MASK(0 1, 0 1, 1) IMASK(0, 1, subtract) "
-        "MASK(0 0.5, 0 1, 1, subtract) background"
+        "AND MASK(0 1, 0 1, 1) IMASK(0, 1,subtract) "
+        "MASK(0 0.5, 0 1, 1,subtract) background"
     )
 
 
 def test_scheduled_region_survives_into_the_backend():
     src = "q, {illya}.set{region: {imask: 0}, schedule: {0.2, 0.5}}"
     got = compile_text(src, region_mode="couple").text
-    assert got == "COUPLE IMASK(0, 1) [q, illya, :0.2,0.5]"
+    assert got == "[q, :0,0.2] [FILL() q\nCOUPLE IMASK(0, 1) q, illya, :0.2,0.5] [q, :0.5,1]"
 
 
 def test_unknown_region_mode_falls_back_to_couple():

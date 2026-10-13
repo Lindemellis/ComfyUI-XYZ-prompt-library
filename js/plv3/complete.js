@@ -10,43 +10,10 @@
 //                            the wiki links, preview images, artist works and related
 //                            tags, which a Monaco suggest item cannot render.
 
-let _tree = null;
-let _treeAt = 0;
-
-/** The `[` candidates: every group, and every preset of every group.
- *
- *  A preset IS a whitelist and an order (spec §5.4), so `[quality.anima ▸ portrait]`
- *  expands to the same block as `[quality.anima]` minus the items the preset leaves
- *  out. Both insert a fully expanded block — the document never holds a pointer. */
-async function libraryPaths() {
-  // Cheap cache: the tree only changes when the library window writes to it.
-  if (_tree && Date.now() - _treeAt < 5000) return _tree;
-  try {
-    const res = await fetch('/xyz/plv3/library/tree');
-    const data = await res.json();
-    const groups = data.groups || [];
-    const byGroup = new Map();
-    for (const p of data.presets || []) {
-      if (!byGroup.has(p.group_id)) byGroup.set(p.group_id, []);
-      byGroup.get(p.group_id).push(p);
-    }
-    _tree = [];
-    for (const g of groups) {
-      _tree.push({ id: g.id, path: g.path, preset: null });
-      for (const p of byGroup.get(g.id) || []) {
-        _tree.push({ id: g.id, path: g.path, preset: p });
-      }
-    }
-    _treeAt = Date.now();
-  } catch {
-    _tree = [];
-  }
-  return _tree;
-}
-
-export function invalidateLibraryCache() {
-  _tree = null;
-}
+// Legacy Library cache hook retained for historical UI modules. Active hosts
+// use only the V4 provider; an untouched V3 node has language completions until
+// the user opens it in V4. Completion never starts/reads the retired V3 Library.
+export function invalidateLibraryCache() {}
 
 /** What the typed word is matched against: the path, plus the preset name if any. */
 function searchKey(g) {
@@ -267,7 +234,7 @@ export async function provideCompletions(monaco, model, position, { onInsertBloc
       }
       return { suggestions: specialBlocks(monaco, model, position, range, needle, brace) };
     }
-    const groups = [...await libraryPaths(), ...await (window.xyzPLv4LibraryPaths?.(model) || [])];
+    const groups = model.__plv4Session ? await (window.xyzPLv4LibraryPaths?.(model) || []) : [];
     return {
       suggestions: [
         // `[` opens three different things, and until now it only offered one of them.

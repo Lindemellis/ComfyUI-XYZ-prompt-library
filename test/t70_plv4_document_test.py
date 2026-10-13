@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+import re
 import sys
 from pathlib import Path
 
@@ -195,12 +196,12 @@ def test_wrap_visible_selection_carries_invisible_siblings_in_place():
     state = run(state, "SetEnabled", id=off, enabled=False)
     b, c = state.doc.root.children[1].id, state.doc.root.children[3].id
     state = run(state, "WrapSelection", ids=[b, c])
-    assert state.text == "a, {\n    b,\n    c\n}, d"
+    assert state.text == "a, {\n    b, c\n}, d"
     group = state.doc.root.children[1]
     assert [n.id for n in group.children] == [b, off, c]
     assert not group.children[1].enabled
     state = run(state, "SetEnabled", id=off, enabled=True)
-    assert state.text == "a, {\n    b,\n    off,\n    c\n}, d"
+    assert state.text == "a, {\n    b, off, c\n}, d"
     assert state.selection["block_id"] == group.id
 
 
@@ -238,7 +239,7 @@ def test_move_keeps_ids_disabled_items_and_metadata_and_uses_adjacent_id():
     state = run(state, "SetMetadata", id=block.id, patch={"pool": "C"})
     old_ids = set(ids(state))
     state = run(state, "MoveBlock", id=block.id, parent_id=second.id, before_id=second.children[1].id)
-    assert state.text == "{\n    a,\n    c\n},\n{\n    d,\n    {\n        b,\n    },\n    e\n},\ntail"
+    assert state.text == "{ a, c }, { d, { b, }, e }, tail"
     assert set(ids(state)) == old_ids
     assert state.doc.find(block.id).meta["pool"] == "C"
     assert state.doc.find(block.id).children[1].enabled is False
@@ -489,6 +490,45 @@ def test_new_block_does_not_reformat_existing_source_even_with_legacy_layout_fla
     assert state.text.startswith('  head,  {old,\n  spaced},\t ')
     assert state.text.endswith(' tail  ')
     assert state.doc.find(old.id).raw == '{old,\n  spaced}'
+
+
+@pytest.mark.parametrize('legacy_layout', [False, True])
+@pytest.mark.parametrize('cross_parent', [False, True])
+def test_move_keeps_user_newlines_in_mixed_text_and_block_runs(legacy_layout, cross_parent):
+    original = '{ first,\n\nsecond, { inner,\n\nbody }, middle,\nlast }, { target,\n\nend }'
+    state = EditorState.create(original)
+    if legacy_layout: state.doc.root.meta['_layout_indent'] = 4
+    owner, target = state.doc.root.children
+    block = owner.children[2]
+    bodies = {n.id:n.raw for n in state.doc.root.walk() if n.kind != 'group'}
+    gaps = {n.id:n.sep for n in state.doc.root.walk() if n.kind != 'group'}
+    moved = run(state, 'MoveBlock', id=block.id, parent_id=(target if cross_parent else owner).id, edge='end')
+    assert {n.id:n.raw for n in moved.doc.root.walk() if n.kind != 'group'} == bodies
+    assert moved.doc.find(owner.children[0].id).sep == gaps[owner.children[0].id]
+    assert moved.doc.find(target.children[0].id).sep == gaps[target.children[0].id]
+    assert moved.doc.find(block.id).raw == block.raw
+    assert 'first,\n\nsecond' in moved.text
+    assert 'inner,\n\nbody' in moved.text
+    assert 'target,\n\nend' in moved.text
+
+
+def test_text_entry_anchor_places_new_items_before_a_parked_subblock():
+    state = EditorState.create('{ { left }, { parked }, { right } }')
+    parent = state.doc.root.children[0]
+    parked = parent.children[1]
+    parked.enabled = False
+    old_ids = set(ids(state))
+    anchor = {'parent_id':parent.id, 'before_id':parked.id}
+    text = state.text.replace('{ right }', 'middle, next, { right }')
+    state = run(state, 'ReplaceText', text=text, insert_anchor=anchor)
+    children = state.doc.find(parent.id).children
+    assert [n.raw for n in children] == ['{ left }','middle','next','{ parked }','{ right }']
+    assert state.doc.find(parked.id).enabled is False
+    assert old_ids <= set(ids(state))
+    assert state.text == text
+    text = state.text.replace('next, ', 'next, third, ')
+    state = run(state, 'ReplaceText', text=text, insert_anchor=anchor)
+    assert [n.raw for n in state.doc.find(parent.id).children][1:5] == ['middle','next','third','{ parked }']
 
 
 @pytest.mark.parametrize('source, selected', [
@@ -772,3 +812,66 @@ def test_container_rejects_random_and_format_settings_while_entry_accepts_them(f
     updated = run(state, 'SetSettings', id=container.children[0].id, patch=patch)
     key, value = next(iter(patch.items()))
     assert projection(updated)['tree']['children'][0]['children'][0]['settings'][key] == value
+
+
+@pytest.mark.parametrize('source', [
+    '{ a,\nb, c\n }, { other }',
+    '{\n    a,\n    b\n}, { other }',
+    'a,\nb, c\n, { other }',
+    '[@schedule]: { 0 - 0.5: { a,\nb\n\n }, 0.5 - 1: { other } }',
+])
+@pytest.mark.parametrize('command', ['settings', 'delete'])
+def test_whole_document_layout_keeps_typed_line_breaks(source, command):
+    # SetSettings / Delete / Region / Library updates re-lay-out the whole
+    # document. Enter between prompts and at the end of a block is content.
+    state = EditorState.create(source)
+    state.doc.root.meta['_layout_indent'] = 4
+    other = find_raw(state, 'other')
+    if command == 'settings':
+        state = run(state, 'SetSettings', id=state.doc.root.id, patch={})
+    else:
+        owner = next(n for n in state.doc.root.walk() if other in n.children)
+        state = run(state, 'Delete', id=owner.id if owner.form != 'root' else other.id)
+    text = state.text
+    if not source.startswith('{\n'):
+        assert 'a,\nb' in text
+    for _ in range(3):
+        state = run(state, 'SetSettings', id=state.doc.root.id, patch={})
+    assert state.text == text, 'layout must be stable across repeated commands'
+    if source.startswith('{ a') or source.startswith('[@'):
+        assert re.search(r'[bc]\n\n\s*}', text), text
+
+
+def test_layout_keeps_a_trailing_enter_but_adds_none():
+    state = EditorState.create('{ a, b\n }, x')
+    state.doc.root.meta['_layout_indent'] = 4
+    state = run(state, 'SetSettings', id=state.doc.root.id, patch={})
+    assert state.text == '{\n    a, b\n\n},\nx'
+    state = run(state, 'SetSettings', id=state.doc.root.id, patch={})
+    assert state.text == '{\n    a, b\n\n},\nx'
+    plain = run(EditorState.create('{ a, b }'), 'SetSettings', id=EditorState.create('{ a, b }').doc.root.id, patch={})
+    assert plain.text == '{\n    a, b\n}'
+
+
+def test_layout_treats_enter_before_a_separator_space_as_typed():
+    # Enter at `skinny,| long legs` yields `,\n\n long`: one space after a
+    # newline is the old separator space, not generated indentation.
+    for gap in ('\n\n ', '\n '):
+        state = EditorState.create('{ grey hair, skinny,' + gap + 'long legs }, { other }')
+        state = run(state, 'SetSettings', id=state.doc.root.id, patch={})
+        assert 'skinny,' + gap + 'long legs' in state.text
+
+
+def test_windows_line_ends_are_normalised_on_open_commands_and_typing():
+    # A CR left in the source is an invisible character in the Blocks view's
+    # native text: a blank line made of `CR LF` + `LF` cannot take the caret.
+    crlf = '{\r\n    full body, \r\n\nkafka, upper body\r\n},\r\n{ x }'
+    state = EditorState.create(crlf)
+    assert '\r' not in state.text and 'full body, \n\nkafka' in state.text
+    legacy = EditorState.create(None, doc=from_text(crlf).to_json())
+    assert legacy.text == state.text
+    payload = legacy.to_json()
+    payload['doc'] = from_text(crlf).to_json(); payload['text'] = crlf
+    assert EditorState.from_json(payload).text == state.text
+    typed = run(state, 'ReplaceText', text=state.text.replace('upper body', 'upper body,\r\ncowboy shot'))
+    assert '\r' not in typed.text and 'upper body,\ncowboy shot' in typed.text

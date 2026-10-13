@@ -62,12 +62,14 @@ export function promptDisplay(row, source) {
 export function separatorDisplay(source, start, end) {
   const raw = source.slice(start, end);
   // Indentation belongs to the PLv3 block layout, already represented by cards.
-  // Keep explicit unindented newlines (native Enter) and all prompt text intact.
-  if (!/^[\s,]*$/.test(raw) || !/(?:\r\n|[\r\n])[ \t]+/.test(raw)) {
+  // Generated indentation is a tab or at least two spaces; a newline followed by
+  // one space is a native Enter typed before an existing separator space
+  // (`skinny,| long`). Treating that as layout hid the typed blank line.
+  if (!/^[\s,]*$/.test(raw) || !/(?:\r\n|[\r\n])(?:\t| {2})/.test(raw)) {
     return { text: raw, offsets: Array.from({ length: raw.length + 1 }, (_, i) => start + i) };
   }
   let text = '', offsets = [start];
-  const layout = /[ \t]*(?:\r\n|[\r\n])[ \t]+/y;
+  const layout = /[ \t]*(?:\r\n|[\r\n])(?:\t| {2})[ \t]*/y;
   for (let i = 0; i < raw.length;) {
     layout.lastIndex = i;
     const match = layout.exec(raw);

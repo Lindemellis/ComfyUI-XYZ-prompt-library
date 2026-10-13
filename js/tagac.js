@@ -77,6 +77,7 @@ settings.save = function () {
     const { save, ...plain } = settings;
     localStorage.setItem(_SETTINGS_KEY, JSON.stringify(plain));
   } catch {}
+  document.querySelectorAll('[data-xyz-preview-prompt]').forEach(slot => attachTagPreview(slot, slot.dataset.xyzPreviewPrompt));
 };
 window.xyzAcSettings = settings;
 
@@ -338,6 +339,73 @@ function _hideTagPreviewPopup() {
   }, 250);
 }
 
+// All hosts share the same icon, settings, cache, popup and image proxy.
+function createTagPreviewIcon(tag) {
+  if (tag._libraryOnly || !(tag.sources || ['danbooru']).includes('danbooru')) return null;
+  const artistOnly = !settings.showTagPreview && settings.showArtistPreview && tag.category === 1;
+  if (!settings.showTagPreview && !artistOnly) return null;
+  const icon = document.createElement('button'); icon.type = 'button';
+  icon.className = 'xyz-tag-preview-icon'; icon.textContent = '🖼';
+  icon.title = artistOnly ? 'Show recent works' : 'Preview';
+  icon.setAttribute('aria-label', `${icon.title}: ${tag.name}`);
+  Object.assign(icon.style, { fontSize: '13px', flexShrink: '0', cursor: 'help', padding: '0 2px', color: '#89b4fa', background: 'none', border: '0' });
+  const show = () => {
+    if (!settings.showTagPreview && !(settings.showArtistPreview && tag.category === 1)) return;
+    _showTagPreviewPopup(icon, tag.name, Math.max(1, Math.min(settings.previewCount || 1, 10)));
+  };
+  icon.addEventListener('mouseenter', show); icon.addEventListener('focus', show);
+  icon.addEventListener('mouseleave', _hideTagPreviewPopup); icon.addEventListener('blur', _hideTagPreviewPopup);
+  icon.addEventListener('mousedown', event => { event.preventDefault(); event.stopPropagation(); });
+  icon.addEventListener('click', event => {
+    event.preventDefault(); event.stopPropagation();
+    if (!settings.showTagPreview && settings.showArtistPreview && tag.category === 1) showArtistWorks(tag.name);
+    else show();
+  });
+  return icon;
+}
+
+const _identityCache = new Map(), _identityPending = new Map();
+let _identityTimer = null;
+function lookupPreviewTag(name) {
+  // Preserve literal parentheses in Danbooru names, including escaped forms.
+  name = name.trim().replace(/\\([()])/g, '$1').replace(/\s+/g, '_').toLowerCase();
+  if (!name || name.length > 512) return Promise.resolve(null);
+  const key = settings.animaArtist && name.startsWith('@') ? [name, name.replace(/^@+/, '')] : [name];
+  const lookup = query => {
+    if (_identityCache.has(query)) return _identityCache.get(query);
+    const promise = new Promise(resolve => _identityPending.set(query, resolve));
+    _identityCache.set(query, promise);
+    if (!_identityTimer) _identityTimer = setTimeout(flushPreviewIdentities, 0);
+    return promise;
+  };
+  return Promise.all(key.map(lookup)).then(tags => tags[0] || (tags[1]?.category === 1 ? tags[1] : null));
+}
+async function flushPreviewIdentities() {
+  _identityTimer = null;
+  const entries = [..._identityPending]; _identityPending.clear();
+  for (let start = 0; start < entries.length; start += 500) {
+    const batch = entries.slice(start, start + 500);
+    let rows = [], success = false;
+    try {
+      const response = await fetch('/xyz/tagdb/lookup', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ names: batch.map(([name]) => name) }) });
+      if (response.ok) { rows = await response.json(); success = Array.isArray(rows); }
+    } catch {}
+    const tags = new Map((Array.isArray(rows) ? rows : []).map(tag => [tag.query, tag]));
+    for (const [name, resolve] of batch) { if (!success) _identityCache.delete(name); resolve(tags.get(name) || null); }
+  }
+  // Bound cache growth during long Library browsing sessions.
+  if (_identityCache.size > 5000) _identityCache.clear();
+}
+async function attachTagPreview(slot, name) {
+  slot.dataset.xyzPreviewPrompt = name;
+  const token = slot._xyzPreviewToken = (slot._xyzPreviewToken || 0) + 1;
+  slot.replaceChildren();
+  if (!name || (!settings.showArtistPreview && !settings.showTagPreview)) return;
+  const tag = await lookupPreviewTag(name);
+  if (slot._xyzPreviewToken !== token || !tag) return;
+  const icon = createTagPreviewIcon(tag); if (icon) slot.append(icon);
+}
+
 // ─── Caret position helper ────────────────────────────────────────────────────
 // Based on https://github.com/component/textarea-caret-position (MIT)
 
@@ -528,8 +596,8 @@ function _normalizeTagInsert(name) {
 }
 
 // Replace text[start, end) in `el` with `toInsert` (undo-safe via execCommand).
-function _spliceInsert(el, start, end, toInsert) {
-  if (el._xyzAcc) { el._xyzAcc.splice(start, end, toInsert); return; }   // contentEditable host
+function _spliceInsert(el, start, end, toInsert, completion = null) {
+  if (el._xyzAcc) { el._xyzAcc.splice(start, end, toInsert, completion); return; }   // contentEditable host
   el.focus();
   el.setSelectionRange(start, end);
   const ok = document.execCommand('insertText', false, toInsert);
@@ -757,8 +825,9 @@ class TagAutocompleteUI {
     }
     const text = _acVal(el);
     const delim = this._getDelimiter();
-    let core = _normalizeTagInsert(cand.name);
+    let core = cand.tagText ?? _normalizeTagInsert(cand.name);
     if (cand._atArtist) core = '@' + core;
+    const completion = start => cand.snapshot && cand.source ? { span: [start, start + core.length], snapshot: cand.snapshot, source: cand.source } : null;
     if (this._handler && !el._xyzAcc) this._handler._suppressInput = true;
 
     if (this._isRelated && !cand._isSelf) {
@@ -767,14 +836,14 @@ class TagAutocompleteUI {
       const before = text.substring(Math.max(0, end - delim.length), end);
       const needLeading = before !== delim && end > 0 && before[before.length - 1] !== ',';
       const needTrailing = after !== delim && end < text.length && after[0] !== ',' && after[0] !== '\n';
-      _spliceInsert(el, end, end, (needLeading ? delim : '') + core + (needTrailing ? delim : ''));
+      _spliceInsert(el, end, end, (needLeading ? delim : '') + core + (needTrailing ? delim : ''), completion(end + (needLeading ? delim.length : 0)));
     } else {
       const start = this._rangeStart;
       const pos = _acCaret(el);
       const afterCursor = text[pos];
       let toInsert = core + (settings.autoInsertComma && afterCursor !== ',' && afterCursor !== ':' ? delim : '');
-      if (text[start - 1] === ',') toInsert = ' ' + toInsert;
-      _spliceInsert(el, start, pos, toInsert);
+      const leading = text[start - 1] === ',' ? ' ' : '';
+      _spliceInsert(el, start, pos, leading + toInsert, completion(start + leading.length));
     }
     this.hide();
   }
@@ -943,30 +1012,8 @@ class TagAutocompleteUI {
       row.appendChild(link);
     }
 
-    // Library-only text has no Danbooru preview to request.
-    if (!tag._libraryOnly && (!tag._isSelf || settings.showTagPreview || (settings.showArtistPreview && tag.category === 1))) {
-      const wantTagPv = settings.showTagPreview;
-      const wantArtistPv = !wantTagPv && settings.showArtistPreview && tag.category === 1;
-      if (wantTagPv || wantArtistPv) {
-        const pvIcon = document.createElement('span');
-        pvIcon.textContent = '🖼';
-        pvIcon.title = wantArtistPv ? 'Show recent works' : 'Preview';
-        Object.assign(pvIcon.style, { fontSize: '13px', flexShrink: '0', cursor: 'help', padding: '0 2px', color: '#89b4fa' });
-        const limit = Math.max(1, Math.min(settings.previewCount || 1, 10));
-        pvIcon.addEventListener('mouseenter', () => {
-          _showTagPreviewPopup(pvIcon, tag.name, limit);
-        });
-        pvIcon.addEventListener('mouseleave', () => {
-          _hideTagPreviewPopup();
-        });
-        if (wantArtistPv) {
-          pvIcon.addEventListener('mousedown', (e) => {
-            e.preventDefault(); e.stopPropagation(); showArtistWorks(tag.name);
-          });
-        }
-        row.appendChild(pvIcon);
-      }
-    }
+    const previewIcon = createTagPreviewIcon(tag);
+    if (previewIcon) row.appendChild(previewIcon);
   }
 
   // Open the dropdown showing related tags for a clicked token in the textarea.
@@ -1222,6 +1269,20 @@ class TagACHandler {
       return;
     }
 
+    // An info panel (related tags of a clicked token) has no selection until the
+    // user enters it. Until then ↑/↓ belong to the text: they move the caret and
+    // close the panel. Tab enters the list; ↑/↓ then navigate it (user decision
+    // 2026-10-13 — the panel used to swallow the arrow meant to leave the line).
+    if (this.ui._isInfo && !this.ui._hasNavigated) {
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp') { this.ui.hide(); return; }
+      if (e.key === 'Tab' && !(e.shiftKey || e.ctrlKey || e.altKey || e.metaKey)) {
+        // Related rows may still be loading; Tab must never move focus away.
+        e.preventDefault();
+        if (this.ui._candidates.some(c => !c._isSelf)) this.ui.navigate(1);
+        return;
+      }
+    }
+
     switch (e.key) {
       case 'ArrowDown':
         e.preventDefault();
@@ -1257,11 +1318,11 @@ class TagACHandler {
     if (this._keyMods.get(key)) { this._keyMods.delete(key); return; }
     if (e.ctrlKey || e.altKey || e.metaKey) return;
 
-    if (this.ui.isVisible()) {
-      if (['arrowdown', 'arrowup'].includes(key)) return;
-    } else {
-      if (e.key.length > 1 && !['Delete', 'Backspace', 'Process'].includes(e.key)) return;
-    }
+    // Only keys that change the text (or, with a list open, move the caret along
+    // the line) re-query. Releasing Tab (which enters a related-tags panel),
+    // Shift, Escape or ↑/↓ must not replace the open panel with fresh autocomplete.
+    const moves = this.ui.isVisible() && ['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(e.key);
+    if (e.key.length > 1 && !moves && !['Delete', 'Backspace', 'Process'].includes(e.key)) return;
 
     if (!e.defaultPrevented) this._debounce(e.currentTarget);
   }
@@ -1325,7 +1386,7 @@ function attachTo(el, opts = {}) {
 }
 
 // Public API used by ordinary prompt fields and the PLv3 Monaco bridge.
-window.xyzTagAC = { attach: attachTo, hide() { handler._generation = (handler._generation || 0) + 1; clearTimeout(handler._timer); handler.ui._tagRequest = (handler.ui._tagRequest || 0) + 1; handler.ui.hide(); } };
+window.xyzTagAC = { attach: attachTo, attachPreview: attachTagPreview, createPreviewIcon: createTagPreviewIcon, hide() { handler._generation = (handler._generation || 0) + 1; clearTimeout(handler._timer); handler.ui._tagRequest = (handler.ui._tagRequest || 0) + 1; handler.ui.hide(); } };
 
 app.registerExtension({
   id:   EXT_ID,

@@ -4,13 +4,22 @@ Only shells and separators change. Literal prompt text, attention, settings,
 identity, parked children and Library/pool metadata remain document data.
 Hand-typed source continues to use the lossless V3 reconciliation path.
 """
+import re
+
 from ._v3 import Document, render
 from .model import full_document
+
+# A newline the user typed (native Enter in Blocks) is never followed by
+# indentation; generated layout always is (a tab or at least two spaces). One
+# space after it is the separator space the Enter was typed in front of. The
+# Blocks view (prompt_text.separatorDisplay) draws the same line.
+_USER_BREAK = re.compile(r'\n(?!\t| {2})')
 
 
 def format_document(doc, *, depth=0, remember=True):
     if remember and any(n.kind == 'group' and n.form not in ('root', 'paren') for n in doc.root.walk()):
         doc.root.meta['_layout_indent'] = 4
+    block = lambda part: part.kind == "group" and part.form != "paren"
     def layout(node, depth):
         if node.kind != "group" or node.opaque or node.form == "paren":
             return
@@ -22,6 +31,11 @@ def format_document(doc, *, depth=0, remember=True):
             node.open = node.open.rstrip() + " {"
             node.close = "}" + node.close
         indent = "    " * (depth + (not root))
+        # A laid-out block owns one newline before its closing brace (in the
+        # last separator after a reparse, in `close` before one). Only the
+        # newlines beyond it were typed.
+        laid_out = not root and re.match(r'\s*\n[ \t]+', node.lead or '') is not None
+        closing = re.match(r'\s*', node.close or '').group()
         if root:
             node.open = node.lead = node.close = ""
         else:
@@ -30,15 +44,20 @@ def format_document(doc, *, depth=0, remember=True):
             node.close = "\n" + "    " * depth + node.close.lstrip()
         for index, child in enumerate(node.children):
             layout(child, depth + (not root))
+            old = child.sep or ""
             if index + 1 == len(node.children):
-                child.sep = ""
+                # Enter at the end of a block is content, not layout.
+                child.sep = "\n" * max(0, (old + closing).count("\n") - laid_out)
+            elif _USER_BREAK.search(old) and not block(child) and not block(node.children[index + 1]):
+                # Enter between two prompts is the user's line break; keep it.
+                pass
             else:
                 # A full stop stays with its item and is already a separator.
                 # Region segments have their own heads and need no commas.
                 comma = "" if node.form == "region" or render(full_document(Document(child))).rstrip().endswith(".") else ","
                 following = node.children[index + 1]
-                block = lambda part: part.kind == "group" and part.form != "paren"
-                whitespace = "\n" + indent if not root or block(child) or block(following) else " "
+                # Prompts share a line at every depth; only a block takes its own.
+                whitespace = "\n" + indent if block(child) or block(following) else " "
                 child.sep = comma + (whitespace if any(c.enabled for c in node.children[index + 1:]) else "")
         node.raw = render(full_document(Document(node)))
     layout(doc.root, depth)

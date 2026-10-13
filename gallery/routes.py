@@ -161,18 +161,27 @@ def _metadata_positive_prompt_normalized(
     return ", ".join(toks)
 
 
-def _metadata_generation_data(raw: Optional[str]) -> Optional[dict]:
+def _metadata_generation_data(raw: Optional[str], *, detail=True) -> Optional[dict]:
     """Decode normalized provider detail JSON stored by the indexer."""
     if not raw:
         return None
+    # Our reader serializes a PLV4-only generation object with this first key.
+    # Lists need only the presence flag, so don't decode every full Document.
+    if not detail and raw.startswith('{"plv4":'):
+        return {'has_plv4': True}
     try:
         value = json.loads(str(raw))
     except (TypeError, ValueError):
         return None
-    return value if isinstance(value, dict) else None
+    if not isinstance(value, dict):
+        return None
+    if not detail and 'plv4' in value:
+        value.pop('plv4')
+        value['has_plv4'] = True
+    return value
 
 
-def _serialize_image(rec: _repo.ImageRecord) -> dict:
+def _serialize_image(rec: _repo.ImageRecord, *, detail=True) -> dict:
     v_suffix = f"?v={rec.mtime_ns}" if rec.mtime_ns is not None else ""
     return {
         "id": rec.id,
@@ -213,7 +222,7 @@ def _serialize_image(rec: _repo.ImageRecord) -> dict:
             "steps": rec.steps,
             "sampler": rec.sampler,
             "scheduler": rec.scheduler,
-            "generation": _metadata_generation_data(rec.generation_data_json),
+            "generation": _metadata_generation_data(rec.generation_data_json, detail=detail),
             "has_workflow": rec.has_workflow,
         },
         "gallery": {
@@ -531,7 +540,11 @@ async def _serve_spa(_request: web.Request) -> web.Response:
     # T11 has landed we serve the real shell from disk.
     index = _SPA_DIR / "index.html"
     if index.is_file():
-        return web.FileResponse(str(index))
+        html = await _run(index.read_text, encoding='utf-8')
+        # Modules are served through ComfyUI's extension mount, not gallery/static.
+        # Derive the installed pack name so renamed checkouts work too.
+        base = '/extensions/' + urllib.parse.quote(_SPA_DIR.parent.parent.name, safe='') + '/'
+        return web.Response(text=html.replace('/extensions/ComfyUI-XYZNodes/', base), content_type='text/html')
     return web.Response(text=_PLACEHOLDER_HTML, content_type="text/html")
 
 
@@ -836,7 +849,7 @@ async def _list_images(request: web.Request) -> web.Response:
         logger.exception("list_images failed")
         return _error(500, "internal", str(exc))
     return web.json_response({
-        "items": [_serialize_image(r) for r in page.items],
+        "items": [_serialize_image(r, detail=False) for r in page.items],
         "next_cursor": page.next_cursor,
         "total_estimate": page.total,
         "total_approximate": page.total_approximate,
@@ -1020,6 +1033,21 @@ async def _get_image(request: web.Request) -> web.Response:
         return _error(500, "internal", str(exc))
     if rec is None:
         return _error(404, "not_found", f"image {image_id} not found")
+    return web.json_response(_serialize_image(rec))
+
+
+async def _reread_image(request: web.Request) -> web.Response:
+    try:
+        rec = await _run(_service.reread_image_metadata, int(request.match_info['id']), db_path=DB_PATH)
+    except KeyError as exc:
+        return _error(404, 'not_found', str(exc))
+    except _paths.SandboxError as exc:
+        return _error(403, 'sandbox', str(exc))
+    except (OSError, ValueError) as exc:
+        return _error(400, 'metadata_read', str(exc))
+    except Exception as exc:
+        logger.exception('reread_image_metadata failed')
+        return _error(500, 'metadata_read', str(exc))
     return web.json_response(_serialize_image(rec))
 
 
@@ -1837,6 +1865,7 @@ def register(server) -> None:
     routes.get(r"/xyz/gallery/image/{id:\d+}/workflow.json")(_get_workflow)
     routes.patch(r"/xyz/gallery/image/{id:\d+}")(_patch_image)
     routes.post(r"/xyz/gallery/image/{id:\d+}/resync")(_post_resync)
+    routes.post(r"/xyz/gallery/image/{id:\d+}/reread")(_reread_image)
     routes.post("/xyz/gallery/images/send_to_krita")(_post_send_to_krita)
     routes.get("/xyz/gallery/admin/backfill_steps")(_get_backfill_steps)
     routes.post("/xyz/gallery/admin/backfill_steps")(_post_backfill_steps)

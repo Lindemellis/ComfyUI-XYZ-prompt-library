@@ -6,7 +6,7 @@ export async function libraryRequest(action, body = {}, mutation = false) {
   });
   const result = await response.json();
   if (!response.ok || !result.ok) throw new SessionError(result.code, result.error || 'Library 操作失败');
-  if (mutation) window.dispatchEvent(new CustomEvent('xyz-plv4-library-changed', { detail: result.revision }));
+  if (mutation && result.library_changed !== false) window.dispatchEvent(new CustomEvent('xyz-plv4-library-changed', { detail: result.revision }));
   return result;
 }
 
@@ -19,6 +19,15 @@ const hasPaths = node => !!node.header || (node.children || []).some(hasPaths);
 // Compilation always stays on the pure document endpoint.
 export async function libraryDocumentRequest(operation, body) {
   if (operation !== 'command') return documentRequest(operation, body);
+  // These commands introduce no pool tag identities or unresolved paths.
+  // Deleted observation rows were never removed by observe; parked tags are
+  // already included in the baseline. Keep them off the Library writer.
+  if (['LocateDetails', 'SetEnabled', 'Delete'].includes(body.command.type)) return documentRequest(operation, body);
+  const command = body.command;
+  const emptyBlock = command.type === 'InsertBlock' && !command.snapshot &&
+    (command.form ? ['schedule', 'region', 'avg'].includes(command.form) : !command.text || /^\s*\{\s*\}\s*$/.test(command.text));
+  const emptyEntry = command.type === 'InsertEntry' && !command.snapshot && !command.text && !command.form;
+  if (emptyBlock || emptyEntry) return documentRequest(operation, body);
   if (body.command.defer_pool && !body.library_asset_id) return documentRequest(operation, body);
   const owner = body.state.doc.root.meta?.owner;
   if (body.command.type === 'SaveLibrary') return libraryRequest('save_instance', { ...body, owner }, true);

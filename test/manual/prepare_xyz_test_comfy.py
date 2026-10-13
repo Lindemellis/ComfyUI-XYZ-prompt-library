@@ -12,7 +12,7 @@ import sys
 
 REPO = Path(__file__).resolve().parents[2]
 PACK_DIRS = (
-    "prompt_library_v3", "prompt_library_v4", "mask_nodes", "krita_nodes",
+    "prompt_shared", "prompt_library_v3", "prompt_library_v4", "mask_nodes", "krita_nodes",
     "krita_plugin", "cache_nodes", "inpaint_nodes", "gallery", "tagdb",
     "agent_nodes", "js", "web",
 )

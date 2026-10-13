@@ -75,13 +75,15 @@ class ImportOp:
     backup_path: str
 
     def apply(self, conn):
+        from .hierarchy import legacy_pools
+        if legacy_pools(conn): raise CommandError('library_upgrade_required', '请先转换旧 Folder 池，再导入 V3 Library')
         conn.execute('CREATE TABLE IF NOT EXISTS v3_imports(source_key TEXT PRIMARY KEY,digest TEXT NOT NULL,report_json TEXT NOT NULL)')
         existing = conn.execute('SELECT * FROM v3_imports WHERE source_key=?', (self.source_key,)).fetchone()
         if existing:
             if existing['digest'] != self.digest: raise CommandError('changed_v3', '此 V3 库已迁移且内容有变化；请保留原库与备份，使用新的 V4 库重新核对')
             return {**json.loads(existing['report_json']), 'repeated': True}
         counts_before = {r[0]: r[1] for r in conn.execute('SELECT kind,COUNT(*) FROM assets GROUP BY kind')}
-        reader = self.reader; folder_ids, pool_ids, block_ids, preset_ids = {}, {}, {}, {}
+        reader = self.reader; folder_ids, pool_ids, storage_ids, block_ids, preset_ids = {}, {}, {}, {}, {}
         active = set()
         def folder(fid):
             if not fid: return None
@@ -92,14 +94,20 @@ class ImportOp:
             result = store(conn, None, 'folder', value['name'], {}, folder(value['parent_id']))
             folder_ids[fid] = result; active.remove(key); return result
         for fid in reader.folders: folder(fid)
-        # V3 groups and subgroups become containing Folder pools.
+        def group_storage(gid):
+            if gid in storage_ids: return storage_ids[gid]
+            value = reader.groups[gid]
+            parent = group_storage(value['parent_group_id']) if value['parent_group_id'] else folder(value['folder_id'])
+            storage_ids[gid] = store(conn, None, 'folder', value['name'], {}, parent_id=parent)
+            return storage_ids[gid]
+        # Groups become Classes; presets live in independent storage Folders.
         def pool_folder(gid):
             if gid in pool_ids: return pool_ids[gid]
             key = ('placement', gid)
             if key in active: raise CommandError('reference_cycle', 'V3 子组形成环')
             active.add(key); value = reader.groups[gid]
-            parent = pool_folder(value['parent_group_id']) if value['parent_group_id'] else folder(value['folder_id'])
-            pool_ids[gid] = store(conn, None, 'folder', value['name'], {'autocomplete': False}, parent_id=parent)
+            parent = pool_folder(value['parent_group_id']) if value['parent_group_id'] else group_storage(gid)
+            pool_ids[gid] = store(conn, None, 'class', value['name'], {'autocomplete': False}, parent_id=parent)
             active.remove(key); return pool_ids[gid]
         for gid in reader.groups: pool_folder(gid)
 
@@ -154,7 +162,7 @@ class ImportOp:
             snapshot = root.to_json()
             asset_id = None
             if key[0] == 'preset' or (key[0] == 'group' and reader.groups[gid]['settings']):
-                asset_id = save_block(conn, name_snapshot(snapshot, disambiguate=True), '全部内容' if key[0]=='group' else root.meta['name'], parent_id=pool_ids[gid])
+                asset_id = save_block(conn, name_snapshot(snapshot, disambiguate=True), '全部内容' if key[0]=='group' else root.meta['name'], parent_id=group_storage(gid))
                 snapshot = expand(conn, asset_id)
             result = {'snapshot': snapshot, 'asset_id': asset_id}; cache[key] = result; active.remove(key)
             return result
@@ -183,8 +191,8 @@ class ImportOp:
         bump(conn)
         added = {r[0]: r[1] - counts_before.get(r[0], 0) for r in conn.execute('SELECT kind,COUNT(*) FROM assets GROUP BY kind')}
         report = {'backup': self.backup_path, 'digest': self.digest, 'repeated': False,
-                  'counts': {plural: added.get(kind, 0) for kind, plural in [('folder', 'folders'), ('tag', 'tags'), ('block', 'blocks'), ('document', 'documents')]},
-                  'warnings': warnings, 'mapping': {'groups': {str(gid): {'folder': cid, **({'settings_block': block_ids[('group', gid)]['asset_id']} if block_ids[('group', gid)]['asset_id'] else {})} for gid, cid in pool_ids.items()}, 'presets': {str(key[1]): value['asset_id'] for key, value in preset_ids.items()}, 'documents': documents}}
+                  'counts': {plural: added.get(kind, 0) for kind, plural in [('folder', 'folders'), ('class', 'classes'), ('tag', 'tags'), ('block', 'blocks'), ('document', 'documents')]},
+                  'warnings': warnings, 'mapping': {'groups': {str(gid): {'folder': cid, 'class': cid, 'storage_folder': group_storage(gid), **({'settings_block': block_ids[('group', gid)]['asset_id']} if block_ids[('group', gid)]['asset_id'] else {})} for gid, cid in pool_ids.items()}, 'presets': {str(key[1]): value['asset_id'] for key, value in preset_ids.items()}, 'documents': documents}}
         conn.execute('INSERT INTO v3_imports VALUES(?,?,?)', (self.source_key, self.digest, encode(report)))
         return report
 

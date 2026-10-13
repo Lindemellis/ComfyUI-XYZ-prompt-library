@@ -1,5 +1,7 @@
 from .prompt_library_v3 import PromptLibraryV3Node, PromptLibraryV3MonacoNode
 from .prompt_library_v4.node import PromptLibraryV4Node, PromptLibraryV4MonacoNode
+from .prompt_library_v4.image_metadata_node import PLV4ImageMetadataNode
+from .prompt_library_v4.mask_nodes import PLV4MaskPreview, PLV4AttachMasks
 from .mask_nodes import XYZAttachMasks, XYZMaskEditor
 from .krita_nodes import (
     XYZKritaFetchColorMasks,
@@ -27,6 +29,9 @@ NODE_CLASS_MAPPINGS = {
     "XYZ Prompt Library V3 Monaco": PromptLibraryV3MonacoNode,
     "XYZ Prompt Library V4": PromptLibraryV4Node,
     "XYZ Prompt Library V4 Monaco": PromptLibraryV4MonacoNode,
+    "XYZ PLV4 Image Metadata": PLV4ImageMetadataNode,
+    "XYZ PLV4 Mask Preview": PLV4MaskPreview,
+    "XYZ PLV4 Attach Masks": PLV4AttachMasks,
     "XYZ Mask Editor": XYZMaskEditor,
     "XYZ Attach Masks": XYZAttachMasks,
     "XYZ Krita Fetch Image": XYZKritaFetchImage,
@@ -44,7 +49,7 @@ __all__ = ["NODE_CLASS_MAPPINGS", "WEB_DIRECTORY"]
 
 
 # The gallery and TagDB are handed PromptServer.instance below; the
-# PLv3/Krita/cache setups import it themselves.
+# PLv4 owns active services; shared stateless routes keep V3 workflows editable.
 from server import PromptServer
 
 
@@ -55,10 +60,16 @@ except Exception as _xyz_gallery_err:
     print(f"[XYZ Gallery] setup failed, continuing without gallery: {_xyz_gallery_err!r}")
 
 try:
-    from .prompt_library_v3 import setup as _plv3_setup
-    _plv3_setup()
-except Exception as _plv3_err:
-    print(f"[PLv3] setup failed, continuing without PLv3: {_plv3_err!r}")
+    from .prompt_library_v4.setup import setup as _plv4_setup
+    _plv4_setup(PromptServer.instance)
+except Exception as _plv4_err:
+    print(f"[PLv4] setup failed, continuing without PLv4 services: {_plv4_err!r}")
+
+try:
+    from .prompt_shared.language_routes import register as _prompt_language_routes
+    _prompt_language_routes(PromptServer.instance)
+except Exception as _prompt_language_err:
+    print(f"[Prompt Language] compatibility routes unavailable: {_prompt_language_err!r}")
 
 try:
     from .krita_nodes import setup as _krita_setup

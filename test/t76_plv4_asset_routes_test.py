@@ -38,9 +38,9 @@ def endpoint(tmp_path):
 
 def test_http_shared_conflicts_and_malformed_request(endpoint):
     call, library = endpoint
-    status, saved = call({'action': 'save_folder', 'name': 'C'})
+    status, saved = call({'action': 'save_class', 'name': 'C'})
     assert status == 200 and saved['ok']
-    status, result = call({'action': 'save_folder', 'id': saved['id'], 'version': 0, 'name': 'Outdated'})
+    status, result = call({'action': 'save_class', 'id': saved['id'], 'version': 0, 'name': 'Outdated'})
     assert status == 409 and result['code'] == 'asset_conflict'
     assert call([], 'read')[0] == 400
     assert call({}, 'migrate')[0] == 422
@@ -49,7 +49,7 @@ def test_http_shared_conflicts_and_malformed_request(endpoint):
 
 def test_http_edit_and_attribute_add_are_one_response(endpoint):
     call, library = endpoint
-    _, saved = call({'action': 'save_folder', 'name': 'C'})
+    _, saved = call({'action': 'save_class', 'name': 'C'})
     state = EditorState.create(text='{ a }')
     status, result = call({'action': 'edit', 'owner': 'workflow', 'state': state.to_json(), 'command': {
         'type': 'SetMetadata', 'id': state.doc.root.children[0].id, 'revision': 0, 'patch': {'pool': saved['id']}}})

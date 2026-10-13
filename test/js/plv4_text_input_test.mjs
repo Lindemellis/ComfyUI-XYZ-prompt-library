@@ -85,7 +85,7 @@ test('saved block header paths follow source IDs, survive missing assets, and ex
   assert.equal(adapter.blockLibraryPath({meta:{source:{kind:'block',id:'missing',path:'Original.Block'}}},library),'Original.Block');
   assert.equal(adapter.blockLibraryPath({meta:{full_path:'Folder.Block.Sub'}},library),'Folder.Block.Sub');
   assert.equal(adapter.blockLibraryPath({meta:{pool:'P'}},library),'');
-  assert.equal(adapter.blockLibraryPath({meta:{full_path:'Folder',source:{kind:'folder',path:'Folder'},pool:'P'}},library),'');
+  assert.equal(adapter.blockLibraryPath({meta:{full_path:'Folder',source:{kind:'class',path:'Folder'},pool:'P'}},library),'');
   const b={id:'block',name:'Name',libraryPath:'Folder.<Block>',type:'normal',enabled:true,collapsed:true};
   const esc=value=>String(value).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');
   const html=XYZPLv4Design.blockHTML(b,0,false,{state:{},root:()=>({}),isLibraryBlockView:()=>false,childrenHTML:()=>'',join:()=>'',leaves:()=>[],text:n=>n.source,esc});
@@ -98,9 +98,9 @@ test('shared block headers show Folder navigation before the name only for their
   const env={state:{},root:()=>({}),isLibraryBlockView:()=>false,childrenHTML:()=>'',join:()=>'',leaves:()=>[],text:n=>n.source,esc:value=>String(value)};
   const render=b=>XYZPLv4Design.blockHTML(b,0,false,env);
   const html=render(block);
-  assert.ok(html.includes('class="block-pool-link"'));assert.ok(html.includes('aria-label="打开绑定的 Folder：Triggers"'));
-  assert.ok(html.indexOf('block-pool-link')<html.indexOf('data-kind="folder"'));
-  assert.ok(html.indexOf('data-kind="folder"')<html.indexOf('block-title'));
+  assert.ok(html.includes('class="block-pool-link"'));assert.ok(html.includes('aria-label="打开绑定的 Class：Triggers"'));
+  assert.ok(html.indexOf('block-pool-link')<html.indexOf('data-kind="class"'));
+  assert.ok(html.indexOf('data-kind="class"')<html.indexOf('block-title'));
   assert.equal((html.match(/data-open-folder="P"/g)||[]).length,2);
   assert.ok(!html.includes('block-library-path'),'a Folder binding still does not create a saved Library path');
   for(const meta of [{},{pool:null},{source:{kind:'block',id:'saved'}}]) assert.ok(!render({...block,meta}).includes('block-pool-link'));

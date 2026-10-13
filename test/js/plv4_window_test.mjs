@@ -63,7 +63,7 @@ function fixture() {
 
 test('Preview resolves a linked seed once without virtual widget callbacks recursively restarting compilation',async()=>{
   const load=code=>import('data:text/javascript;base64,'+Buffer.from(code).toString('base64'));
-  const {NodeSessions}=await load((await readFile(new URL('../../js/plv4/host_sessions.js',import.meta.url),'utf8')).replace(/^import .*;\r?\n/gm,''));
+  const {NodeSessions}=await load((await readFile(new URL('../../js/plv4/host_sessions.js',import.meta.url),'utf8')).replace(/^import .*;\r?\n/gm,'').replace(/export \{ NODE_TYPES \} from .*;\r?\n/, ''));
   const {DocumentSession}=await load(await readFile(new URL('../../js/plv4/document_session.js',import.meta.url),'utf8'));
   const {win,node,context}=fixture();node.inputs=[{name:'seed',link:1}];node.widgets=[{name:'seed',value:42},{name:'region_mode',value:'couple'}];
   const compiled=[],pending=[];let reads=0,lint=0;
@@ -96,7 +96,7 @@ test('Preview resolves a linked seed once without virtual widget callbacks recur
 });
 
 test('linked input readers share one graph resolution, clear the guard on failure, and can retry',async()=>{
-  const host=(await readFile(new URL('../../js/plv4/host_sessions.js',import.meta.url),'utf8')).replace(/^import .*;\r?\n/gm,'');
+  const host=(await readFile(new URL('../../js/plv4/host_sessions.js',import.meta.url),'utf8')).replace(/^import .*;\r?\n/gm,'').replace(/export \{ NODE_TYPES \} from .*;\r?\n/, '');
   const {NodeSessions}=await import('data:text/javascript;base64,'+Buffer.from(host).toString('base64'));
   let release,reads=0;
   const sessions=new NodeSessions({graphToPrompt:async()=>{reads++;return new Promise(resolve=>{release=resolve;});}});

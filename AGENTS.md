@@ -16,20 +16,24 @@ ComfyUI-XYZNodes is a ComfyUI custom node pack built around **Prompt Library V4*
 
 Folder-pool stage closed on **2026-10-08**; LoRA / AVG / native-input and menu follow-up closed by the user on **2026-10-10**, with documentation, GitHub publication and installation in regular ComfyUI authorized. Read `prompt_library_v4/README_zh.md` for user behavior and `prompt_library_v4/DEVELOPMENT.md` for architecture, migration and validation. `plv4.md`'s final "新的block架构设定" and later explicit corrections supersede earlier Class designs; `plv4_plan.md` records the completed implementation. Historical local prototypes are not runtime contracts.
 
-- **Tag / Block / Folder pool only.** No runtime Class, attribute, belong/load, dummy, class instance, shared Library block pointers, auto-persisted internal blocks or cross-type reference cycles. Documents have a separate save/load entry.
+- **Folder / Class / Block, with Tag leaves.** Folder only contains Folder/Class/saved Block; Class only contains Class/Tag and provides a pool. Pool lists explicitly saved Blocks bound to each Class by inverse metadata lookup, independent of storage. No attribute, belong/load, dummy, class instance, shared Library block pointers or auto-persisted internal blocks. Documents have a separate save/load entry.
 - **Document v2 is truth.** Stable IDs, enabled flags, metadata and invalid drafts survive editing. Source/Blocks/Preview share history. Compilation uses PLv3 and never reads Library. V4 uses node seed for all random choices, ignoring group overrides; untouched V3 documents retain V3 policy.
-- **One meta.pool per block**, without candidate inheritance. Collect tags after completed edits; traverse unbound descendants, stop at independently bound children. Deduplicate against the whole pool subtree, including saved blocks. Opening/restoring workflows establishes baselines and must not re-add manually deleted pool tags.
-- Loose tags cannot repeat on an ancestor chain; classify ancestor tags downward, reject parent additions when descendants contain them, allow sibling duplicates. Saved block tags are exempt. Sibling Folder/block/subblock names must be unique; stable source IDs and versions support explicit update/overwrite.
+- **One meta.pool per block**, without candidate inheritance. Collect tags after completed edits; traverse unbound descendants, stop at independently bound children. Deduplicate loose tags against the Class subtree; candidate Block contents do not suppress collection. Opening/restoring workflows establishes baselines and must not re-add manually deleted pool tags.
+- Loose tags cannot repeat on an ancestor chain; classify ancestor tags downward, reject parent additions when descendants contain them, allow sibling duplicates. Saved block tags are exempt. Sibling Folder/Class/block/subblock names must be unique; stable source IDs and versions support explicit update/overwrite.
 - **Content and Pool stay separate.** Content follows actual order, edits descendants and retains disabled rows in place. Pool uses + to append, marks added regardless of enabled, offers independent type/unused filters and fold controls. Existing candidates are not re-enabled, reordered or made the active detail target.
-- Folder pages edit loose tags recursively; Library blocks reuse Node Blocks UI. One temporary italic Library tab is replaced during browsing and pinned by editing/double-click. Folder insertion uses a dedicated handle to create an empty bound block; dropping does not change an existing block's binding.
+- Class pages edit loose tags recursively, sorting each layer alphabetically; Folder clicks fold/expand the Library tree without opening pages/tabs. Settings Pool sorts peer tags/Classes/Blocks alphabetically, while Content and saved data retain actual order. Library blocks reuse Node Blocks UI. One temporary italic Library tab is replaced during Class/Block browsing and pinned by editing/double-click. Class insertion uses a dedicated handle to create an empty bound block; dropping does not change an existing block's binding.
+- LoRA trigger pools are Classes. Hide LoRA Classes/their descendants and saved LoRA Blocks from ordinary Library tree/search/pages/selectors/Source Library paths using library_hidden; keep their full records for LoRA browser, fixed bindings and Pool. LoRA pages can edit their hidden Subclasses. Do not remove their data to hide them.
 - model.py/commands.py own stateless POST /xyz/plv4/document/{open,command,compile}. assets.py/hierarchy.py own single-writer snapshots and /xyz/plv4/library/{read,mutate,migrate}. document_session.js owns queue/history; host_sessions.js keys nodes by object identity, not numeric ID.
 - Reuse js/plv3/editor_core.js PromptEditor and text_editing.js; do not fork Monaco/TagAC/grammar. Native TextRun uses plaintext-only; Enter / Backspace / Delete are browser-native, with no manual newline edits or caret reset. Exclude decorations and the native terminal display newline from source offsets. Toggles preserve user blank lines; structural formatting is local. Empty/run typography is shared; boundaries only occupy layout during drag preview.
 - Header More has hover sibling/child submenus for ordinary / Schedule / Region / AVG blocks, retaining entry and nesting restrictions. Opening it must precede native-input blur commit, so render cannot remove a pointer target between press/release. Test this with actual mouse events after auto-focus and body edits; DOM click alone misses the regression.
 - Blocks Find borrows the same Monaco widget, removing/restoring Source overlay registration. block_find.js scopes to displayed prompt characters, excluding configuration. Enter and arrows use identical editor actions; CSS Custom Highlight keeps matches visible while search retains focus. Clear state on close/tab/view/dispose. Check private Monaco APIs on upgrade.
-- New DB: prompt_library_v4_data/plv4-pools.db. Never silently upgrade plv4.db. V3 group→Folder, preset→saved block, child group→subfolder; backup import leaves source intact. Experimental V4 conversion requires a nonexistent new target. Personal migration needs a specific user request.
-- Tests t70–t81 include 12 offline Node suites through t72, LoRA and AVG coverage; t46–t62 protect PLv3. Disposable real-ComfyUI browser checks cover input/caret, typography and menus; current results are in DEVELOPMENT.md. Preserve local prototypes, personal data and the user's persistent 8190 test instance. Regular ComfyUI loads this repository under custom_nodes; never deploy a fixture database or synthetic workflow into it.
+- New DB: prompt_library_v4_data/plv4-pools.db. Never silently upgrade plv4.db. V3 group→Class plus storage Folder, preset→saved Block bound to Class, child group→Subclass; backup import leaves source intact. Experimental V4 conversion requires a nonexistent new target. Personal migration needs a specific user request. Old Folder pools are explicitly converted by separate_types with a pre-write backup; preserve pool IDs, snapshots and disabled items. Schema CHECK extension alone must not convert asset kinds. See DEVELOPMENT.md’s 2026-10-11 Class section.
+- Tests t70–t83 include 13 offline Node suites through t72, LoRA, AVG, retirement and Class coverage; t46–t62 protect PLv3. Disposable real-ComfyUI browser checks cover input/caret, typography, menus, Class pools and retirement without V3 Library services; current results are in DEVELOPMENT.md. Preserve local prototypes, personal data and the user's persistent 8190 test instance. Regular ComfyUI loads this repository under custom_nodes; never deploy a fixture database or synthetic workflow into it.
+- **2026-10-11 V3 product retirement:** read `plv3_retirement_plan.md`. Root startup initializes V4 and shared stateless language routes; it never calls V3 setup or opens its Library writer. V4 setup owns Document / Library / LoRA and shared routes. `prompt_shared/language/` is the canonical parser / Document / IR / compiler; historical V3 modules alias the same module objects. `prompt_shared/storage.py` owns generic connections / WriteQueue; V4 does not import V3 storage. `js/prompt_shared/node_host.js` installs all four node hosts, keeping legacy widget / event names; `js/plv3.js` is a thin adapter. V4 completion never requests V3 Library; historical blur-sync and save-selection-to-V3 are retired. V3 Tools entries/global UI handle are removed, V3 nodes are DEPRECATED but keep identity/sockets/compiler policy; all Editor buttons open V4. Untouched V3 workflows retain V3 policy until opened in V4. t82 and the retirement browser fixture cover startup, alias identity and workflow compatibility. Keep V3 directories, historical adapters, personal databases and persistent 8190 intact; migration remains explicit.
 
 ## Prompt Library V3 (`prompt_library_v3/` + `js/plv3/`) — language/compiler and compatibility
+
+**Current boundary:** pure backend implementations now live in `prompt_shared/language/`; the old paths below are module-identity aliases. Shared Monaco / grammar / TagAC remain in `js/plv3/` and must not be forked. V3 Library/window code below is historical tooling, never registered or exposed by pack startup. New changes go to shared language, V4 services or the common frontend host; do not reactivate the retired Library or auto-migrate data.
 
 **Read `prompt_library_v3/README.md` first** (user-facing), then `prompt_library_v3_design.md`
 (the locked spec, 36 recorded decisions — it is authoritative; do NOT infer semantics from PLv2,
@@ -168,13 +172,76 @@ because `UNIQUE(group_id, text)` is an item's identity). Tests: `test/t62_plv3_s
 - `node --check` does NOT reliably catch syntax errors in these ESM files. Use
   `node --input-type=module --check < file.js`.
 
+## Region × Schedule semantics (user decisions 2026-10-13, implemented + rendered)
+
+All in the shared compiler `prompt_shared/language/` (PLv3 and PLv4 compile through it),
+plus the Region container's Timing slider in `js/plv4/details.js`. Tests: `test/t48`
+(region timing cases), `t49`, `test/t86_plv4_region_timing_test.py`. Verified by real
+renders (isolated ComfyUI, Anima 2.9B int8, 512², 10 steps) in both COUPLE and AND.
+
+- **The one rule.** A schedule ON a region, or on any block ABOVE it (an ordinary parent
+  block, a `[@schedule]` stage, the Region container's outer window), decides whether the
+  region EXISTS: outside the window the output has no region syntax for it at all, only
+  the ambient text. Base and Fill entries obey it too (the old "BASE is never
+  time-limited" rule is gone). A schedule on a subblock INSIDE a region only times that
+  content; the region stays. (An earlier "region always stays" proposal was rejected by
+  the user as counter-intuitive.)
+- **Implementation = time slicing.** Whenever a region comes and goes over time
+  (`ir.region_timing`) or a `[@region]` has a `region_window`, `compile_text` takes the
+  path AVG already used: compile each interval between boundaries separately and emit
+  `[slice text, :a,b]`. AVG and non-AVG documents therefore share ONE semantics (they used
+  to differ: non-AVG left an empty prompt holding the mask outside the window). Inside a
+  slice, W05 is suppressed (the full-tree pass reports real ones), W11 no longer compares
+  schedules, diagnostics are de-duplicated, and a random group meeting a segment it never
+  met in the full-tree pass reuses its draw from anywhere (`random_plan[("any", id)]`).
+  LoRAs are centralised whenever slicing, as with AVG.
+- **`region_window`** (`.set{schedule: {0, 0.8}, region_window: {0, 0.4}}`, `[@region]`
+  only — `Group.region_block`; elsewhere W08 and ignored). Inside `schedule` but outside
+  the window the block stops splitting: its entries render as ordinary groups
+  (`plain_regions_for` → `RenderCtx.plain_regions`, the AST is NOT mutated), merged in
+  document order like the `plain` output; include_in_base copies are not duplicated.
+  PLv4 `SetSettings` accepts it on Region containers only. UI: ONE rail, FOUR handles with
+  **no identity** — after each drag the positions are sorted, outer two = `schedule`,
+  inner two = `region_window`; inner on outer → field omitted ("always split"); outer at
+  0..1 → schedule omitted. Greyed out while the container's Region switch is off.
+- **prompt-control's invisible empty base.** Text before the first `COUPLE` is PC's base
+  prompt — an EMPTY one when nothing is there — and it is full-image unless it says
+  `FILL()`; masks are normalised per pixel, so it took HALF of every region (render: the
+  right character lost her colour entirely). Now, whenever regions have text but no
+  base/fill has text, `build_segments` adds a synthetic fill (`Segment.synthetic`, kept
+  OUT of `CompileResult.segments`) carrying the ambient text: COUPLE emits
+  `FILL() <ambient>` first (bare `FILL()` if there is no ambient text).
+- **AND-mode gaps predict ZERO.** ComfyUI `_calc_cond_batch` divides by
+  `out_counts` initialised to 1e-37, so a pixel no mask covers gets a zero positive
+  prediction and CFG turns it into `uncond * (1 - cfg)` — a noise band in the render. The
+  mask backend emits the synthetic fill as "full image minus every region" unless plain
+  fractional rectangles provably cover the image (`mask._covers_image`; IMASK, feather or
+  pixel coords mean "unknown" → emit it).
+- **PC trap: no space after the comma before a composite op.** PC splits `MASK(...)` /
+  `IMASK(...)` arguments on commas WITHOUT stripping, and `MaskComposite` compares the op
+  by equality: `MASK(0 0.4, 0 1, 1, subtract)` passes `" subtract"`, matches nothing, and
+  returns the mask unchanged — the "minus every region" fill silently covered the whole
+  image (a pre-existing bug for user-written Fill in AND mode too). `compile/common._op`
+  writes `,subtract`. Check PC's log: `op= subtract` with a space is the symptom.
+- Observed in renders (10 steps): whatever is active in roughly the first 40% decides
+  colour and layout; late-stage content shows only weakly (a 0.15 boundary was needed to
+  see it). A Base with include_in_base dilutes the OTHER regions (base is full-image) —
+  existing behaviour, not a bug.
+- How to render-test without touching the user's instance or gallery DB: start ComfyUI
+  with `--disable-all-custom-nodes --whitelist-custom-nodes comfyui-prompt-control
+  ComfyUI-Anima-2.9B` on another port with scratch user/output/temp/input dirs, compile
+  the prompt outside, POST `/prompt` (UNETLoader → PCAnimaAttnCouplePatch → KSampler,
+  PCLazyTextEncode). The user must close 8188 first: it holds most of the 8 GB VRAM.
+
 ## Node Types (registered in `__init__.py`)
 
 > `node.py`'s own nodes (Concatenate / Replace / Clip Encoder / Random Picker) were
 > **removed**; only `ByPassTypeTuple` (the variadic-output helper) survives there.
 
 - **XYZ Mask Editor / XYZ Attach Masks** (`mask_nodes/nodes.py`) — see the Mask Nodes section below
-- **XYZ Prompt Library V4 / V4 Monaco** (`prompt_library_v4/node.py`) — current Blocks/Source/Preview editor, Folder pools, node-seed policy and pure PLv3 compiler; same prompt/plain sockets.
+- **XYZ Prompt Library V4 / V4 Monaco** (`prompt_library_v4/node.py`) — current Blocks/Source/Preview editor, Class pools, node-seed policy and pure PLv3 compiler; outputs prompt/plain/PLV4_METADATA plus appended PLV4_MASK_BUNDLE. V4-only mask_resources resolves one consistent snapshot before compilation; shared language never reads resource stores. Region backend is controlled in the V4 window; existing hidden widget remains its serialized truth.
+- **PLV4 Mask Library / Preview / Attach** (`prompt_library_v4/mask_*.py`, `js/plv4/mask_*.js`, `js/xyz_plv4_mask_preview.js`) — independent masks.db / shared WriteQueue, versioned rectangles/tombstones and read-only registered input pictures. Region meta.mask_library carries references/fallback; explicit Source coordinate/type edits detach. Preview keys retain connected unused slots with zero MASKs; backend slot_keys owns the returned arity. Attach clones CLIP and appends only pictures, warning on index mismatch without repairing prompt. See plv4_mask_library_plan.md and DEVELOPMENT.md; t84 and disposable mask fixture are targeted checks, never personal/persistent-instance fixtures.
+- **XYZ PLV4 Image Metadata** (`prompt_library_v4/image_metadata_node.py`) — merge positive/optional negative snapshots and extra fixed LoRA syntax into METADATA for the locally updated Aaalice Conditional Save Image. Versioned Source/Document/output data travels in parameters via additional_data; requires installed Lora Manager but no Metadata Overwrite node. Gallery reads image snapshots without Library; see `plv4_gallery_metadata_plan.md` and DEVELOPMENT.md. Do not scan Source or rerandomize to infer effective LoRAs; use shared CompileResult.loras. V3 still has two outputs.
 - **XYZ Prompt Library V3 / V3 Monaco** (`prompt_library_v3/node.py`) — compatibility nodes: compiles a PLv3 document to comfyui-prompt-control syntax. **Two outputs**: `prompt` (regions compiled) and `plain` (`compile_text(..., ignore_regions=True)` — `strip_regions` drops every region declaration before validate, so base + every region + fill land in ONE prompt in document order, schedules/weights/loras intact). Both use the same seed, so a shuffle draws once. The two nodes differ ONLY in their editor (plain textarea vs embedded Monaco, a frontend concern in `js/plv3.js`); the backend is identical. **No positive/negative split any more** — both compile the same, `polarity` is dropped from the nodes (regions are always kept; a region must simply not be wired to a negative conditioning — documented in the README, not enforced). `compile_text` still accepts a `polarity` arg for the pure-function/validate tests. Never reads the library. See the PLv3 section above.
 
 ## Mask Nodes (`mask_nodes/` + `js/xyz_mask_editor.js`, `js/xyz_attach_masks.js`)

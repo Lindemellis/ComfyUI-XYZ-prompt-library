@@ -4,7 +4,8 @@ import { test } from 'node:test';
 const load = source => import('data:text/javascript;base64,' + Buffer.from(source).toString('base64'));
 const source = file => readFile(new URL('../../js/' + file, import.meta.url), 'utf8');
 globalThis.window = { xyzPLv4LibraryPaths: async () => [{ id: 'f1', path: 'Characters.Alice', assetKind: 'folder', v4: true }] };
-globalThis.fetch = async () => ({ json: async () => ({ groups: [] }) });
+// Any implicit access to the retired V3 Library must fail this suite.
+globalThis.fetch = async url => { throw new Error('Unexpected legacy Library request: ' + url); };
 globalThis.sourceProvider = await load(await source('plv3/complete.js'));
 globalThis.dropHelpers = await load((await source('plv4/drop_preview.js')).replace(/^import .*;\r?\n/gm, ''));
 const { nativeCompletions } = await load(`const {provideCompletions,braceContextsText}=globalThis.sourceProvider; const {canInsertContainer}=globalThis.dropHelpers;
@@ -21,6 +22,13 @@ test('native Source completion offers V4 schedule/region defaults and Library re
   assert.deepEqual(values[3].asset, { id: 'f1', kind: 'folder', path: 'Characters.Alice' });
   assert.equal(values[2].insertText, '@avg]: { 1: { }, 1: { } }');
   assert.equal(values[0].start, 1);
+});
+test('untouched compatibility models offer language syntax without reading either Library', async () => {
+  const model = { getLineContent: () => '[', getValueInRange: () => '[' };
+  const values = await sourceProvider.provideCompletions({ languages: { CompletionItemKind: { Keyword: 1, Module: 2 }, CompletionItemInsertTextRule: { InsertAsSnippet: 4 } } }, model,
+    { lineNumber: 1, column: 2 }, { onInsertBlock: true });
+  assert.ok(values.suggestions.some(value => value.label === '@schedule'));
+  assert.ok(!values.suggestions.some(value => value.label === 'Characters.Alice'));
 });
 test('native completion respects Region headers, rectangle parameters, settings and literal brackets', async () => {
   assert.deepEqual((await nativeCompletions('[', 1, run('[@region]: { '))).map(value => value.name), ['base', 'mask', 'imask', 'fill']);

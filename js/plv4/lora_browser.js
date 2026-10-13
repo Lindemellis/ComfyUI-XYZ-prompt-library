@@ -163,7 +163,7 @@ export class LoraBrowserWindow {
       this.details.append(triggers);
     }
     const section = this.folderSection = element('details', 'lora-folder-section'); section.open = !!this.folderExpanded;
-    section.append(element('summary', 'lora-folder-heading', '触发词 Folder'));
+    section.append(element('summary', 'lora-folder-heading', '触发词 Class'));
     const body = element('div', 'lora-folder-body');
     if (info.triggers.length) {
       const tools = element('div', 'lora-folder-tools');
@@ -196,7 +196,7 @@ export class LoraBrowserWindow {
         const current = await this.request('detail', { id, ensure: true });
         if (token === this.detailToken && this.visible) await this.openPool(current.pool_id, token);
       } catch (error) {
-        if (token === this.detailToken && this.visible) container.replaceChildren(element('p', 'lora-empty', error.message), button('重试', '重新读取触发词 Folder', () => this.ensurePool(id, token)));
+        if (token === this.detailToken && this.visible) container.replaceChildren(element('p', 'lora-empty', error.message), button('重试', '重新读取触发词 Class', () => this.ensurePool(id, token)));
         throw error;
       }
     })().finally(() => { if (this.poolLoad === task) this.poolLoad = null; });
@@ -210,7 +210,7 @@ export class LoraBrowserWindow {
     const autocomplete = element('label', 'lora-folder-autocomplete'); autocomplete.append(toggle, element('span', '', '全局补全'));
     const history = element('div', 'lora-folder-history');
     const saved = page.histories.get(page.asset.id);
-    const undo = button('↶', '撤销 Folder 设置', () => page.undo()), redo = button('↷', '重做 Folder 设置', () => page.redo());
+    const undo = button('↶', '撤销 Class 设置', () => page.undo()), redo = button('↷', '重做 Class 设置', () => page.redo());
     undo.disabled = !saved?.past.length; redo.disabled = !saved?.future.length;
     history.append(undo, redo); options.append(autocomplete, history); controls.replaceChildren(nameRow, options);
   }
@@ -231,8 +231,8 @@ export class LoraBrowserWindow {
       },
       async organize(asset, action) {
         const current = await libraryRequest('get', { id: asset.id });
-        const options = editorLibrary.data.assets.filter(item => item.kind === 'folder');
-        const form = await showForm(action === 'move' ? '移动到 Folder' : '重命名', [{ key: action === 'move' ? 'parent' : 'name', label: action === 'move' ? '位置' : '名称', value: action === 'move' ? current.parent_id : current.name, ...(action === 'move' ? { options: options.map(item => ({ value: item.id, label: editorLibrary.path(item) })) } : {}) }]); if (!form) return;
+        const options = editorLibrary.data.assets.filter(item => item.kind === 'class');
+        const form = await showForm(action === 'move' ? '移动到 Class' : '重命名', [{ key: action === 'move' ? 'parent' : 'name', label: action === 'move' ? '位置' : '名称', value: action === 'move' ? current.parent_id : current.name, ...(action === 'move' ? { options: options.map(item => ({ value: item.id, label: editorLibrary.path(item) })) } : {}) }]); if (!form) return;
         await libraryRequest(action, { id: current.id, version: current.version, ...(action === 'move' ? { parent_id: form.parent } : { name: form.name }) }, true); await refresh();
       },
       assetMenu(asset) { return [['重命名', () => library.organize(asset, 'rename')], ['删除', () => library.deleteAsset(asset)]]; },

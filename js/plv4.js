@@ -1,14 +1,17 @@
 import { app } from '../../../scripts/app.js';
+import './prompt_shared/node_host.js';
 import { PLv4Window } from './plv4/window.js';
 import { NODE_TYPES, widget } from './plv4/host_sessions.js';
 import { report } from './plv4/ui.js';
 import { installWorkflowUndoGuard } from './plv4/history_shortcuts.js';
 import { LoraBrowserWindow } from './plv4/lora_browser.js';
+import { hideRegionModeWidget } from './plv4/region_mode.js';
+import { MaskLibraryWindow } from './plv4/mask_library.js';
 
 const editorWindow = new PLv4Window(app);
 const loras = new LoraBrowserWindow(app, editorWindow);
 editorWindow.openLoras = (node, id) => loras.open(node, id);
-window.plv4 = { window: editorWindow, loras, connectNode: async node => {
+window.plv4 = { window: editorWindow, loras, masks: new MaskLibraryWindow(), connectNode: async node => {
   const context = editorWindow.sessions.contexts.get(node);
   if (context) editorWindow.sessions.attachEmbedded(context);
   else {
@@ -21,11 +24,13 @@ app.registerExtension({
   name: 'XYZNodes.PromptLibraryV4',
   nodeCreated(node) {
     if (!NODE_TYPES.has(node.comfyClass)) return;
+    hideRegionModeWidget(node);
     for (const name of ['seed', 'region_mode']) {
       const value = widget(node, name); if (!value) continue;
       const callback = value.callback;
       value.callback = function() {
         const result = callback?.apply(this, arguments);
+        if (name === 'region_mode') editorWindow.regionModeControl?.update();
         if (editorWindow.visible && editorWindow.seedNode === node && !editorWindow.sessions.resolvingInputs) {
           editorWindow.pane?.scheduleLint();
           if (editorWindow.context?.session.view === 'preview') editorWindow.preview().catch(report);
@@ -38,6 +43,7 @@ app.registerExtension({
     const configured = node.onConfigure;
     node.onConfigure = function() {
       const result = configured?.apply(this, arguments);
+      hideRegionModeWidget(this);
       // A graph restore may reuse an object with completely different widgets.
       if (!editorWindow._graphRestoring && editorWindow.sessions.contexts.has(this)) {
         const active = editorWindow.context?.node === this && editorWindow.visible;
@@ -50,10 +56,12 @@ app.registerExtension({
       node.onAdded = function() { const result = added?.apply(this, arguments); window.plv4.connectNode(this).catch(report); return result; };
     }
   },
+  loadedGraphNode(node) { hideRegionModeWidget(node); },
   setup() {
     installWorkflowUndoGuard(window.comfyAPI?.changeTracker?.ChangeTracker);
     document.addEventListener('plv3:node-edited', event => {
-      const node = app.graph?._nodes.find(n => String(n.id) === String(event.detail?.nodeId));
+      const node = event.detail?.node ?? app.graph?._nodes.find(n => String(n.id) === String(event.detail?.nodeId));
+      if (node && !app.graph?._nodes.includes(node)) return;
       if (node) editorWindow.sessions.external(node, event.detail.value).catch(report);
     });
     const queue = app.queuePrompt;

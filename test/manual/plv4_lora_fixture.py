@@ -20,7 +20,7 @@ from prompt_library_v4.asset_routes import register as register_assets
 from prompt_library_v4.routes import register as register_document
 from prompt_library_v4.lora_routes import register as register_loras
 from prompt_library_v4.loras import LoraBrowser
-from prompt_library_v3.routes import _post_ast, _post_compile, _post_doc_sync
+from prompt_shared.language_routes import _post_ast, _post_compile, _post_doc_sync
 
 
 PAGE = '''<!doctype html><meta charset="utf-8"><title>PLv4 LoRA isolated check</title>

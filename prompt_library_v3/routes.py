@@ -1,198 +1,33 @@
-"""Prompt Library V3 — HTTP routes.
+"""Historical V3 Library routes, retained for explicit offline tooling/tests.
 
-All routes are registered under /xyz/plv3/.  P1's compiler is a pure function, so
-these are stateless: no DB, no WriteQueue (the library lands in P4).
-
-Endpoints:
-  POST /xyz/plv3/compile   — text -> prompt-control string + diagnostics.  This is
-                             also the editor's lint: the squiggles come from the
-                             same diagnostics the node would print.
-  POST /xyz/plv3/ast       — text -> AST with source spans, for the detail page
-  GET  /xyz/plv3/monaco/*  — the vendored Monaco build (static)
-
-The detail page parses through *this* route rather than reimplementing the grammar
-in JS: one parser, shared with the compiler, so the two can never drift.
-
-Monaco is served from here rather than from WEB_DIRECTORY on purpose: ComfyUI
-globs `**/*.js` under WEB_DIRECTORY and imports every hit as an ES-module
-extension (server.py:353).  Monaco's AMD bundle and its web worker would both be
-dragged into the main thread and blow up.
+The pack does not register these Library services. Stateless language/document
+handlers are compatibility exports of prompt_shared.language_routes; active V4
+setup registers that module directly without importing this legacy Library.
 """
 from __future__ import annotations
 
 import json
-from pathlib import Path
 
 from aiohttp import web
 
 from . import library, repo
-from .ast_json import to_json
-from .compile import REGION_MODES, compile_text
-from .diagnostics import E02, Diagnostics, PLv3Error
-from .parser import parse
+from .diagnostics import E02, PLv3Error
 
 _registered = False
 
 
-def _diag_json(diag) -> dict:
-    return {
-        "code": diag.code,
-        "message": diag.message,
-        "pos": diag.pos,
-        "severity": "error" if diag.is_error else "warning",
-    }
-
-
-async def _read(request) -> tuple[str, int, str, str]:
-    body = await request.json()
-    text = body.get("text") or ""
-    seed = int(body.get("seed") or 0)
-    region_mode = body.get("region_mode") or "couple"
-    if region_mode not in REGION_MODES:
-        region_mode = "couple"
-    polarity = "negative" if body.get("polarity") == "negative" else "positive"
-    return text, seed, region_mode, polarity
-
-
-async def _post_compile(request):
-    try:
-        text, seed, region_mode, polarity = await _read(request)
-    except Exception as exc:
-        return web.json_response({"error": f"bad request: {exc}"}, status=400)
-
-    try:
-        # The editor asks about documents that are still being typed, so it compiles in
-        # recovering mode: a broken construct becomes an E03 diagnostic (the editor puts
-        # a squiggle on it) and everything around it still compiles.  The alternative —
-        # returning nothing but the error — blanks the preview exactly when the user is
-        # mid-edit and needs to see what they have.  The NODE never uses this route; it
-        # compiles strictly and refuses to run (spec §6).
-        result = compile_text(
-            text, seed=seed, region_mode=region_mode, polarity=polarity, recover=True
-        )
-    except PLv3Error as exc:
-        # Recovery covers the structural breaks; anything that still throws (E01/E02) is
-        # a hard error with nothing partial to show.
-        return web.json_response(
-            {"ok": False, "text": "", "diagnostics": [_diag_json(exc.diag)]}
-        )
-
-    return web.json_response(
-        {
-            "ok": not any(d.is_error for d in result.diagnostics),
-            "text": result.text,
-            "diagnostics": [_diag_json(d) for d in result.diagnostics],
-            "segments": [
-                {
-                    "kind": s.kind,
-                    "text": s.text,
-                    "schedule": list(s.schedule),
-                    # The preview names its tabs from these — without them it can only
-                    # fall back on the segment's index, which is not what the user
-                    # wrote and not what `imask: i` means.
-                    "imask": s.imask,
-                    "mask": list(s.mask) if s.mask else None,
-                    "feather": s.feather,
-                    "mask_weight": s.mask_weight,
-                    "cond_weight": s.cond_weight,
-                }
-                for s in result.segments
-            ],
-        }
+# Historical handler exports for tests/tooling; the pack starts only the shared
+# stateless routes. Legacy Library registration below is never called at startup.
+if '.' in __package__:
+    from ..prompt_shared.language_routes import (
+        _diag_json, _read, _post_compile, _post_ast, _doc_of, render_doc,
+        _post_doc_sync, _post_doc_toggle, register as register_language,
     )
-
-
-async def _post_ast(request):
-    try:
-        text, _seed, _mode, polarity = await _read(request)
-    except Exception as exc:
-        return web.json_response({"error": f"bad request: {exc}"}, status=400)
-
-    diags = Diagnostics()
-    try:
-        root, diags = parse(text, diags, recover=True)
-    except PLv3Error as exc:
-        return web.json_response(
-            {"ok": False, "ast": None, "diagnostics": [_diag_json(exc.diag)]}
-        )
-
-    return web.json_response(
-        {
-            # `ok: false` with an AST attached: the tree is real but partial.  The detail
-            # page renders it and says so, rather than showing an error and nothing else.
-            "ok": not any(d.is_error for d in diags),
-            "ast": to_json(root),
-            "polarity": polarity,
-            "diagnostics": [_diag_json(d) for d in diags],
-        }
+else:
+    from prompt_shared.language_routes import (
+        _diag_json, _read, _post_compile, _post_ast, _doc_of, render_doc,
+        _post_doc_sync, _post_doc_toggle, register as register_language,
     )
-
-
-# --- documents --------------------------------------------------------------
-#
-# The document is the source of truth: the same tree as the text, plus a stable id
-# and an on/off switch per item.  The text is what its ENABLED items render to, so
-# an item switched off is nowhere in the text — which is the whole point, and also
-# why the frontend cannot work these out for itself.
-
-
-def _doc_of(body) -> "Document":
-    """The posted document, or a fresh one built from the posted text."""
-    from .document import Document, from_text, reconcile
-
-    raw = body.get("doc")
-    text = body.get("text") or ""
-    if not raw:
-        return from_text(text)
-    doc = Document.from_json(raw)
-    # A text came with it: the user has been typing, so fold those edits in first.
-    if "text" in body and render_doc(doc) != text:
-        doc = reconcile(doc, text)
-    return doc
-
-
-def render_doc(doc) -> str:
-    from .document import render
-
-    return render(doc)
-
-
-async def _post_doc_sync(request):
-    """text (+ the document we last handed out) -> the document that matches it.
-
-    Called on the same beat as the editor's lint, so the parked items survive
-    whatever the user just typed.  With no document posted this is simply
-    "wrap this text", which is how an older workflow gets one.
-    """
-    try:
-        body = await request.json()
-        doc = _doc_of(body)
-    except Exception as exc:  # noqa: BLE001
-        return web.json_response({"error": f"bad request: {exc}"}, status=400)
-
-    return web.json_response({"ok": True, "doc": doc.to_json(), "text": render_doc(doc)})
-
-
-async def _post_doc_toggle(request):
-    """Switch one item on or off, and say which characters that changes.
-
-    Returning the edit rather than the whole text lets the detail page push it
-    through its existing span-edit path — version stamp, rebase, one undo step.
-    """
-    try:
-        body = await request.json()
-        node_id = str(body.get("id") or "")
-        enabled = bool(body.get("enabled"))
-        doc = _doc_of(body)
-    except Exception as exc:  # noqa: BLE001
-        return web.json_response({"error": f"bad request: {exc}"}, status=400)
-
-    from .document import toggle_edit
-
-    edit = toggle_edit(doc, node_id, enabled)
-    if edit is None:
-        return web.json_response({"error": f"unknown item '{node_id}'"}, status=404)
-    return web.json_response({"ok": True, **edit})
 
 
 # --- library (spec §5) ------------------------------------------------------
@@ -546,7 +381,10 @@ async def _delete_document(request):
     return _json({"ok": True})
 
 
-_MONACO_DIR = Path(__file__).parent.parent / "web" / "monaco"
+if '.' in __package__:
+    from ..prompt_shared.routes import MONACO_DIR as _MONACO_DIR, register_monaco
+else:
+    from prompt_shared.routes import MONACO_DIR as _MONACO_DIR, register_monaco
 
 
 def register(server) -> None:
@@ -555,19 +393,7 @@ def register(server) -> None:
     if _registered:
         return
     r = server.routes
-    r.post("/xyz/plv3/compile")(_post_compile)
-    r.post("/xyz/plv3/ast")(_post_ast)
-
-    # Documents (item on/off switches)
-    r.post("/xyz/plv3/doc/sync")(_post_doc_sync)
-    r.post("/xyz/plv3/doc/toggle")(_post_doc_toggle)
-
-    # PLv4's pure editing layer shares this language and registers no new nodes.
-    if "." in __package__:
-        from ..prompt_library_v4.routes import register as register_v4
-    else:
-        from prompt_library_v4.routes import register as register_v4
-    register_v4(server)
+    register_language(server)
 
     # Library
     r.get("/xyz/plv3/library/tree")(_get_tree)
@@ -595,11 +421,6 @@ def register(server) -> None:
     r.patch(r"/xyz/plv3/library/documents/{id:\d+}")(_patch_document)
     r.delete(r"/xyz/plv3/library/documents/{id:\d+}")(_delete_document)
 
-    if _MONACO_DIR.is_dir():
-        server.app.router.add_static(
-            "/xyz/plv3/monaco/", path=str(_MONACO_DIR), name="plv3_monaco"
-        )
-    else:  # pragma: no cover
-        print(f"[PLv3] Monaco not found at {_MONACO_DIR}; the editor will not load")
+    register_monaco(server)
 
     _registered = True

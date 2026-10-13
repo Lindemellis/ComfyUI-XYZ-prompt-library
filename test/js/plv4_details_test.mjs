@@ -44,12 +44,16 @@ const theme = await import('data:text/javascript;base64,' + Buffer.from(themeSou
 globalThis.detailTheme = theme;
 globalThis.promptTextHelpers = await import('data:text/javascript;base64,' + Buffer.from(await readFile(new URL('../../js/plv4/prompt_text.js', import.meta.url), 'utf8')).toString('base64'));
 globalThis.folderTreeHelpers = await import('data:text/javascript;base64,' + Buffer.from(await readFile(new URL('../../js/plv4/folder_tree.js', import.meta.url), 'utf8')).toString('base64'));
+const iconSource=(await readFile(new URL('../../js/plv4/asset_icons.js',import.meta.url),'utf8')).replace(/^import .*;\r?\n/gm,'');
+globalThis.assetIconFactory=(await import('data:text/javascript;base64,'+Buffer.from("const element=(tag,cls='')=>{const n=document.createElement(tag);n.className=cls;return n;};\n"+iconSource).toString('base64'))).assetIcon;
 const detailSource = (await readFile(new URL('../../js/plv4/details.js', import.meta.url), 'utf8')).replace(/^import .*;\r?\n/gm, '');
 const dependencies = `
 const dualSlider = globalThis.detailTheme.dualSlider;
+const fmt = globalThis.detailTheme.fmt;
+const assetIcon=globalThis.assetIconFactory;
 const libraryRequest = (...args) => globalThis.poolRequest(...args);
 const { inlinePrompt, cleanPromptInput } = globalThis.promptTextHelpers;
-const { compactFolders } = globalThis.folderTreeHelpers;
+const { compactFolders, compareNames } = globalThis.folderTreeHelpers;
 const { attachPromptAutocomplete } = globalThis.tagacHosts;
 const settings = () => ({ scheduleStep: 0.05 });
 const element = (tag, cls = '', text = '') => { const node = document.createElement(tag); node.className = cls; if (text) node.textContent = text; return node; };
@@ -288,21 +292,21 @@ function poolFixture() {
   const tag = (folder, id, raw) => ({ kind: 'tag', name: raw, snapshot: leaf(raw,id), occurrence: [folder,id], source: { kind: 'tag', id } });
   const combo = { id: 'combo', kind: 'group', form: 'brace', enabled: true, children: [leaf('x'), { id: 'sub', kind: 'group', enabled: true, children: [leaf('y')] }] };
   const candidate = { kind: 'block', name: 'Combo', snapshot: combo, occurrence: ['L','combo'], source: { kind: 'block', id: 'combo', version: 1 } };
-  const tree = [{ kind: 'folder', id: 'P', name: 'P', children: [
-    { kind: 'folder', id: 'L', name: 'P.L', children: [tag('L','one','same'),candidate] },
-    { kind: 'folder', id: 'R', name: 'P.R', children: [tag('R','two','same')] },
+  const tree = [{ kind: 'class', id: 'P', name: 'P', children: [
+    { kind: 'class', id: 'L', name: 'P.L', children: [tag('L','one','same'),candidate] },
+    { kind: 'class', id: 'R', name: 'P.R', children: [tag('R','two','same')] },
   ] }];
   const owner = { id: 'owner', kind: 'group', form: 'brace', enabled: true, children: [{ id:'unbound', kind:'group', form:'brace', enabled:true, children:[leaf('same','local')] }] };
   const commands = [], requests = []; const session = {};
   const host = { context: { session }, entryTarget: async () => null, openFolder: async id => commands.push({open:id}), command: async command => commands.push(command) };
   const pane = new DetailsPane(new Node('div'),host); pane.token = 1;
-  globalThis.poolRequest = async (action, args) => { requests.push({action,args}); return action === 'folder_block' ? {snapshot:{...combo, meta:{pool:args.id}},source:{kind:'folder',id:args.id}} : {candidates:tree}; };
+  globalThis.poolRequest = async (action, args) => { requests.push({action,args}); return action === 'class_block' ? {snapshot:{...combo, meta:{pool:args.id}},source:{kind:'class',id:args.id}} : {candidates:tree}; };
   return {pane,owner,commands,requests,session,tree,container:new Node('div')};
 }
 
 test('Pool candidates persistently mark shared joined prompts without toggling existing content', async () => {
   const f=poolFixture(); await f.pane.candidates(f.session,f.owner,'P',f.container,1);
-  assert.deepEqual(f.requests[0],{action:'candidates',args:{pool:'P'}});
+  assert.deepEqual(f.requests[0],{action:'candidates',args:{pool:'P',exclude_block:undefined}});
   const rows=f.container.querySelectorAll('.pool-candidate-prompt');
   assert.equal(rows.length,2);assert.ok(rows.every(row=>row.dataset.poolState==='joined'&&row.matches('.pool-joined')));
   assert.ok(rows.every(row=>row.querySelector('.pool-usage').textContent==='已添加'));
@@ -314,7 +318,7 @@ test('Folder subblock button uses the direct-layer fill endpoint and existing in
   const f=poolFixture(); await f.pane.candidates(f.session,f.owner,'P',f.container,1);
   const buttons=f.container.querySelectorAll('.pool-insert');
   assert.equal(buttons.length,2); await buttons[0].onclick();
-  assert.deepEqual(f.requests.at(-1),{action:'folder_block',args:{id:'L',fill:true}});
+  assert.deepEqual(f.requests.at(-1),{action:'class_block',args:{id:'L',fill:true}});
   assert.equal(f.commands[0].type,'InsertLibraryBlock'); assert.equal(f.commands[0].snapshot.meta.pool,'L'); assert.equal(f.commands[0].parent_id,'owner');
 });
 
@@ -361,7 +365,7 @@ test('Details commits PLv3 clean items and normalizes Chinese prompt separators 
 
 test('Pool folders and saved blocks have distinct types and vertical read-only prompt rows', async () => {
   const f=poolFixture();await f.pane.candidates(f.session,f.owner,'P',f.container,1);
-  const folders=f.container.querySelectorAll('.pool-folder');
+  const folders=f.container.querySelectorAll('.pool-class');
   assert.deepEqual(folders.map(n=>n.querySelector('.pool-branch-name').textContent),['P','L','R']);
   assert.deepEqual(folders.map(n=>n.dataset.depth),[0,1,1]);assert.deepEqual(folders.map(n=>n.open),[true,false,false]);
   const combo=f.container.querySelector('.pool-block');assert.equal(combo.open,false);
@@ -377,9 +381,9 @@ test('Pool keeps Folder, Block and Prompt identity distinct across joined and un
   branch.children.push(unused,other);
   const copy=structuredClone(combo.snapshot);copy.meta={source:combo.source,occurrence:combo.occurrence};f.owner.children.push(copy);
   await f.pane.candidates(f.session,f.owner,'P',f.container,1);
-  assert.deepEqual(f.container.querySelectorAll('.pool-legend-item').map(n=>[n.dataset.kind,n.textContent]),[['folder','Folder'],['block','Block'],['tag','Prompt']]);
-  for(const folder of f.container.querySelectorAll('.pool-folder-head')) {
-    assert.equal(folder.querySelector('.pool-kind-icon').dataset.iconKind,'folder');
+  assert.deepEqual(f.container.querySelectorAll('.pool-legend-item').map(n=>[n.dataset.kind,n.textContent]),[['class','Class'],['block','Block'],['tag','Prompt']]);
+  for(const folder of f.container.querySelectorAll('.pool-class-head')) {
+    assert.equal(folder.querySelector('.pool-kind-icon').dataset.iconKind,'class');
     assert.equal(folder.dataset.poolState,undefined);assert.equal(folder.querySelector('.pool-add'),null);
   }
   const blocks=f.container.querySelectorAll('.pool-block-head').filter(n=>n.dataset.poolCandidate);
@@ -438,29 +442,29 @@ test('both region weights have shared steppers, targeting only the chosen subreg
 
 test('Pool folding survives redraws for the same block and stays separate across sessions', async () => {
   const f=poolFixture(); await f.pane.candidates(f.session,f.owner,'P',f.container,1);
-  const folder=f.container.querySelectorAll('.pool-folder')[1];folder.open=true;folder.ontoggle();
+  const folder=f.container.querySelectorAll('.pool-class')[1];folder.open=true;folder.ontoggle();
   const combo=f.container.querySelector('.pool-block');combo.open=true;combo.ontoggle();
   f.container.replaceChildren();await f.pane.candidates(f.session,f.owner,'P',f.container,1);
-  assert.equal(f.container.querySelectorAll('.pool-folder')[1].open,true);
+  assert.equal(f.container.querySelectorAll('.pool-class')[1].open,true);
   assert.equal(f.container.querySelector('.pool-block').open,true);
   const other={};f.pane.host.context.session=other;f.container.replaceChildren();
   await f.pane.candidates(other,f.owner,'P',f.container,1);
-  assert.equal(f.container.querySelectorAll('.pool-folder')[1].open,false);
+  assert.equal(f.container.querySelectorAll('.pool-class')[1].open,false);
   assert.equal(f.container.querySelector('.pool-block').open,false);
 });
 
 test('Pool compacts empty Folder chains and inserts the terminal Folder without changing binding', async () => {
   const f=poolFixture(),items=f.tree[0].children[0].children;
   f.owner.meta={pool:'P'};
-  f.tree[0].children=[{id:'M',kind:'folder',name:'P.Middle',children:[{id:'L',kind:'folder',name:'P.Middle.Leaf',children:items}]}];
+  f.tree[0].children=[{id:'M',kind:'class',name:'P.Middle',children:[{id:'L',kind:'class',name:'P.Middle.Leaf',children:items}]}];
   const before=structuredClone(f.tree);
   await f.pane.candidates(f.session,f.owner,'P',f.container,1);
-  const folders=f.container.querySelectorAll('.pool-folder');assert.equal(folders.length,1);
+  const folders=f.container.querySelectorAll('.pool-class');assert.equal(folders.length,1);
   assert.equal(folders[0].querySelector('.pool-branch-name').textContent,'P / Middle / Leaf');assert.equal(folders[0].open,true);
   assert.deepEqual(JSON.parse(folders[0].dataset.folderChain),['P','M','L']);assert.equal(folders[0].dataset.actualDepth,0);
-  assert.equal(folders[0].querySelector('.pool-folder-head').title,'第 1–3 层 · 文件夹 · P.Middle.Leaf');
+  assert.equal(folders[0].querySelector('.pool-class-head').title,'第 1–3 层 · Class · P.Middle.Leaf');
   assert.equal(f.container.querySelectorAll('.pool-add').length,2);
-  await f.container.querySelector('.pool-insert').onclick();assert.deepEqual(f.requests.at(-1),{action:'folder_block',args:{id:'L',fill:true}});
+  await f.container.querySelector('.pool-insert').onclick();assert.deepEqual(f.requests.at(-1),{action:'class_block',args:{id:'L',fill:true}});
   assert.equal(f.commands[0].snapshot.meta.pool,'L');assert.equal(f.owner.meta.pool,'P');assert.deepEqual(f.tree,before);
   const folds=f.container.querySelectorAll('.pool-fold-all');await folds[1].onclick();assert.ok(f.container.querySelectorAll('details').every(n=>!n.open));
   await folds[0].onclick();assert.ok(f.container.querySelectorAll('details').every(n=>n.open));
@@ -471,17 +475,17 @@ test('Pool filters do not compact Folders whose hidden candidates or branches ma
   const combo=f.tree[0].children[0].children[1];f.tree[0].children.push(combo);
   await f.pane.candidates(f.session,f.owner,'P',f.container,1);
   const kind=f.container.querySelector('.pool-filter-kind');kind.value='tag';kind.onchange();
-  assert.deepEqual(f.container.querySelectorAll('.pool-folder').map(n=>n.querySelector('.pool-branch-name').textContent),['P','L','R']);
-  const usage=f.container.querySelector('.pool-filter-usage');usage.value='unused';usage.onchange();assert.equal(f.container.querySelectorAll('.pool-folder').length,0);
+  assert.deepEqual(f.container.querySelectorAll('.pool-class').map(n=>n.querySelector('.pool-branch-name').textContent),['P','L','R']);
+  const usage=f.container.querySelector('.pool-filter-usage');usage.value='unused';usage.onchange();assert.equal(f.container.querySelectorAll('.pool-class').length,0);
   kind.value='block';kind.onchange();
-  assert.deepEqual(f.container.querySelectorAll('.pool-folder').map(n=>n.querySelector('.pool-branch-name').textContent),['P','L']);
+  assert.deepEqual(f.container.querySelectorAll('.pool-class').map(n=>n.querySelector('.pool-branch-name').textContent),['P','L']);
 });
 
 function boundFixture() {
   const f=poolFixture();f.owner.meta={name:'Owner',pool:'P'};
   f.session.state={selection:{node_id:'owner',block_id:'owner'}};
   f.session.projection={tree:{id:'doc',kind:'group',form:'root',enabled:true,children:[f.owner]}};
-  f.pane.host.library={data:{assets:[{id:'P',kind:'folder',name:'Pool'}]},path:()=> 'Library.Pool'};
+  f.pane.host.library={data:{assets:[{id:'P',kind:'class',name:'Pool'}]},path:()=> 'Library.Pool'};
   f.container=f.pane.container;f.pane.render(f.session);return f;
 }
 
@@ -558,13 +562,13 @@ test('Pool type and joined-state filters combine, preserve ancestors and restore
   const set=(key,value)=>{const select=pool().querySelector('.pool-filter-'+key);select.value=value;select.onchange();};
   const used=f.owner.children[0].children[0];used.enabled=false;
   f.pane.render(f.session,{keepOwner:true});await f.pane.pendingRender;
-  const folder=pool().querySelectorAll('.pool-folder')[1];folder.open=true;folder.ontoggle();
+  const folder=pool().querySelectorAll('.pool-class')[1];folder.open=true;folder.ontoggle();
   set('kind','tag');assert.equal(pool().querySelectorAll('.pool-add').length,2);assert.equal(pool().querySelectorAll('.pool-block').length,0);
   set('usage','unused');assert.equal(pool().querySelectorAll('.pool-add').length,0,'parked items are already joined');
   set('kind','block');assert.equal(pool().querySelectorAll('.pool-add').length,1);
-  assert.deepEqual(pool().querySelectorAll('.pool-folder').map(n=>n.querySelector('.pool-branch-name').textContent),['Pool','L']);
-  assert.ok(pool().querySelectorAll('.pool-folder').every(n=>n.open),'matching ancestors start expanded');
-  set('usage','all');set('kind','all');assert.equal(pool().querySelectorAll('.pool-folder')[1].open,true);
+  assert.deepEqual(pool().querySelectorAll('.pool-class').map(n=>n.querySelector('.pool-branch-name').textContent),['Pool','L']);
+  assert.ok(pool().querySelectorAll('.pool-class').every(n=>n.open),'matching ancestors start expanded');
+  set('usage','all');set('kind','all');assert.equal(pool().querySelectorAll('.pool-class')[1].open,true);
   set('kind','block');f.pane.render(f.session,{keepOwner:true});await f.pane.pendingRender;
   assert.equal(pool().querySelector('.pool-filter-kind').value,'block');
   assert.equal(pool().querySelectorAll('.pool-add').length,1);
@@ -656,11 +660,11 @@ from prompt_library_v4.model import EditorState
 with TemporaryDirectory() as directory:
     library=AssetLibrary(Path(directory)/'pool.db')
     try:
-        pool=library.mutate({'action':'save_folder','name':'Pool'})['id']
+        pool=library.mutate({'action':'save_class','name':'Pool'})['id']
         library.mutate({'action':'save_tag','parent_id':pool,'text':'cat'})
         library.mutate({'action':'save_tag','parent_id':pool,'text':'(fox:1.2)'})
         snapshot=EditorState.create(text='{ dog, { bird }, <lora:model:0.7> }').doc.root.children[0].to_json()
-        library.mutate({'action':'save_block','folder_id':pool,'name':'Animals','snapshot':snapshot})
+        library.mutate({'action':'save_block','name':'Animals','snapshot':{**snapshot,'meta':{'pool':pool}}})
         print(json.dumps(library.read('candidates',pool=pool)))
     finally:
         library.close()
@@ -670,7 +674,7 @@ with TemporaryDirectory() as directory:
   const data=JSON.parse(result.stdout), pool=data.candidates[0].id;
   assert.equal(data.candidates[0].children.find(node=>node.name==='cat').snapshot.children,undefined);
   const f=boundFixture();await f.pane.pendingRender;
-  f.owner.meta.pool=pool;f.pane.host.library.data.assets=[{id:pool,kind:'folder',name:'Pool'}];
+  f.owner.meta.pool=pool;f.pane.host.library.data.assets=[{id:pool,kind:'class',name:'Pool'}];
   globalThis.poolRequest=async()=>data;
   f.pane.render(f.session,{keepOwner:true});await f.pane.pendingRender;
   assert.ok(!f.container.querySelectorAll('.pool-help').some(node=>node.textContent.includes('池读取失败')));

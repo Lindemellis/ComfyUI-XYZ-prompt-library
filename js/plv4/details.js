@@ -1,15 +1,19 @@
 import { element, button, input, check, report } from './ui.js';
-import { dualSlider } from '../plv3/theme.js';
+import { dualSlider, fmt } from '../plv3/theme.js';
 import { settings } from '../plv3/settings.js';
 import { libraryRequest } from './asset_client.js';
 import { inlinePrompt, cleanPromptInput } from './prompt_text.js';
-import { attachPromptAutocomplete } from '../tagac_host.js';
-import { compactFolders } from './folder_tree.js';
+import { attachPromptAutocomplete, attachPromptPreview } from '../tagac_host.js';
+import { DetailsPreferences } from './details_preferences.js';
+import { assetIcon } from './asset_icons.js';
+import { compactFolders, compareNames } from './folder_tree.js';
+import { regionMasks } from './mask_region.js';
 
 export const isBlock = row => row.kind === 'group' && row.form !== 'paren' && !inlinePrompt(row);
 export function indexTree(tree) { const map = new Map(); const visit = n => { if (!n) return; map.set(n.id, n); n.children.forEach(visit); }; visit(tree); return map; }
 export const nameOf = row => row.meta?.name || row.ast?.header || ({ schedule: 'Schedule', region: 'Region', avg: 'AVG', avg_entry: 'AVG entry', schedule_entry: 'Schedule', region_entry: 'Region' }[row.form]) || '';
 const textOf = node => node.source ?? (node.kind !== 'group' || node.opaque ? node.raw || '' : (node.open || '') + (node.lead || '') + (node.children || []).map(child => textOf(child) + (child.sep || '')).join('') + (node.close || ''));
+const peerCandidate = (owner, candidate) => !!owner.meta?.pool && candidate.kind === 'block' && candidate.snapshot?.meta?.pool === owner.meta.pool && !candidate.snapshot?.meta?.lora;
 
 export function promptKey(node) {
   while (node.kind === 'group' && node.children?.length === 1 && (node.form === 'paren' || node.meta?.presentation === 'prompt') && !node.settings?.region) node = node.children[0];
@@ -19,16 +23,43 @@ export function promptKey(node) {
 }
 
 export class DetailsPane {
-  constructor(container, host) { this.container = container; this.host = host; this.sections = {}; this.promptStates = new WeakMap(); this.poolViews = new WeakMap(); this.scrollStates = new WeakMap(); this.poolFilters = new WeakMap(); this.poolPending = new WeakMap(); }
+  constructor(container, host) {
+    this.container = container; this.host = host; this.sections = {}; this.promptStates = new WeakMap(); this.poolViews = new WeakMap(); this.scrollStates = new WeakMap(); this.poolFilters = new WeakMap(); this.poolPending = new WeakMap(); this.commandsPending = new WeakMap();
+    this.preferences = new DetailsPreferences(host);
+    container.addEventListener('pointerdown', event => this.retainClickTarget(event), true);
+  }
+  retainClickTarget(event) {
+    if (event.button !== 0) return;
+    this.releasePointer?.();
+    const gesture = this.pointerGesture = { id: event.pointerId };
+    const release = event => {
+      if (event && event.pointerId !== gesture.id) return;
+      document.removeEventListener('pointerup', release, true);
+      document.removeEventListener('pointercancel', release, true);
+      // Native mouseup/click must finish before a blur or completed command
+      // replaces the pressed control. Draft change/blur still happen normally.
+      setTimeout(() => {
+        if (this.pointerGesture !== gesture) return;
+        this.pointerGesture = null; this.releasePointer = null;
+        const mount = this.pendingMount; this.pendingMount = null; mount?.();
+      }, 0);
+    };
+    this.releasePointer = release;
+    document.addEventListener('pointerup', release, true);
+    document.addEventListener('pointercancel', release, true);
+  }
   rememberScroll() {
     if (!this.mountedSession) return;
     let states = this.scrollStates.get(this.mountedSession); if (!states) { states = new Map(); this.scrollStates.set(this.mountedSession, states); }
     states.set(this.mountedOwner, { outer: this.container.scrollTop || 0, inner: this.container.querySelector('.plv4-details')?.scrollTop || 0 });
   }
   render(session, { keepOwner = false } = {}) {
+    for(const controller of this.maskControllers||[])controller.abort();this.maskControllers?.clear();
+    if (session && this.commandsPending.get(session)) return;
     this.rememberScroll();
     const token = this.token = (this.token || 0) + 1;
     if (!session) { this.mountGuard?.field.removeEventListener('blur', this.mountGuard.listener); this.mountGuard = null; this.container.replaceChildren(); this.mountedSession = null; this.ownerId = null; return; }
+    if (this.host.context?.generalSettings && this.host.context.session === session) { this.renderGeneral(session); return; }
     const previousSession = this.session;
     this.session = session;
     if (!this.promptStates.has(session)) this.promptStates.set(session, new Set());
@@ -51,7 +82,7 @@ export class DetailsPane {
           this.field('Model strength', this.weightControl(model, value => this.command('SetLoraStrength', row, { model: value }), { title: 'Model strength' })),
           this.field('CLIP strength', this.weightControl(clip, value => this.command('SetLoraStrength', row, { clip: value }), { title: 'CLIP strength' })),
           this.folderBinding(row, true),
-          button('打开 LoRA 详情', '浏览此 LoRA 的预览图和触发词 Folder', () => this.host.openLoraDetails(row.meta.lora.id), 'detail-open-lora'));
+          button('打开 LoRA 详情', '浏览此 LoRA 的预览图和触发词 Class', () => this.host.openLoraDetails(row.meta.lora.id), 'detail-open-lora'));
         page.append(section);
       }
       const common = this.section('GENERAL');
@@ -77,7 +108,7 @@ export class DetailsPane {
         if (row.form !== 'region_entry') timing.append(this.field('Region', check(!!row.settings?.region, enabled => this.setting(row, 'region', enabled ? { kind: 'base' } : null))));
         if (row.settings?.region || row.form === 'region_entry') {
           const region = element('div'); this.region(region, row, row.form === 'region_entry');
-          timing.append(...region.querySelectorAll('.plv4-field'));
+          timing.append(...region.querySelectorAll('.plv4-field,.mask-coordinates,.mask-region-control'));
         }
         page.append(timing);
       }
@@ -91,8 +122,23 @@ export class DetailsPane {
         this.sourceStatus(row, status, token).catch(error => { if (token === this.token) status.append(element('span', 'plv4-badge', error.message)); });
       }
     }
+    if (row.form === 'region') this.regionTiming(page, row);
     if (['schedule', 'region', 'avg'].includes(row.form)) {
       const entries = this.section({ schedule: 'Schedule entries', region: 'Region entries', avg: 'AVG entries' }[row.form]);
+      if (row.form === 'region') {
+        const enabled = row.meta?.region_enabled !== false;
+        const toggle = check(enabled, async value => {
+          await this.command('SetRegionEnabled', row, { enabled: value });
+          await new Promise(requestAnimationFrame);
+          if (this.session === session && this.ownerId === row.id && this.host.context?.session === session &&
+              (document.activeElement === document.body || document.activeElement === toggle)) {
+            this.container.querySelector('input[data-field="region-enabled"]')?.focus({ preventScroll: true });
+          }
+        }, 'Enable region splitting for this container');
+        toggle.setAttribute('aria-label', 'Enable Region functionality'); toggle.dataset.field = 'region-enabled';
+        entries.append(this.field('Region', toggle));
+        if (!enabled) entries.append(element('p', 'setting-help', 'Region is off. Enabled entries merge into the prompt.'));
+      }
       const regionTree = row.form === 'region' ? element('div', 'detail-contents-tree detail-region-tree') : null;
       if (regionTree) entries.append(regionTree);
       for (const [index, entry] of row.children.entries()) {
@@ -120,13 +166,21 @@ export class DetailsPane {
       if (folder) pending = this.candidates(session, row, row.meta.pool, poolTree, token).catch(error => {
         if (token === this.token) poolTree.replaceChildren(element('p', 'pool-help', `池读取失败：${error.message}`));
       });
-      else poolTree.append(element('p', 'pool-help', 'Folder 已删除 / 不在本机。当前内容仍可在 Content 编辑。'));
+      else poolTree.append(element('p', 'pool-help', 'Class 已删除 / 不在本机。当前内容仍可在 Content 编辑。'));
     }
+    const poolSectionKey = `${row.id}:${row.meta?.pool || ''}:section`, sectionKey = `${row.id}:Pool`;
+    const views = this.preferences.map(session, 'views');
+    if (views.has(poolSectionKey)) this.sections[sectionKey] = views.get(poolSectionKey);
+    else delete this.sections[sectionKey];
     XYZPLv4Design.foldSections(page, { id: row.id, type: ['schedule', 'region', 'avg'].includes(row.form) ? row.form : 'normal', schedule: row.settings?.schedule, region: row.settings?.region }, this.sections);
+    const poolDetails = page.querySelector('.pool-tree')?.closest('details.section');
+    poolDetails?.addEventListener('toggle', () => { views.set(poolSectionKey, poolDetails.open); this.preferences.save(session); });
     const mount = () => {
       if (token !== this.token) return;
+      if (this.pointerGesture) { this.pendingMount = mount; return; }
       const focused = document.activeElement;
-      if (focused && this.mountedSession === session && this.mountedOwner === row.id && this.container.contains(focused) && focused.matches('input,textarea,select,[contenteditable="true"]')) {
+      const regionKind = this.container.contains(focused) && focused?.matches('select[data-region-kind]') ? focused.dataset.regionKind : null;
+      if (focused && this.mountedSession === session && this.mountedOwner === row.id && this.container.contains(focused) && focused.matches('input:not([type="checkbox"]):not([type="radio"]),textarea,select:not([data-region-kind]),[contenteditable="true"],[contenteditable="plaintext-only"]')) {
         // Pool reads may finish after the user starts a new draft. Replacing
         // that field would discard its focus, caret and uncommitted value.
         this.mountGuard?.field.removeEventListener('blur', this.mountGuard.listener);
@@ -142,6 +196,9 @@ export class DetailsPane {
       const scroll = this.scrollStates.get(session)?.get(row.id) || { outer: 0, inner: 0 };
       this.container.replaceChildren(page); page.scrollTop = scroll.inner; this.container.scrollTop = scroll.outer;
       this.mountedSession = session; this.mountedOwner = row.id;
+      // Kind changes are already committed; show their controls immediately and
+      // retain keyboard focus without waiting for the select to lose focus.
+      if (regionKind !== null) [...page.querySelectorAll('select[data-region-kind]')].find(select => select.dataset.regionKind === regionKind)?.focus({ preventScroll: true });
     };
     if (pending) {
       if (this.mountedSession !== session || this.mountedOwner !== row.id) {
@@ -149,6 +206,23 @@ export class DetailsPane {
       }
       this.pendingRender = pending.then(mount);
     } else { mount(); this.pendingRender = Promise.resolve(); }
+  }
+  renderGeneral(session) {
+    this.pendingMount = null;
+    this.mountGuard?.field.removeEventListener('blur', this.mountGuard.listener); this.mountGuard = null;
+    this.session = session; this.ownerId = null;
+    const control = this.host.regionModeControl; control.update();
+    if (this.mountedSession === session && this.mountedOwner === '@general' && this.container.contains(this.generalPage)) return;
+    const page = element('div', 'plv4-scroll plv4-details plv4-general-page');
+    const top = element('div', 'inspector-head');
+    top.append(element('span', 'detail-name', 'General Settings'), button('×', '关闭 Settings', () => this.host.toggleDetails(false), 'tiny-button')); page.append(top);
+    const section = this.section('Region');
+    section.append(this.field('Region algorithm', control.element)); page.append(section);
+    this.container.replaceChildren(page);
+    const scroll = this.scrollStates.get(session)?.get('@general');
+    page.scrollTop = scroll?.inner || 0; this.container.scrollTop = scroll?.outer || 0;
+    this.generalPage = page; this.mountedSession = session; this.mountedOwner = '@general';
+    this.pendingRender = Promise.resolve();
   }
   promptInfo(item) {
     const textItem = (item.meta?.presentation === 'prompt' || item.form === 'paren') && item.children?.length === 1 ? item.children[0] : item;
@@ -174,10 +248,18 @@ export class DetailsPane {
       const open = this.expandedPrompts.has(id);
       panel.hidden = !open; fold.textContent = open ? '▾' : '▸'; fold.setAttribute('aria-expanded', String(open));
     }; paint();
-    const remove = button('×', '删除 prompt', () => this.command('Delete', item), 'tiny-button'); remove.dataset.deletePrompt = id; remove.hidden = !local; remove.disabled = !active;
-    const toggle = check(!!local?.enabled, onToggle); toggle.disabled = !active;
+    const remove = button('×', '删除 prompt', async () => {
+      const expanded = !panel.hidden;
+      remove.disabled = true; line.hidden = true; panel.hidden = true;
+      try { return await this.command('Delete', item); }
+      catch (error) { line.hidden = false; panel.hidden = !expanded; remove.disabled = !active; throw error; }
+    }, 'tiny-button'); remove.dataset.deletePrompt = id; remove.hidden = !local; remove.disabled = !active;
+    const toggle = check(!!local?.enabled, value => {
+      line.classList.toggle('detail-content-disabled', !value || !active);
+      return onToggle(value);
+    }); toggle.disabled = !active;
     toggle.setAttribute('aria-label', `启用 / 关闭 prompt：${textOf(textItem)}`);
-    line.append(toggle, text, fold, remove);
+    line.append(toggle, text, this.promptPreview(item), fold, remove);
     this.promptSetting(panel, textItem, { ...values, weight: values.weight ?? this.weight(textItem) }, 'weight');
     this.promptSetting(panel, textItem, values, 'schedule');
     if (!local || !active) panel.querySelectorAll('input,button,select').forEach(control => { control.disabled = true; });
@@ -195,7 +277,18 @@ export class DetailsPane {
     if (kind === 'schedule') this.interval(card, values.schedule, apply);
     container.append(card);
   }
-  command(type, row, extra = {}) { return this.host.command({ type, id: row.id, ...extra }); }
+  command(type, row, extra = {}) { return this.applyCommand({ type, id: row.id, ...extra }); }
+  async applyCommand(command, session = this.session) {
+    const selectionEpoch = session.selectionEpoch;
+    this.commandsPending.set(session, (this.commandsPending.get(session) || 0) + 1);
+    this.token = (this.token || 0) + 1;
+    try { return await this.host.command(command); }
+    finally {
+      const count = this.commandsPending.get(session) - 1;
+      if (count) this.commandsPending.set(session, count); else this.commandsPending.delete(session);
+      if (!count && this.host.context?.session === session && !this.host.shell?.details.hidden) this.render(session, { keepOwner: session.selectionEpoch === selectionEpoch });
+    }
+  }
   randomSelect(row) {
     const value = row.settings?.random_select;
     const bounds = Array.isArray(value) ? value : Number.isInteger(value) ? [value, value] : ['', ''];
@@ -233,19 +326,19 @@ export class DetailsPane {
   }
   folderBinding(row, fixed = false) {
     const poolId = row.meta?.pool;
-    const folder = this.host.library.data?.assets?.find(asset => asset.kind === 'folder' && asset.id === poolId);
-    const name = folder ? folder.name : poolId ? 'Folder 已删除 / 不在本机' : '未绑定';
+    const folder = this.host.library.data?.assets?.find(asset => asset.kind === 'class' && asset.id === poolId);
+    const name = folder ? folder.name : poolId ? 'Class 已删除 / 不在本机' : '未绑定';
     const controls = element('div', 'detail-folder-control'); controls.dataset.folderBinding = fixed ? 'fixed' : 'editable';
     const label = fixed ? element('span', 'detail-folder-name', name)
-      : button(`${name} ▾`, folder ? this.host.library.path(folder) : '绑定 Folder 池', () => this.host.libraryAction('pool', row), 'pool-setting');
+      : button(`${name} ▾`, folder ? this.host.library.path(folder) : '绑定 Class 池', () => this.host.libraryAction('pool', row), 'pool-setting');
     label.title = folder ? this.host.library.path(folder) : name;
     controls.append(label);
     if (poolId) {
-      const open = button('↗', '打开绑定的 Folder 设置', () => this.host.openFolder(poolId), 'detail-open-folder');
-      open.setAttribute('aria-label', `打开 ${name} 的 Folder 设置`); open.disabled = !folder;
+      const open = button('↗', '打开绑定的 Class 设置', () => this.host.openClass(poolId), 'detail-open-folder');
+      open.setAttribute('aria-label', `打开 ${name} 的 Class 设置`); open.disabled = !folder;
       controls.append(open);
     }
-    return this.field('文件夹', controls);
+    return this.field('Class', controls);
   }
   async sourceStatus(row, container, token) {
     const source = row.meta.source; const expected = { ...source.dependencies, [source.id]: source.version };
@@ -254,24 +347,23 @@ export class DetailsPane {
     container.append(button('从库更新', '用最新来源更新此副本', () => this.host.updateSource(row)));
     if (Object.entries(expected).some(([id, version]) => latest.versions[id] !== version)) container.append(element('span', 'plv4-badge', '来源有更新'));
   }
-  treeIcon(kind) {
-    const node = element('span', 'pool-kind-icon'); node.setAttribute('aria-hidden', 'true');
-    const paths = {
-      folder: 'M3 7V5h6l2 2h10v13H3V7Z M3 10h18',
-      block: 'm12 3 9 5v9l-9 5-9-5V8l9-5Z M3 8l9 5 9-5 M12 13v9',
-      tag: 'M4 4h7l9 9-7 7-9-9V4Z M8 8h.01',
-    };
-    node.dataset.iconKind = kind;
-    node.innerHTML = `<svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" stroke-linecap="round"><path d="${paths[kind]}"/></svg>`;
-    return node;
+  treeIcon(kind) { return assetIcon(kind, 'pool-kind-icon', 15); }
+  promptPreview(node) {
+    const slot = element('span', 'detail-tag-preview');
+    // Only a single literal prompt may resolve to a Danbooru tag. Unwrap
+    // attention/Settings shells, retaining literal escaped tag parentheses.
+    while (node.kind === 'group' && node.children?.length === 1 && (node.form === 'paren' || node.meta?.presentation === 'prompt')) node = node.children[0];
+    if (node.kind === 'text') attachPromptPreview(slot, textOf(node).trim()).catch(report);
+    return slot;
   }
   treeBranch(session, owner, kind, key, name, depth) {
-    let views = this.poolViews.get(session); if (!views) { views = new Map(); this.poolViews.set(session, views); }
+    const views = this.preferences.map(session, 'views'); this.poolViews.set(session, views);
     const box = element('details', `pool-branch detail-tree-branch pool-${kind}`); box.dataset.depth = depth;
-    const stateKey = `${owner.id}:${owner.meta?.pool || ''}:${key}`; box.open = views.get(stateKey) ?? (kind === 'folder' && depth === 0);
-    box.ontoggle = () => views.set(stateKey, box.open);
+    const prefix = `${owner.id}:${owner.meta?.pool || ''}:`, stateKey = prefix + key;
+    box.open = views.get(stateKey) ?? (String(key).startsWith('local:') ? undefined : views.get(prefix + 'default')) ?? (kind === 'class' && depth === 0);
+    box.ontoggle = () => { views.set(stateKey, box.open); this.preferences.save(session); };
     const head = element('summary', `pool-branch-head pool-${kind}-head`), body = element('div', 'pool-branch-body'); body.dataset.depth = depth + 1;
-    head.title = `第 ${depth + 1} 层 · ${kind === 'folder' ? '文件夹' : 'block'} · ${name}`;
+    head.title = `第 ${depth + 1} 层 · ${kind === 'class' ? 'Class' : 'block'} · ${name}`;
     head.dataset.candidateKind = kind;
     box.append(head, body); return {box, head, body};
   }
@@ -314,7 +406,21 @@ export class DetailsPane {
       const matches = candidate.kind === 'tag' ? prompts.filter(({node}) => promptKey(node) === promptKey(candidate.snapshot)) : blocks.filter(({node}) =>
         (candidate.source?.id && node.meta?.source?.kind === 'block' && node.meta.source.id === candidate.source.id) ||
         (candidate.occurrence && JSON.stringify(node.meta?.occurrence) === JSON.stringify(candidate.occurrence)));
-      return matches.find(match => match.active) || matches[0] || null;
+      const matched = matches.find(match => match.active) || matches[0];
+      if (matched) return matched;
+      if (peerCandidate(owner, candidate)) {
+        let first = null;
+        for (const child of candidate.snapshot.children || []) {
+          const occurrence = JSON.stringify([...(candidate.occurrence || []), child.id]);
+          const found = isBlock(child)
+            ? blocks.find(({node}) => JSON.stringify(node.meta?.occurrence) === occurrence || (child.meta?.source?.id && node.meta?.source?.id === child.meta.source.id))
+            : prompts.find(({node}) => promptKey(node) === promptKey(child));
+          if (!found) return null;
+          first ||= found;
+        }
+        return first || { node: owner, active: owner.effective !== false };
+      }
+      return null;
     };
   }
   highlightJoined(id) {
@@ -333,7 +439,7 @@ export class DetailsPane {
       const target = { parent_id: current.id, edge: 'end' };
       if (['schedule', 'region', 'avg'].includes(current.form)) return;
       const entry = await this.host.entryTarget(current, target); if (entry === false || this.host.context?.session !== session) return;
-      return this.host.command({ type: 'EnableCandidate', ...target, snapshot: candidate.snapshot, source: candidate.source, occurrence: candidate.occurrence, ...(entry ? { entry } : {}) });
+      return this.applyCommand({ type: peerCandidate(current, candidate) ? 'MergeLibraryBlock' : 'EnableCandidate', ...target, snapshot: candidate.snapshot, source: candidate.source, occurrence: candidate.occurrence, ...(entry ? { entry } : {}) }, session);
     });
     this.poolPending.set(session, task.catch(() => {})); return task;
   }
@@ -345,19 +451,32 @@ export class DetailsPane {
         container.append(branch.box); this.previewContents(node.children, branch.body, session, owner, depth + 1, key);
       } else {
         const line = element('div', 'detail-prompt-row pool-preview-prompt');
-        line.append(this.treeIcon('tag'), element('span', 'pool-prompt-text', textOf(node).trim())); container.append(line);
+        line.append(this.treeIcon('tag'), element('span', 'pool-prompt-text', textOf(node).trim()), this.promptPreview(node)); container.append(line);
         if (node.enabled === false) line.classList.add('pool-preview-off');
       }
     }
   }
   async candidates(session, owner, pool, container, token) {
-    const data = await libraryRequest('candidates', { pool }); if (token !== this.token || this.host.context?.session !== session) return;
-    let filters = this.poolFilters.get(session); if (!filters) { filters = new Map(); this.poolFilters.set(session, filters); }
+    const exclude = this.host.context?.asset?.id || owner.meta?.source?.id;
+    const revision = this.host.library?.data?.revision;
+    if (this.poolCacheRevision !== revision) { this.poolCache = new Map(); this.poolCacheRevision = revision; }
+    this.poolCache ??= new Map();
+    const key = JSON.stringify([pool, exclude || null]);
+    let read = this.poolCache.get(key);
+    if (!read) {
+      read = libraryRequest('candidates', { pool, exclude_block: exclude });
+      this.poolCache.set(key, read);
+      read.catch(() => { if (this.poolCache.get(key) === read) this.poolCache.delete(key); });
+    }
+    const data = await read; if (token !== this.token || this.host.context?.session !== session) return;
+    const filters = this.preferences.map(session, 'filters'); this.poolFilters.set(session, filters);
     const filterKey = `${owner.id}:${pool}`;
     if (!filters.has(filterKey)) filters.set(filterKey, { kind: 'all', usage: 'all' });
     const filter = filters.get(filterKey), controls = element('div', 'pool-controls'), tree = element('div', 'detail-contents-tree pool-candidate-tree');
+    if (!['all', 'tag', 'block'].includes(filter.kind)) filter.kind = 'all';
+    if (!['all', 'unused'].includes(filter.usage)) filter.usage = 'all';
     const legend = element('div', 'pool-legend'); legend.setAttribute('aria-label', 'Pool 条目类型');
-    for (const [kind, label] of [['folder','Folder'],['block','Block'],['tag','Prompt']]) {
+    for (const [kind, label] of [['class','Class'],['block','Block'],['tag','Prompt']]) {
       const item = element('span', 'pool-legend-item'); item.dataset.kind = kind;
       item.append(this.treeIcon(kind), element('span', '', label)); legend.append(item);
     }
@@ -366,13 +485,16 @@ export class DetailsPane {
       const label = element('label', 'pool-filter-row', title), field = element('select', `pool-filter-${key}`);
       for (const [value, text] of options) { const option = element('option', '', text); option.value = value; field.append(option); }
       field.value = filter[key]; field.setAttribute('aria-label', title);
-      field.onchange = () => { filter[key] = field.value; paint(); };
+      field.onchange = () => { filter[key] = field.value; this.preferences.save(session); paint(); };
       label.append(field); controls.append(label);
     };
     select('kind', '类型', [['all','全部'],['tag','Prompt'],['block','Block']]);
     select('usage', '加入状态', [['all','全部'],['unused','未加入']]);
     const folding = element('div', 'pool-fold-controls');
     for (const [open, title] of [[true,'全部展开'],[false,'全部折叠']]) folding.append(button(title, title, () => {
+      const views = this.preferences.map(session, 'views'), prefix = `${owner.id}:${owner.meta?.pool || ''}:`;
+      for (const key of views.keys()) if (key.startsWith(prefix) && key !== prefix + 'section' && !key.startsWith(prefix + 'local:')) views.delete(key);
+      views.set(prefix + 'default', open); this.preferences.save(session);
       for (const branch of tree.querySelectorAll('details')) { branch.open = open; branch.ontoggle?.(); }
     }, 'pool-fold-all'));
     controls.append(folding); container.append(controls, tree);
@@ -382,10 +504,10 @@ export class DetailsPane {
       const match = this.poolMatches(current), active = current.enabled !== false && current.effective !== false;
       const filtered = filter.kind !== 'all' || filter.usage !== 'all';
       const choose = nodes => nodes.flatMap(candidate => {
-        if (candidate.kind === 'folder') {
+        if (candidate.kind === 'class') {
           const children = choose(candidate.children);
-          // Filtering must not turn a real branch or a nonempty Folder into a compact chain.
-          const compactChild = candidate.children.length === 1 && candidate.children[0].kind === 'folder' ? candidate.children[0].id : null;
+          // Filtering must not turn a real branch or a nonempty Class into a compact chain.
+          const compactChild = candidate.children.length === 1 && candidate.children[0].kind === 'class' ? candidate.children[0].id : null;
           return children.length || !filtered ? [{...candidate, children, compactChild}] : [];
         }
         return (filter.kind === 'all' || candidate.kind === filter.kind) && (filter.usage === 'all' || !match(candidate)) ? [candidate] : [];
@@ -394,30 +516,31 @@ export class DetailsPane {
         line.dataset.candidateKind = candidate.kind; line.dataset.poolCandidate = candidate.source?.id || candidate.id || '';
         line.dataset.poolState = selected ? 'joined' : 'unused';
         if (selected) line.classList.add('pool-joined');
-        const add = button('＋', selected ? '已加入：提示当前位置，不重复添加' : `添加 ${name} 到 Content 末尾`, () => this.addPoolCandidate(session, current, candidate), 'pool-add');
+        const add = button('＋', selected ? '已加入：提示当前位置，不重复添加' : peerCandidate(current, candidate) ? `添加 ${name} 的内容` : `添加 ${name} 到 Content 末尾`, () => this.addPoolCandidate(session, current, candidate), 'pool-add');
         add.dataset.action = 'add-pool-candidate'; add.disabled = !active || ['schedule', 'region', 'avg'].includes(current.form); add.setAttribute('aria-label', `添加 ${name}`);
         line.append(add);
       };
       const status = (line, selected) => line.append(element('small', 'pool-usage', selected ? '已添加' : '未添加'));
-      const walk = (nodes, parent, depth = 0, parentPath = '', actualDepth = depth) => nodes.forEach(candidate => {
+      const order = { class: 0, block: 1, tag: 2 };
+      const walk = (nodes, parent, depth = 0, parentPath = '', actualDepth = depth) => [...nodes].sort((a, b) => (order[a.kind] ?? 3) - (order[b.kind] ?? 3) || compareNames({ name: shortName(a, parentPath) }, { name: shortName(b, parentPath) })).forEach(candidate => {
         const name = shortName(candidate, parentPath);
-        if (candidate.kind === 'folder') {
+        if (candidate.kind === 'class') {
           const chain = compactFolders(candidate, folder => folder.children, (folder, child) => folder.compactChild === child.id);
           const terminal = chain.at(-1);
           let previousPath = parentPath;
           const label = chain.map(folder => { const local = shortName(folder, previousPath); previousPath = folder.name; return local; }).join(' / ');
           const key = filtered ? `${candidate.id}:filter:${filter.kind}:${filter.usage}` : candidate.id;
-          const {box, head, body} = this.treeBranch(session, owner, 'folder', key, label, depth);
+          const {box, head, body} = this.treeBranch(session, owner, 'class', key, label, depth);
           box.dataset.folderChain = JSON.stringify(chain.map(folder => folder.id)); box.dataset.actualDepth = actualDepth;
           if (filtered) {
             const states = this.poolViews.get(session), stateKey = `${owner.id}:${owner.meta?.pool || ''}:${key}`;
-            box.open = states.get(stateKey) ?? true;
+            box.open = states.get(stateKey) ?? states.get(`${owner.id}:${owner.meta?.pool || ''}:default`) ?? true;
           }
-          head.title = `第 ${actualDepth + 1}${chain.length > 1 ? `–${actualDepth + chain.length}` : ''} 层 · 文件夹 · ${terminal.name}`;
-          head.append(this.treeIcon('folder'), element('span', 'pool-branch-name', label));
+          head.title = `第 ${actualDepth + 1}${chain.length > 1 ? `–${actualDepth + chain.length}` : ''} 层 · Class · ${terminal.name}`;
+          head.append(this.treeIcon('class'), element('span', 'pool-branch-name', label));
           if (terminal.id !== pool) {
             const insert = button('＋子 block', '作为 sub block 插入：本层全部散装 tag，默认启用', async () => {
-              const source = await libraryRequest('folder_block', { id: terminal.id, fill: true });
+              const source = await libraryRequest('class_block', { id: terminal.id, fill: true });
               const target = { parent_id: current.id, edge: 'end' };
               const entry = await this.host.entryTarget(current, target); if (entry === false) return;
               return this.host.command({ type: 'InsertLibraryBlock', ...target, snapshot: source.snapshot, source: source.source, ...(entry ? { entry } : {}) });
@@ -425,19 +548,24 @@ export class DetailsPane {
             insert.disabled = !active || ['schedule', 'region', 'avg'].includes(current.form); insert.dataset.action = 'insert-folder-block'; head.append(insert);
           }
           parent.append(box); walk(terminal.children, body, depth + 1, terminal.name, actualDepth + chain.length);
-          if (!terminal.children.length) body.append(element('span', 'pool-empty', '空文件夹')); return;
+          if (!terminal.children.length) body.append(element('span', 'pool-empty', '空Class')); return;
         }
         const selected = match(candidate);
         if (candidate.kind === 'tag') {
           const line = element('div', 'detail-prompt-row pool-candidate-prompt'); line.dataset.tagText = textOf(candidate.snapshot).trim();
           decorate(line, candidate, selected, name);
-          line.append(this.treeIcon('tag'), element('span', 'pool-prompt-text', textOf(candidate.snapshot).trim())); status(line, selected); parent.append(line); return;
+          line.append(this.treeIcon('tag'), element('span', 'pool-prompt-text', textOf(candidate.snapshot).trim()), this.promptPreview(candidate.snapshot)); status(line, selected); parent.append(line); return;
         }
         const key = JSON.stringify(candidate.occurrence), branch = this.treeBranch(session, owner, 'block', key, name, depth);
         branch.head.title = candidate.source?.path || candidate.name;
         decorate(branch.head, candidate, selected, name);
         branch.head.append(this.treeIcon('block'), element('span', 'pool-branch-name', name), element('small', 'pool-type', 'block')); status(branch.head, selected);
-        parent.append(branch.box); this.previewContents(candidate.snapshot.children, branch.body, session, owner, depth + 1, key);
+        parent.append(branch.box);
+        let previewed = false;
+        const preview = () => { if (!previewed && branch.box.open) { previewed = true; this.previewContents(candidate.snapshot.children, branch.body, session, owner, depth + 1, key); } };
+        const toggle = branch.box.ontoggle;
+        branch.box.ontoggle = event => { toggle?.(event); preview(); };
+        preview();
       });
       tree.replaceChildren(); const visible = choose(data.candidates); walk(visible, tree);
       if (!visible.length) tree.append(element('p', 'pool-empty', '没有符合筛选的条目'));
@@ -482,6 +610,49 @@ export class DetailsPane {
     line.lastElementChild.style.fontSize = '13px';
     container.append(line);
   }
+  // A Region container's two windows on one rail. The handles have no identity:
+  // after every drag the four positions are sorted, the outer two are `schedule`
+  // (outside: the container is gone) and the inner two `region_window` (between
+  // inner and outer: entries merge into ordinary prompt text).
+  regionTiming(page, row) {
+    const section = this.section('Timing');
+    const outer = row.settings?.schedule || [0, 1], inner = row.settings?.region_window || outer;
+    const rail = element('div', 'plv4-quad');
+    const plain = element('div', 'plv4-quad-plain'), split = element('div', 'plv4-quad-split');
+    rail.append(element('div', 'plv4-quad-track'), plain, split);
+    const step = String(settings().scheduleStep);
+    const handles = [outer[0], inner[0], inner[1], outer[1]].map((value, index) => {
+      const handle = element('input'); Object.assign(handle, { type: 'range', min: '0', max: '1', step, value: String(value) });
+      handle.setAttribute('aria-label', `Region timing handle ${index + 1}`);
+      return handle;
+    });
+    rail.append(...handles);
+    const label = element('div', 'plv4-quad-label');
+    const sorted = () => handles.map(handle => Number(handle.value)).sort((a, b) => a - b);
+    // Native thumb centres travel from half a thumb to width minus half a thumb.
+    const place = (bar, a, b) => {
+      bar.style.left = `calc(${a * 100}% + ${6.5 - a * 13}px)`;
+      bar.style.width = `calc(${(b - a) * 100}% - ${(b - a) * 13}px)`;
+    };
+    const paint = () => {
+      const [a, b, c, d] = sorted();
+      place(plain, a, d); place(split, b, c);
+      label.textContent = `生效 ${fmt(a)}–${fmt(d)} · 分区 ${fmt(b)}–${fmt(c)}`;
+    };
+    const commit = () => {
+      const [a, b, c, d] = sorted();
+      const patch = { schedule: a === 0 && d === 1 ? null : [a, d], region_window: a === b && c === d ? null : [b, c] };
+      if (JSON.stringify(patch) === JSON.stringify({ schedule: row.settings?.schedule || null, region_window: row.settings?.region_window || null })) return paint();
+      return this.command('SetSettings', row, { patch }).catch(report);
+    };
+    handles.forEach(handle => { handle.oninput = paint; handle.onchange = commit; });
+    paint();
+    if (row.meta?.region_enabled === false) {
+      rail.classList.add('disabled'); handles.forEach(handle => { handle.disabled = true; });
+    }
+    section.append(rail, label, element('p', 'setting-help', '外侧两点之外：整个 Region 不生效。外侧与内侧之间：不分区，条目合并成普通提示词。内侧之间：分区。'));
+    page.append(section);
+  }
   schedule(page, row) { const section = this.section('Schedule boundary'); this.interval(section, row.settings.schedule, (value, side) => this.command('SetScheduleBoundary', row, { side, value })); page.append(section); }
   regionEntry(container, owner, entry, session, index) {
     const value = entry.settings?.region || { kind: 'base' };
@@ -498,7 +669,7 @@ export class DetailsPane {
     head.append(toggle, this.treeIcon('block'), button(name, `打开 ${name} 的内容与详情`, () => this.host.locate(entry.id), 'pool-branch-name detail-region-name'),
       element('small', 'pool-type', value.kind), remove);
     if (!entry.enabled || !active) head.classList.add('detail-content-disabled');
-    this.regionFields(body, value, region => this.command('SetRegion', entry, { region }));
+    this.regionFields(body, value, region => this.command('SetRegion', entry, { region }), false, false, entry);
     if (!active) body.querySelectorAll('input,button,select').forEach(control => { control.disabled = true; });
     container.append(box);
   }
@@ -506,18 +677,18 @@ export class DetailsPane {
     const section = this.section('Region');
     const value = row.settings?.region || { kind: 'base' };
     const apply = region => entry ? this.command('SetRegion', row, { region }) : this.setting(row, 'region', region);
-    this.regionFields(section, value, apply, !entry, !row.settings?.region && !entry);
+    this.regionFields(section, value, apply, !entry, !row.settings?.region && !entry, row);
     page.append(section);
   }
-  regionFields(section, value, apply, allowNone = false, none = false) {
+  regionFields(section, value, apply, allowNone = false, none = false, row = null) {
     const select = element('select');
+    select.dataset.regionKind = row?.id || '';
     for (const kind of [...(allowNone ? ['none'] : []), 'base', 'mask', 'imask', 'fill']) { const option = element('option', '', kind); option.value = kind; select.append(option); }
     select.value = none ? 'none' : value.kind;
-    select.onchange = () => this.host.run(() => apply(select.value === 'none' ? null : { kind: select.value, ...(select.value === 'mask' ? { mask: [0, 0, 1, 1] } : select.value === 'imask' ? { imask: 0 } : {}) }));
+    select.onchange = () => this.host.run(() => apply(select.value === 'none' ? null : { ...value, kind: select.value, mask: select.value === 'mask' ? value.mask || [0, 1, 0, 1] : null, imask: select.value === 'imask' ? value.imask ?? 0 : null }));
     section.append(this.field('Kind', select));
     if (select.value === 'none') return;
-    if (value.kind === 'imask') section.append(this.field('IMASK', input(value.imask ?? 0, imask => apply({ ...value, imask }), { type: 'number', min: 0, step: 1 })));
-    if (value.kind === 'mask') section.append(this.field('Rectangle', input(value.mask?.join(', ') || '', text => apply({ ...value, mask: text.split(',').map(Number) }))));
+    if (row) regionMasks(section, row, this.host, value, apply);
     const keys = [...(['mask','imask'].includes(value.kind) ? ['feather'] : []), ...(value.kind !== 'fill' ? ['mask_weight'] : []), 'cond_weight'];
     for (const key of keys) {
       const change = number => apply({ ...value, [key]: number });

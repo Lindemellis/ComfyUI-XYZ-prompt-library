@@ -5,42 +5,35 @@ import { showForm, showConfirm, toast } from '../plv3/ui.js';
 import { libraryRequest, libraryDocumentRequest, libraryContextRequest, ensureOwner } from './asset_client.js';
 import { LibraryPreview } from './library_preview.js';
 import { cleanPromptInput } from './prompt_text.js';
-import { compactFolders } from './folder_tree.js';
+import { compactFolders, compareNames } from './folder_tree.js';
 
-function assetIcon(kind) {
-  const paths = {
-    folder: 'M3 7V5h6l2 2h10v13H3V7Z M3 10h18',
-    tag: 'M4 4h7l9 9-7 7-9-9V4Z M8 8h.01',
-    block: 'm12 3 9 5v9l-9 5-9-5V8l9-5Z M3 8l9 5 9-5 M12 13v9',
-    document: 'M5 3h10l4 4v14H5V3Z M14 3v5h5 M8 12h8 M8 16h8',
-  };
-  const icon = element('span', 'asset-icon'); icon.dataset.iconKind = kind;
-  icon.innerHTML = `<svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round" stroke-linecap="round" aria-hidden="true"><path d="${paths[kind] || paths.block}"/></svg>`;
-  return icon;
-}
+import { assetIcon } from './asset_icons.js';
+import { showLibraryDelete, showLibraryMove } from './library_dialogs.js';
 
-// Folder-pool Library, using the existing snapshot/editor boundary.
+const kindOrder = { class: 0, folder: 1, block: 2 };
+
+// Folder storage and Class pools, using the existing snapshot/editor boundary.
 export class LibraryPanel {
   constructor(container, host) {
-    this.container = container; this.host = host; this.query = ''; this.collapsed = new Set(); this.contexts = new Map(); this.sort = 'name';
+    this.container = container; this.host = host; this.query = ''; this.collapsed = new Set(); this.contexts = new Map();
     const head = element('div', 'plv4-library-head');
     head.insertAdjacentHTML('afterbegin', '<div class="library-title">Library <span class="eyebrow">LOCAL</span></div>');
+    this.title = head.querySelector('.library-title');
     const search = input('', value => { this.query = value; this.renderTree(); }, { title: '搜索 Library' }); search.placeholder = '搜索 Library';
     search.oninput = () => { this.query = search.value; this.renderTree(); };
     search.type = 'search';
     const ops = element('div', 'plv4-row library-tools');
-    ops.append(button('A↕', '按名称 / 原顺序排序', () => { this.sort = this.sort === 'name' ? 'position' : 'name'; this.renderTree(); }),
-      button('▾', '全部展开', () => { this.collapsed.clear(); this.renderTree(); }), button('▸', '全部折叠', () => { this.data?.assets.filter(f => f.kind === 'folder').forEach(f => this.collapsed.add(f.id)); this.renderTree(); }), button('↻', '刷新 Library', () => this.reload()));
-    ops.append(button('+', '新建 Folder / Block / Tag / Document', e => menu(e.currentTarget, [
-      ['新建 Folder', () => this.create('folder')], ['添加 tag', () => this.create('tag')], ['新建 Block', () => this.create('block')], ['保存完整 Document', () => this.host.saveDocument()], ['加载已存 Document', () => this.loadSavedDocument()],
-      ['从 V3 迁移（保留原库）', () => this.migrate()],
+    ops.append(button('▾', '全部展开', () => { this.collapsed.clear(); this.searchCollapsed?.clear(); this.renderTree(); }), button('▸', '全部折叠', () => { this.data?.assets.filter(f => ['folder','class'].includes(f.kind)).forEach(f => this.collapsed.add(f.id)); this.renderTree(); }), button('↻', '刷新 Library', () => this.reload()));
+    ops.append(button('+', '新建 Folder / Class / Block / Document', e => menu(e.currentTarget, [
+      ['新建 Folder', () => this.create('folder')], ['新建 Class', () => this.create('class')], ['新建 Block', () => this.create('block')], ['保存完整 Document', () => this.host.saveDocument()], ['加载已存 Document', () => this.loadSavedDocument()],
+      ['从 V3 迁移（保留原库）', () => this.migrate()], ['转换旧 Folder 池', () => this.convertPools()],
     ])));
-    ops.append(button('LoRA', '浏览 LoRA 和触发词 Folder', () => this.host.openLoras?.(this.host.context?.node || this.host.seedNode)));
-    ops.querySelector('[title="全部折叠"]').onclick = () => { this.data?.assets.filter(f => f.kind === 'folder').forEach(f => this.collapsed.add(f.id)); this.data?.assets.filter(a => ['folder'].includes(a.kind)).forEach(a => this.collapsed.add(a.id)); this.renderTree(); };
+    ops.append(button('LoRA', '浏览 LoRA 和触发词 Class', () => this.host.openLoras?.(this.host.context?.node || this.host.seedNode)));
+    ops.querySelector('[title="全部折叠"]').onclick = () => { const collapsed = this.query ? this.searchCollapsed : this.collapsed; this.data?.assets.filter(a => ['folder','class'].includes(a.kind)).forEach(a => collapsed.add(a.id)); this.renderTree(); };
     for (const control of ops.querySelectorAll('button')) control.classList.add('tiny-button');
     head.append(search, ops); this.tree = element('div', 'plv4-scroll'); this.tree.setAttribute('role', 'tree');
-    const note = element('div', 'library-note'); note.innerHTML = '左边缘拖动 block<br>▣ 保留结构插入 · ≡ 仅插入 prompts<br>关闭父级后，子项设置仍被保留。';
-    container.append(head, this.tree, note);
+    const note = element('div', 'library-note'); note.hidden = true;
+    this.note = note; container.append(head, this.tree, note);
     window.addEventListener('xyz-plv4-library-changed', () => {
       clearTimeout(this.refreshTimer); this.refreshTimer = setTimeout(() => { if (!container.hidden) this.reload(); }, 150);
     });
@@ -50,8 +43,11 @@ export class LibraryPanel {
     const token = this.reloadToken = (this.reloadToken || 0) + 1;
     try { const current = await libraryRequest('tree');
       if (token !== this.reloadToken) return;
+      if (this.data?.revision === current.revision) return;
       if (this.data?.revision !== current.revision) window.dispatchEvent(new CustomEvent('xyz-plv4-library-index', { detail: current.revision }));
-      this.data = current; this.renderTree(); this.host.refreshLibraryBindings?.();
+      this.data = current;
+      if (this.note) { this.note.hidden = !current.legacy_pools; this.note.textContent = current.legacy_pools ? '请从 ＋ 菜单选择“转换旧 Folder 池”。' : ''; }
+      this.renderTree(); this.host.refreshLibraryBindings?.();
     } catch (error) { if (token === this.reloadToken) this.tree.replaceChildren(element('div', 'plv4-empty', error.message)); }
   }
   renderTree() {
@@ -63,7 +59,17 @@ export class LibraryPanel {
     if (!this.nextRows.length) this.nextRows.push(element('div', 'plv4-empty', this.query ? '没有匹配内容' : 'Library 暂无内容'));
     const current = [...this.tree.childNodes];
     if (current.length !== this.nextRows.length || current.some((row, i) => row !== this.nextRows[i])) {
+      // Removing every row temporarily collapses the scroll range to zero.
+      // Preserve both the inner list and the surrounding Library pane.
+      const scroll = [this.tree, this.container].filter(Boolean).map(node => [node, node.scrollTop]);
+      const focused = document.activeElement;
+      const focusedRow = focused?.closest?.('[data-asset-id]');
       this.preview?.close(); this.tree.replaceChildren(...this.nextRows);
+      for (const [node, top] of scroll) if (top != null) node.scrollTop = top;
+      if (focusedRow && !focused.isConnected) {
+        const replacement = this.nextRows.find(row => row.dataset.assetId === focusedRow.dataset.assetId);
+        ([...(replacement?.querySelectorAll('button') || [])].find(control => control.title === focused.title) || replacement)?.focus?.({ preventScroll: true });
+      }
     }
     const ids = new Set(this.nextRows.map(row => row.dataset.assetId));
     for (const id of this.treeRows.keys()) if (!ids.has(id)) this.treeRows.delete(id);
@@ -77,13 +83,14 @@ export class LibraryPanel {
   }
   folderOptions() { return [{ value: '', label: 'Library 根目录' }, ...(this.data?.assets || []).filter(a => a.kind === 'folder').map(a => ({ value: a.id, label: this.path(a) }))]; }
   parentOptions(kind, asset = null) {
-    const allowed = { folder: ['folder'], tag: ['folder'], block: ['folder', 'block'], document: ['folder'] }[kind];
+    const allowed = { folder: ['folder'], class: ['folder','class'], tag: ['class'], block: ['folder','block'], document: ['folder'] }[kind];
     const isDescendant = row => { const seen = new Set(); while (row && !seen.has(row.id)) { if (row.id === asset?.id) return true; seen.add(row.id); row = this.data.assets.find(a => a.id === row.parent_id); } return false; };
-    return [...(kind === 'tag' ? [] : [{ value: '', label: 'Library 根目录' }]), ...(this.data?.assets || []).filter(a => allowed.includes(a.kind) && !isDescendant(a)).map(a => ({ value: a.id, label: this.path(a) }))];
+    return [...(kind === 'tag' ? [] : [{ value: '', label: 'Library 根目录' }]), ...(this.data?.assets || []).filter(a => !a.library_hidden && !a.lora_root && allowed.includes(a.kind) && !isDescendant(a)).map(a => ({ value: a.id, label: this.path(a) }))];
   }
   async create(kind, parent = null) {
     await this.reload();
     const current = parent ? await libraryRequest('get', { id: parent.id }) : null;
+    if (kind === 'tag' && current) { await this.openAsset(current); this.host.folderPage.focusTagInput(current.id); return; }
     const local = current?.kind === 'block' ? this.contexts.get(`v4:${current.id}`) : null;
     if (local && local.session.revision !== local.savedRevision) throw new Error('请先保存父 block 的本地修改，再新建 subblock');
     const form = await showForm(`新建 ${kind}`, [{ key: 'name', label: '名称', value: '' }, ...(current ? [] : [{ key: 'parent', label: '位置', value: '', options: this.parentOptions(kind) }])]);
@@ -96,23 +103,24 @@ export class LibraryPanel {
     return result.asset;
   }
   renderAssets(query) {
+    if (this.foldQuery !== query) { this.foldQuery = query; this.searchCollapsed = new Set(); }
     const assets = this.data.assets || [];
     const byParent = new Map();
     for (const asset of assets) { const parent = asset.parent_id ?? null; if (!byParent.has(parent)) byParent.set(parent, []); byParent.get(parent).push(asset); }
-    const children = parent => (byParent.get(parent) || []).filter(a => a.kind !== 'tag' && !a.lora_root);
+    const children = parent => (byParent.get(parent) || []).filter(a => a.kind !== 'tag' && !a.library_hidden && !a.lora_root);
     const tagMatches = parent => assets.some(a => a.kind === 'tag' && a.parent_id === parent && a.name.toLocaleLowerCase().includes(query));
     const matches = (asset, stack = new Set()) => {
       if (stack.has(asset.id)) return false; const next = new Set(stack).add(asset.id);
       return this.path(asset).toLocaleLowerCase().includes(query) || tagMatches(asset.id) || children(asset.id).some(a => matches(a, next));
     };
     const walk = (parent, depth, ancestorMatch = false, actualDepth = depth) => {
-      const list = children(parent).sort((a, b) => this.sort === 'name' ? a.name.localeCompare(b.name) : a.position - b.position);
+      const list = children(parent).sort((a, b) => (kindOrder[a.kind] ?? 3) - (kindOrder[b.kind] ?? 3) || compareNames(a, b));
       for (const first of list) {
         if (query && !ancestorMatch && !matches(first)) continue;
-        const chain = compactFolders(first, folder => byParent.get(folder.id));
+        const chain = compactFolders(first, folder => byParent.get(folder.id), (_parent, child) => !child.library_hidden && !child.lora_root);
         const asset = chain.at(-1), label = chain.map(folder => folder.name).join(' / ');
         const active = chain.some(folder => this.host.folderContext === folder.id || this.host.context?.asset?.id === folder.id);
-        const closed = !query && chain.some(folder => this.collapsed.has(folder.id));
+        const closed = chain.some(folder => (query ? this.searchCollapsed : this.collapsed).has(folder.id));
         const childMatch = ancestorMatch || chain.some(folder => folder.name.toLocaleLowerCase().includes(query));
         const branch = children(asset.id).length;
         const signature = JSON.stringify([chain.map(folder => [folder.id, folder.name, this.path(folder), folder.version]), depth, actualDepth, branch, closed]);
@@ -122,9 +130,10 @@ export class LibraryPanel {
           if (branch && !closed) walk(asset.id, depth + 1, childMatch, actualDepth + chain.length);
           continue;
         }
-        const row = element('div', `plv4-library-row asset${asset.kind === 'folder' ? ' library-folder-row' : ' library-tree-block'}${active ? ' active' : ''}`); row.dataset.assetId = asset.id; row.dataset.kind = asset.kind; row.dataset.depth = depth; row.style.paddingLeft = '6px';
+        const row = element('div', `plv4-library-row asset${['folder','class'].includes(asset.kind) ? ' library-folder-row' : ' library-tree-block'}${active ? ' active' : ''}`); row.dataset.assetId = asset.id; row.dataset.kind = asset.kind; row.dataset.depth = depth; row.style.paddingLeft = '6px';
         row.dataset.folderChain = JSON.stringify(chain.map(folder => folder.id)); row.dataset.actualDepth = actualDepth;
-        row.tabIndex = 0; row.setAttribute('role', 'treeitem'); row.setAttribute('aria-level', String(actualDepth + 1)); row.setAttribute('aria-label', `打开 ${label}`);
+        row.tabIndex = 0; row.setAttribute('role', 'treeitem'); row.setAttribute('aria-level', String(actualDepth + 1)); row.setAttribute('aria-label', `${asset.kind === 'folder' ? '展开 / 折叠' : '打开'} ${label}`);
+        if (branch) row.setAttribute('aria-expanded', String(!closed));
         row.title = `第 ${actualDepth + 1}${chain.length > 1 ? `–${actualDepth + chain.length}` : ''} 层 · ${this.path(asset)}`;
         const selectedAsset = event => chain.find(folder => folder.id === (event.target.closest?.('.compact-folder-segment') || event.target).dataset?.folderId) || asset;
         row.onclick = event => {
@@ -133,6 +142,7 @@ export class LibraryPanel {
         };
         row.ondblclick = event => {
           if (event.defaultPrevented || event.target.closest?.('button')) return;
+          if (selectedAsset(event).kind === 'folder') return;
           return this.openAsset(selectedAsset(event), true).catch(report);
         };
         row.onkeydown = event => {
@@ -144,14 +154,14 @@ export class LibraryPanel {
           for (let level = 0; level < depth; level++) guides.append(element('i', 'tree-guide'));
           row.append(guides);
         }
-        if (branch) row.append(button(closed ? '▸' : '▾', '展开 / 折叠', () => { for (const folder of chain) { if (closed) this.collapsed.delete(folder.id); else this.collapsed.add(folder.id); } this.renderTree(); }));
+        if (branch) row.append(button(closed ? '▸' : '▾', '展开 / 折叠', () => this.toggleFolders(chain.map(folder => folder.id))));
         else row.append(element('span', 'library-fold-spacer'));
         row.append(assetIcon(asset.kind));
         const name = element('span', 'plv4-library-name', chain.length === 1 ? asset.name : ''); name.title = this.path(asset); row.append(name);
         if (chain.length > 1) chain.forEach((folder, index) => {
           if (index) name.append(element('span', 'compact-folder-separator', ' / '));
           const segment = element('span', 'compact-folder-segment', folder.name); segment.dataset.folderId = folder.id;
-          segment.title = this.path(folder); segment.tabIndex = 0; segment.setAttribute('role', 'link'); segment.setAttribute('aria-label', `打开 ${this.path(folder)}`); name.append(segment);
+          segment.title = this.path(folder); segment.tabIndex = 0; segment.setAttribute('role', folder.kind === 'folder' ? 'button' : 'link'); segment.setAttribute('aria-label', `${folder.kind === 'folder' ? '展开 / 折叠' : '打开'} ${this.path(folder)}`); name.append(segment);
         });
         if (asset.kind === 'block') { name.style.touchAction = 'none'; name.onpointerdown = event => this.startInsertDrag(event, asset, false, name); }
         const showPreview = () => { this.preview ??= new LibraryPreview(); return this.preview.show(preview, asset); };
@@ -162,10 +172,10 @@ export class LibraryPanel {
         preview.onpointerleave = () => { if (document.activeElement !== preview) this.preview?.scheduleClose(); };
         preview.onblur = () => this.preview?.close();
         preview.onkeydown = event => { if (event.key === 'Escape') this.preview?.close(); };
-        row.append(preview);
-        if (asset.kind === 'folder') {
-          const handle = button('▣', '拖入：新建绑定此 Folder 的 block', () => {}, 'library-handle');
-          handle.dataset.insertMode = 'folder';
+        if (asset.kind !== 'folder') row.append(preview);
+        if (asset.kind === 'class') {
+          const handle = button('▣', '拖入：新建绑定此 Class 的 block', () => {}, 'library-handle');
+          handle.dataset.insertMode = 'class';
           handle.setAttribute('aria-label', `拖入 ${asset.name}：新建绑定池的 block`);
           handle.onpointerdown = event => this.startInsertDrag(event, asset, false, handle); row.append(handle);
         }
@@ -198,34 +208,50 @@ export class LibraryPanel {
     return context;
   }
   async openAsset(asset, permanent = false) {
-    if (asset.kind === 'folder') return this.host.openFolder(asset.id, permanent);
+    if (asset.kind === 'folder') {
+      const row = [...this.tree.children].find(row => JSON.parse(row.dataset.folderChain || '[]').includes(asset.id));
+      return this.toggleFolders(row ? JSON.parse(row.dataset.folderChain) : [asset.id]);
+    }
+    if (asset.kind === 'class') return this.host.openFolder(asset.id, permanent);
     if (asset.kind === 'tag') { const current = await libraryRequest('get', { id: asset.id }); return this.host.openFolder(current.parent_id); }
     if (asset.kind === 'document') { const value = await libraryRequest('get', { id: asset.id }); return this.host.loadDocument({ doc_json: JSON.stringify(value.data.doc) }); }
     if (this.host.openLibraryAsset) return this.host.openLibraryAsset(asset, permanent);
     return this.host.openLibrary(await this.assetContext(asset), permanent);
+  }
+  toggleFolders(ids) {
+    const collapsed = this.query ? this.searchCollapsed : this.collapsed;
+    const closed = ids.some(id => collapsed.has(id));
+    for (const id of ids) { if (closed) collapsed.delete(id); else collapsed.add(id); }
+    this.renderTree();
   }
   async insertAsset(asset, promptsOnly) {
     const expanded = await libraryRequest('expand', { id: asset.id });
     return this.host.insertSnapshot(expanded.snapshot, expanded.source, promptsOnly);
   }
   assetMenu(asset) {
-    const children = { folder: [['添加 subfolder', 'folder'], ['添加 Block', 'block'], ['添加 tag', 'tag']], block: [['添加 subblock', 'block']] };
-    return [['打开', () => this.openAsset(asset)], ['重命名', () => this.organize(asset, 'rename')], ...(children[asset.kind] || []).map(([label, kind]) => [label, () => this.create(kind, asset)]), ['移动', () => this.organize(asset, 'move')], ['Delete', () => this.deleteAsset(asset)]];
+    const children = { folder: [['添加 subfolder', 'folder'], ['添加 Class', 'class'], ['添加 Block', 'block']], class: [['添加 subclass', 'class'], ['添加 prompt', 'tag']], block: [['添加 subblock', 'block']] };
+    return [[asset.kind === 'folder' ? '展开 / 折叠' : '打开', () => this.openAsset(asset)], ['重命名', () => this.organize(asset, 'rename')], ...(children[asset.kind] || []).map(([label, kind]) => [label, () => this.create(kind, asset)]), ['移动', () => this.organize(asset, 'move')], ['Delete', () => this.deleteAsset(asset)]];
   }
   async organize(asset, action = 'rename') {
     await this.reload(); const current = await libraryRequest('get', { id: asset.id });
-    const form = await showForm(action === 'rename' ? '重命名' : '移动', action === 'rename' ? [{ key: 'name', label: '名称', value: current.name }] : [{ key: 'parent', label: '位置', value: current.parent_id || '', options: this.parentOptions(current.kind, current) }]); if (!form) return;
+    const form = action === 'rename'
+      ? await showForm('重命名', [{ key: 'name', label: '名称', value: current.name }])
+      : await showLibraryMove(current, this.data.assets, this.parentOptions(current.kind, current));
+    if (!form) return;
     const parent = action === 'move' && form.parent ? await libraryRequest('get', { id: form.parent }) : null;
     await libraryRequest(action, { id: current.id, version: current.version, ...(action === 'rename' ? { name: form.name } : { parent_id: form.parent || null, ...(parent?.kind === 'block' ? { parent_version: parent.version } : {}) }) }, true); await this.reload();
     if (this.host.folderContext) this.host.pinLibraryTab?.(`folder:${this.host.folderContext}`);
     if (this.host.folderContext) await this.host.folderPage.open(this.host.folderContext);
   }
   async deleteAsset(asset) {
+    await this.host.flushEditor?.(); await this.host.folderPage?.whenIdle(); await this.reload();
     const current = await libraryRequest('get', { id: asset.id });
-    const form = await showForm('删除 Library 对象', [{ key: 'decision', label: `删除 ${this.path(current)}${current.kind === 'block' ? ' 及其所属 subblocks' : ''}`, value: 'cancel', options: [{ value: 'cancel', label: '保留' }, { value: 'delete', label: '删除' }] }]);
-    if (form?.decision !== 'delete') return;
+    if (!await showLibraryDelete(current, this.path(current))) return;
+    const before = [...this.data.assets, ...(this.data.saved_documents || [])];
     await libraryRequest('delete', { id: current.id, version: current.version }, true); await this.reload();
-    if (this.host.folderContext) this.host.pinLibraryTab?.(`folder:${this.host.folderContext}`);
+    const remaining = new Set([...this.data.assets, ...(this.data.saved_documents || [])].map(item => item.id));
+    await this.host.removeLibraryAssets?.(new Set(before.filter(item => !remaining.has(item.id)).map(item => item.id)));
+    if (this.host.folderContext) await this.host.folderPage.open(this.host.folderContext);
   }
   async loadSavedDocument() {
     await this.reload(); const documents = this.data.saved_documents || []; if (!documents.length) throw new Error('暂无保存的 Document');
@@ -234,20 +260,29 @@ export class LibraryPanel {
   }
   async migrate() {
     if (this.migrating) return;
-    if (!await showConfirm('先备份 V3，再导入独立 V4 库。原组转为 Folder，预设转为 block；保留关闭项、嵌套和完整 Document。原库保持完整。', { okLabel: '备份并迁移' })) return;
+    if (!await showConfirm('先备份 V3，再导入独立 V4 库。原组转为 Class，预设转为 block；保留关闭项、嵌套和完整 Document。原库保持完整。', { okLabel: '备份并迁移' })) return;
     this.migrating = true;
     try {
       const response = await fetch('/xyz/plv4/library/migrate', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
       const result = await response.json(); if (!response.ok || !result.ok) throw new Error(result.error || '迁移失败');
       window.dispatchEvent(new CustomEvent('xyz-plv4-library-changed'));
-      await this.reload(); toast(result.repeated ? '此 V3 快照已经导入' : `已导入 ${result.counts.folders} 个 Folder、${result.counts.blocks} 个 block、${result.counts.documents} 个 Document。备份：${result.backup}`);
+      await this.reload(); toast(result.repeated ? '此 V3 快照已经导入' : `已导入 ${result.counts.folders} 个 Folder、${result.counts.classes} 个 Class、${result.counts.blocks} 个 block、${result.counts.documents} 个 Document。备份：${result.backup}`);
       return result;
     } finally { this.migrating = false; }
+  }
+  async convertPools() {
+    await this.host.flushEditor(); await this.reload();
+    if (!this.data.legacy_pools) { toast('Library 已使用 Folder / Class / Block'); return; }
+    const plan = await libraryRequest('structure_plan');
+    if (!await showConfirm(`先备份再转换：${plan.classes} 个旧池转为 Class，整理用 Folder 保留；混合目录拆开。原 ID、prompt、Block 内容与关闭项保留。`, { okLabel: '备份并转换' })) return;
+    const result = await libraryRequest('separate_types', { revision: this.data.revision }, true);
+    await this.reload(); if (this.host.folderContext) await this.host.folderPage.open(this.host.folderContext);
+    toast(`已转换。备份：${result.backup}`); return result;
   }
   startTagDrag(event, asset) {
     if (event.button !== 0) return; event.preventDefault(); event.stopPropagation();
     let target = null, moved = false;
-    const move = e => { moved ||= Math.hypot(e.clientX-event.clientX,e.clientY-event.clientY)>5; const hit = document.elementFromPoint(e.clientX,e.clientY)?.closest('[data-asset-id]'); target = this.data.assets.find(a => a.id === hit?.dataset.assetId && a.kind === 'folder'); };
+    const move = e => { moved ||= Math.hypot(e.clientX-event.clientX,e.clientY-event.clientY)>5; const hit = document.elementFromPoint(e.clientX,e.clientY)?.closest('[data-asset-id]'); target = this.data.assets.find(a => a.id === hit?.dataset.assetId && a.kind === 'class'); };
     const cancel = () => { document.removeEventListener('pointermove',move); document.removeEventListener('pointerup',up); document.removeEventListener('pointercancel',cancel); };
     const up = e => { move(e); cancel(); if (moved && target) this.host.run(async () => { await libraryRequest('move',{id:asset.id,version:asset.version,parent_id:target.id},true); await this.reload(); if(this.host.folderContext) { this.host.pinLibraryTab?.(`folder:${this.host.folderContext}`); await this.host.folderPage.open(this.host.folderContext); } }); };
     document.addEventListener('pointermove',move); document.addEventListener('pointerup',up); document.addEventListener('pointercancel',cancel);
@@ -263,7 +298,7 @@ export class LibraryPanel {
     const folderId = this.host.folderContext;
     const preview = new DropPreview(this.host);
     let trackPointer = () => {};
-    const expanded = asset.kind === 'folder' ? libraryRequest('folder_block', { id: asset.id }) : libraryRequest('expand', { id: asset.id }); expanded.catch(() => {});
+    const expanded = asset.kind === 'class' ? libraryRequest('class_block', { id: asset.id }) : libraryRequest('expand', { id: asset.id }); expanded.catch(() => {});
     let count = null;
     const countPrompts = (node, active = true) => {
       if (!active || !node.enabled) return 0;
@@ -275,7 +310,7 @@ export class LibraryPanel {
       if (Math.hypot(ev.clientX - event.clientX, ev.clientY - event.clientY) < 5 && !moved) return;
       moved = true; trackPointer(ev); handle.dataset.dragged = 'true'; destination = this.host.libraryDropTarget(ev.clientX, ev.clientY);
       if (promptsOnly && ['schedule', 'region', 'avg'].includes(destination?.parent.form)) destination = null;
-      const action = promptsOnly ? `插入 prompts${count == null ? '' : ` (${count})`}` : asset.kind === 'folder' ? '新建绑定池的 block' : '插入 block';
+      const action = promptsOnly ? `插入 prompts${count == null ? '' : ` (${count})`}` : asset.kind === 'class' ? '新建绑定池的 block' : '插入 block';
       const place = destination ? ` · ${dropLocation(destination)}` : '';
       preview.show(destination, action + place, ev.clientX, ev.clientY);
     };

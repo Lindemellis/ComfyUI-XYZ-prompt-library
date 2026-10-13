@@ -27,7 +27,10 @@ export function input(value, action, { type = 'text', step = 'any', min, max, ti
 export function check(value, action, title = '') {
   const node = element('input'); node.type = 'checkbox'; node.checked = value; node.title = title;
   node.onclick = e => e.stopPropagation();
-  node.onchange = () => Promise.resolve().then(() => action(node.checked)).catch(report);
+  node.onchange = () => {
+    const checked = node.checked; node.disabled = true;
+    Promise.resolve().then(() => action(checked)).catch(error => { node.checked = !checked; report(error); }).finally(() => { node.disabled = false; });
+  };
   return node;
 }
 let closeMenu = null;

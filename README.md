@@ -8,8 +8,8 @@ A focused ComfyUI custom-node pack for prompt authoring, image management and Kr
 
 | Tool | What it does | Manual |
 |---|---|---|
-| **Prompt Library V4** | Author prompts through Blocks / Source / Preview and Folder pools, with an independent LoRA browser and Schedule / Region / AVG blocks. Uses the PLv3 language and prompt-control compiler. | [PLv4](prompt_library_v4/README.md) |
-| **Prompt Library V3** | A prompt language with nested groups, schedules, regions, presets, saved documents, a Monaco editor and live detail controls. It compiles to [comfyui-prompt-control](https://github.com/asagi4/comfyui-prompt-control). | [PLv3](prompt_library_v3/README.md) |
+| **Prompt Library V4** | Author prompts through Blocks / Source / Preview, organize assets in Folders and bind Blocks to Class pools. Includes an independent LoRA browser and Schedule / Region / AVG blocks. Uses the PLv3 language and prompt-control compiler. | [PLv4](prompt_library_v4/README.md) |
+| **PLv3 language / compatibility** | Shared language/compiler for V4 and deprecated nodes that keep older workflows runnable. Standalone V3 Editor / Library are retired. | [Language and compatibility](prompt_library_v3/README.md) |
 | **Tag autocomplete** | English-only Danbooru tags plus optional Gelbooru tags, backed by a local versioned dataset with updates, snapshots and date reconstruction. | [TagDB](tagdb/README.md) |
 | **XYZ Gallery** | Browse and manage ComfyUI images and videos, inspect metadata, filter and tag files, download variants, and send images to Krita. | [Gallery](gallery/README.md) |
 | **Mask nodes** | Draw rectangle masks and attach them to CLIP for PLv3 `imask: i` regions. | [Masks](mask_nodes/README.md) |
@@ -20,8 +20,7 @@ A focused ComfyUI custom-node pack for prompt authoring, image management and Kr
 
 Prompt Library V2 and the original LLM prompt assistant have been retired. The personal V2 database directory is deliberately left untouched, and the [one-shot V2 → V3 migration tool](prompt_library_v3/README.md#migrating-from-v2) remains available.
 
-When tags are added to a PLv3 library group, unescaped underscores become spaces and literal
-parentheses are escaped; an outer `(tag:weight)` wrapper keeps its weight.
+V3's standalone Editor / Library no longer start. Old workflow nodes, shared language and personal databases remain available; V3 Library import into V4 is explicit and backed up. Use V4 for new nodes.
 
 ## Installation
 
@@ -38,10 +37,13 @@ On first run, the prebuilt Danbooru dataset downloads in the background. Autocom
 
 | Node | Category | Purpose |
 |---|---|---|
-| XYZ Prompt Library V4 | `XYZNodes/Prompt` | Edit blocks and Folder pools, compile to prompt / plain outputs |
+| XYZ Prompt Library V4 | `XYZNodes/Prompt` | Edit Blocks, Class pools and Mask Library references; output prompt / plain / metadata / mask_bundle |
 | XYZ Prompt Library V4 Monaco | `XYZNodes/Prompt` | The same V4 compiler with an embedded source editor |
-| XYZ Prompt Library V3 | `XYZNodes/Prompt` | Compile a PLv3 document using the standard text widget |
-| XYZ Prompt Library V3 Monaco | `XYZNodes/Prompt` | The same compiler with the full editor embedded in the node |
+| XYZ PLV4 Image Metadata | `XYZNodes/Prompt` | Merge positive/negative PLV4 snapshots and additional LoRAs for Aaalice saving and Gallery Source display |
+| XYZ PLV4 Mask Preview | `XYZNodes/Prompt` | Preview current Document geometry; output 512×512 IMAGE and stable dynamic MASKs |
+| XYZ PLV4 Attach Masks | `XYZNodes/Prompt` | Clone CLIP and append library picture masks; warn and continue on IMASK index mismatch |
+| XYZ Prompt Library V3 | `XYZNodes/Prompt` | Deprecated compatibility node for saved V3 workflows |
+| XYZ Prompt Library V3 Monaco | `XYZNodes/Prompt` | Deprecated V3 compatibility node with shared embedded Monaco |
 | XYZ Mask Editor | `XYZNodes/Mask` | Draw rectangles and emit base, fill and per-rectangle masks |
 | XYZ Attach Masks | `XYZNodes/Mask` | Attach masks to CLIP in PLv3 IMASK order |
 | XYZ Krita Fetch Image | `XYZNodes/Krita` | Fetch a layer or document as `IMAGE` |

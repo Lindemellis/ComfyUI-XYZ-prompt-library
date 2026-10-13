@@ -1,5 +1,9 @@
 # PLv4 分析与实施计划
 
+2026-10-11 更新：用户要求将整理职责与池职责分开。当前模型为 Folder / Class / Block：Folder 只存 Folder / Class / Block，Class 只存 Subclass / prompt；Block 仍用单一 meta.pool，Pool 反查绑定到 Class/Subclass 的已保存 Block，与存放路径无关。新 Class 使用叠层图标，Folder 保留原图标；不恢复早期 attribute、belong/load 或共享 Block 指针。实现及迁移边界见 DEVELOPMENT 的同日记录。旧库必须明确执行备份转换，本次个人库仅在副本预演。
+
+本轮完整离线 **937 passed / 3 skipped**；一次性真实 ComfyUI Class 浏览器 **25 项**及原生编辑回归通过。个人库副本的 45 Block / 5 Document 快照保持，180 次编译对照一致。下文 Folder 池阶段为历史实施记录。
+
 依据：plv4.md 最终 Folder 池设定及后续明确更正、现有 PLv3 文档/解析器/IR/编译器和共享编辑器。2026-10-08 Folder 池 P1–P4 收束；2026-10-10 用户确认 LoRA / AVG / 输入及菜单后续完成，并授权同步 README、内部工程文档、GitHub 和正式 ComfyUI。最新契约与验证见 prompt_library_v4/DEVELOPMENT.md，本机接续见 HANDOFF.md。旧原型与早期 Class 方案仅历史保留，不作为并行设计。
 
 当前实现要点：标签为 Blocks / Source / Preview；Blocks 连续文本段共用 plaintext-only 原生输入宿主，Enter / Backspace / Delete 使用浏览器行为，复用 Source 补全、Find/Replace 与文档历史。支持独立 LoRA 浏览器及 Folder 触发词组合、LoRA 引用集中输出和 AVG 相对权重混合。Header 更多菜单按同级 / 子级悬停展开，特殊容器保持 entry 边界；输入样式与焦点稳定，点击菜单后才提交失焦，避免吞第一次点击。三处 TagAC 共用开关与弹窗，失效候选静默放行 Enter。正式运行直接使用 custom_nodes 下的源码与个人库；8190 是独立验收实例。

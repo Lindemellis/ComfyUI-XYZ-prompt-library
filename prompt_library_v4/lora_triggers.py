@@ -9,9 +9,9 @@ from ._v3 import PLv3Error, render
 from .model import CommandError, EditorState
 
 if '.' in __package__:
-    from ..prompt_library_v3.lexer import CLOSERS, COMMA, TEXT, tokenize
+    from ..prompt_shared.language.lexer import CLOSERS, COMMA, TEXT, tokenize
 else:
-    from prompt_library_v3.lexer import CLOSERS, COMMA, TEXT, tokenize
+    from prompt_shared.language.lexer import CLOSERS, COMMA, TEXT, tokenize
 
 
 def split_bundles(text):

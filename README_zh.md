@@ -8,8 +8,8 @@
 
 | 工具 | 作用 | 手册 |
 |---|---|---|
-| **Prompt Library V4** | 用 Blocks / Source / Preview 编辑提示词，复用 Folder 池；包含独立 LoRA 浏览器、Schedule / Region / AVG Block，沿用 PLv3 语言和 prompt-control 编译器。 | [PLv4](prompt_library_v4/README_zh.md) |
-| **Prompt Library V3** | 提示词语言、嵌套组、时间调度、区域、预设、已保存文档、Monaco 编辑器和实时详情控制，最终编译为 [comfyui-prompt-control](https://github.com/asagi4/comfyui-prompt-control) 语法。 | [PLv3](prompt_library_v3/README.md) |
+| **Prompt Library V4** | 用 Blocks / Source / Preview 编辑提示词，Folder 整理资产，Block 绑定 Class 池；包含独立 LoRA 浏览器、Schedule / Region / AVG Block，沿用 PLv3 语言和 prompt-control 编译器。 | [PLv4](prompt_library_v4/README_zh.md) |
+| **PLv3 语言／兼容节点** | V4 共用的语言和编译器，以及让旧 workflow 继续运行的兼容节点；V3 独立 Editor／Library 已退役。 | [语言与兼容说明](prompt_library_v3/README.md) |
 | **标签自动补全** | 仅英文的 Danbooru 标签和可选 Gelbooru 标签；本地数据集支持更新、快照和按日期回溯。 | [TagDB](tagdb/README_zh.md) |
 | **XYZ Gallery** | 浏览和管理 ComfyUI 图片与视频，查看元数据、筛选、打标签、下载不同净化版本，并发送到 Krita。 | [画廊](gallery/README_zh.md) |
 | **遮罩节点** | 画矩形遮罩并挂到 CLIP，供 PLv3 的 `imask: i` 区域使用。 | [遮罩](mask_nodes/README_zh.md) |
@@ -20,8 +20,7 @@
 
 Prompt Library V2 和早期原创 LLM 提示词助手已经退役。个人 PLv2 数据目录不会被删除；[一次性 V2 → V3 迁移工具](prompt_library_v3/README.md#migrating-from-v2)继续保留。
 
-向 PLv3 库组复制、新增或编辑标签时，未转义的下划线会转换为空格，权重语法之外的括号会
-自动转义；外层 `(tag:weight)` 会保留其权重。
+V3 独立 Editor／Library 不再启动。旧 workflow 节点、共用语言和个人资料库保留；V3 Library 仍可通过 V4 的明确入口备份导入。新工作流使用 V4 节点。
 
 ## 安装
 
@@ -38,10 +37,13 @@ Prompt Library V2 和早期原创 LLM 提示词助手已经退役。个人 PLv2 
 
 | 节点 | 分类 | 用途 |
 |---|---|---|
-| XYZ Prompt Library V4 | `XYZNodes/Prompt` | 编辑 Block 和 Folder 池，编译为 prompt / plain 输出 |
+| XYZ Prompt Library V4 | `XYZNodes/Prompt` | 编辑 Block、Class 池和 Mask Library，输出 prompt / plain / metadata / mask_bundle |
 | XYZ Prompt Library V4 Monaco | `XYZNodes/Prompt` | 同一 V4 编译器，节点内嵌源码编辑器 |
-| XYZ Prompt Library V3 | `XYZNodes/Prompt` | 用普通文本框编辑并编译 PLv3 文档 |
-| XYZ Prompt Library V3 Monaco | `XYZNodes/Prompt` | 同一编译器，节点内嵌完整编辑器 |
+| XYZ PLV4 Image Metadata | `XYZNodes/Prompt` | 合并正负 PLV4 快照和额外 LoRA，接入 Aaalice 条件保存，在 Gallery 查看 Source |
+| XYZ PLV4 Mask Preview | `XYZNodes/Prompt` | 当前 Document 实时几何预览，输出 512×512 IMAGE 和稳定身份的动态 MASK |
+| XYZ PLV4 Attach Masks | `XYZNodes/Prompt` | clone CLIP 并追加库图片遮罩；IMASK 编号冲突 warning 后继续 |
+| XYZ Prompt Library V3 | `XYZNodes/Prompt` | 已弃用的兼容节点，保留旧 V3 workflow 执行 |
+| XYZ Prompt Library V3 Monaco | `XYZNodes/Prompt` | V3 兼容节点，使用共用的内嵌 Monaco |
 | XYZ Mask Editor | `XYZNodes/Mask` | 画矩形并输出 base、fill 和逐矩形遮罩 |
 | XYZ Attach Masks | `XYZNodes/Mask` | 按 PLv3 IMASK 顺序把遮罩挂到 CLIP |
 | XYZ Krita Fetch Image | `XYZNodes/Krita` | 把 Krita 图层或文档取为 `IMAGE` |

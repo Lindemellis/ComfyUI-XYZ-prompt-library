@@ -24,6 +24,7 @@ export class DocumentSession {
     this.past = [];
     this.future = [];
     this.listeners = new Set();
+    this.draftFlushers = new Set();
     this.view = 'block';
     this.viewState = new Map();
     this._queue = Promise.resolve();
@@ -42,6 +43,37 @@ export class DocumentSession {
   get canUndo() { return this.past.length > 0; }
   get canRedo() { return this.future.length > 0; }
   whenIdle() { return this._queue; }
+  async flushDrafts() { for (const flush of this.draftFlushers) await flush(); }
+
+  _selectionFor(id) {
+    const tree = this.projection.tree;
+    if (this.selectionTree !== tree) {
+      this.selectionTree = tree; this.selectionRows = new Map();
+      const visit = row => { if (!row) return; this.selectionRows.set(row.id, row); row.children.forEach(visit); }; visit(tree);
+    }
+    const node = this.selectionRows.get(id); if (!node) return null;
+    let block = node;
+    while (block.parent_id != null) {
+      const settings = block.settings || {};
+      const prompt = block.meta?.presentation === 'prompt' && block.form === 'brace' && block.children.length === 1 && block.children[0].enabled
+        && (block.children[0].kind !== 'group' || block.children[0].form === 'paren')
+        && !settings.region && !settings.format && !settings.shuffle && !settings.random_select && !settings.dropout && settings.seed == null;
+      if (block.kind === 'group' && block.form !== 'paren' && !prompt) break;
+      block = this.selectionRows.get(block.parent_id); if (!block) return null;
+    }
+    return { node_id: node.id, block_id: block.id, prompt_id: block === node ? null : node.id };
+  }
+
+  locate(id) {
+    if (this._disposed) throw new SessionError('disposed', 'editing session has been disposed');
+    const selection = this._selectionFor(id);
+    if (!selection) throw new SessionError('unknown_node', '目标已经移除');
+    const previous = this.state.selection;
+    if (previous.node_id === selection.node_id && previous.block_id === selection.block_id && previous.prompt_id === selection.prompt_id) return;
+    this.state.selection = selection;
+    this.selectionEpoch = (this.selectionEpoch || 0) + 1;
+    this._emit('LocateDetails');
+  }
 
   subscribe(listener) {
     this.listeners.add(listener);
@@ -74,8 +106,8 @@ export class DocumentSession {
   }
 
   // Typing supplies a complete raw draft, so it can queue safely without spans.
-  replaceText(text, { deferPool = false } = {}) {
-    return this._enqueue(() => this._apply({ type: 'ReplaceText', text, revision: this.revision, ...(deferPool ? { defer_pool: true } : {}) }));
+  replaceText(text, { deferPool = false, completion = null } = {}) {
+    return this._enqueue(() => this._apply({ type: 'ReplaceText', text, revision: this.revision, ...(completion ? { completion } : {}), ...(deferPool ? { defer_pool: true } : {}) }));
   }
 
   commitPool() {
@@ -118,6 +150,7 @@ export class DocumentSession {
   }
 
   async _apply(command) {
+    const selectionEpoch = this.selectionEpoch;
     const before = this._snapshot();
     const result = await this.request('command', { state: clone(this.state), command });
     if (this._disposed) throw new SessionError('disposed', 'editing session has been disposed');
@@ -130,9 +163,11 @@ export class DocumentSession {
       if (this.past.length > this.historyLimit) this.past.shift();
       this.future = [];
     }
+    const currentSelection = this.state.selection;
     this.state = clone(result.state);
     this._pendingPool = !!command.defer_pool;
     this.projection = clone(result.projection);
+    if (this.selectionEpoch !== selectionEpoch) this.state.selection = this._selectionFor(currentSelection.node_id) || this.state.selection;
     this._idFloor = Math.max(this._idFloor, this.state.doc.next_id);
     this._emit(command.type, result.edit);
     return result;
@@ -187,5 +222,19 @@ export class DocumentSession {
     });
   }
 
-  dispose() { this._disposed = true; this.listeners.clear(); this.viewState.clear(); }
+  resolveMasks(request, canApply = () => true) {
+    return this._enqueue(async () => {
+      if (!this.valid || !canApply()) return;
+      const result = await request('resolve', { state: clone(this.state) });
+      if (this._disposed || !canApply()) return;
+      if (JSON.stringify(result.state.doc) === JSON.stringify(this.state.doc)) return;
+      const revision = this.revision + 1;
+      this.state = clone(result.state); this.state.revision = revision;
+      this.projection = clone(result.projection); this.projection.revision = revision;
+      // Shared asset refresh is external state, not a local editing undo step.
+      this._emit('MaskResources');
+    });
+  }
+
+  dispose() { this._disposed = true; this.listeners.clear(); this.draftFlushers.clear(); this.viewState.clear(); }
 }

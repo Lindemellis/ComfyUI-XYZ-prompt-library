@@ -31,9 +31,9 @@ def add_examples(library, parent_id):
         if existing: return library.read('get', id=existing['id'])
         return library.mutate({'action': 'save_' + kind, 'name': name, 'parent_id': parent, **body})['asset']
     demo = asset('folder', '05-池绑定示例', parent_id, data={'autocomplete': False})
-    artist = asset('folder', '画师池', demo['id'], data={'autocomplete': True})
-    thick = asset('folder', '厚涂', artist['id'], data={'autocomplete': False})
-    accessories = asset('folder', '配饰池', demo['id'], data={'autocomplete': True})
+    artist = asset('class', '画师池', demo['id'], data={'autocomplete': True})
+    thick = asset('class', '厚涂', artist['id'], data={'autocomplete': False})
+    accessories = asset('class', '配饰池', demo['id'], data={'autocomplete': True})
     for folder, texts in [(artist, ['artist_alpha', 'artist_beta']), (thick, ['painterly', 'brush strokes']), (accessories, ['earrings', 'bow', 'hair ornament'])]:
         for text in texts:
             if not any(a['kind'] == 'tag' and a['parent_id'] == folder['id'] and a['name'] == text for a in library.read()['assets']):

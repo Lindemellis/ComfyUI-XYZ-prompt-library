@@ -49,8 +49,9 @@ def test_region_mode_selects_the_backend():
     src = "q, {x}.set{region: {imask: 0}}"
     _, couple = post({"text": src, "region_mode": "couple"})
     _, masked = post({"text": src, "region_mode": "mask"})
-    assert couple["text"] == "COUPLE IMASK(0, 1) q, x"
-    assert masked["text"] == "IMASK(0, 1) q, x"
+    # no base / fill: the ambient text draws what the region leaves
+    assert couple["text"] == "FILL() q\nCOUPLE IMASK(0, 1) q, x"
+    assert masked["text"] == "MASK(0 1, 0 1, 1) IMASK(0, 1,subtract) q\nAND IMASK(0, 1) q, x"
 
 
 def test_unknown_region_mode_falls_back_instead_of_failing():

@@ -1,14 +1,16 @@
 """Atomic, revision-checked edits over the shared PLv3 Document.
 
 Commands address IDs and adjacent IDs, never an array index from an old view.
-No command reads or writes the Library DB. Insertions consume expanded snapshots;
-Pool transactions and reference lookup belong to P3.
+Prompt Library insertions consume expanded snapshots; pool transactions belong
+to its asset service. Mask binding commands use the V4-only resource adapter,
+then the existing Region editing commands; the shared language remains pure.
 """
 from __future__ import annotations
 
 from copy import deepcopy
 import json
 import math
+import re
 
 from ._v3 import DocNode, Document, from_text, render, ast_json
 from .model import (CommandError, EditorState, full_document, full_index,
@@ -16,10 +18,10 @@ from .model import (CommandError, EditorState, full_document, full_index,
 from .formatting import format_document, format_new_block
 
 _LAYOUT_COMMANDS = {"WrapSelection", "MoveBlock", "InsertBlock", "InsertEntry", "InsertLibraryBlock",
-                    "InsertLibraryPrompts", "EnableCandidate", "CompleteLibrary",
+                    "InsertLibraryPrompts", "MergeLibraryBlock", "EnableCandidate", "CompleteLibrary",
                     "UpdateLibraryBlock", "SetSettings", "SetPromptSettings",
                     "SetRegion", "SetScheduleBoundary", "Delete"}
-_LOCAL_INSERT_COMMANDS = {"WrapSelection", "InsertBlock", "InsertEntry", "InsertLibraryBlock", "InsertLibraryPrompts", "EnableCandidate", "SetPromptSettings", "InsertLora"}
+_LOCAL_INSERT_COMMANDS = {"WrapSelection", "InsertBlock", "InsertEntry", "InsertLibraryBlock", "InsertLibraryPrompts", "MergeLibraryBlock", "EnableCandidate", "SetPromptSettings", "InsertLora"}
 
 
 def _new_container(form):
@@ -107,7 +109,7 @@ def setting_value(key, value):
         if a > b:
             raise CommandError("invalid_setting", "random_select minimum exceeds maximum")
         return str(a) if a == b else f"{a}-{b}"
-    if key == "schedule":
+    if key in ("schedule", "region_window"):
         return "{" + ", ".join(_number(n) for n in _interval(value)) + "}"
     if key == "region":
         return region_head(value)
@@ -224,7 +226,7 @@ def _position(parent, command):
 def _separate(node):
     # Separators belong to the item being moved, and period-ended items need blank.
     if not node.sep or not node.sep.strip():
-        node.sep = " " if _body(node).rstrip().endswith(".") else ", "
+        node.sep = ("" if _body(node).rstrip().endswith(".") else ",") + (node.sep or " ")
 
 
 def _selected(doc, ids):
@@ -294,6 +296,8 @@ def _set_settings(doc, node, values):
             raise CommandError("special_setting", "edit the special entry head or shared boundary")
         if (node.form == "schedule" and key == "schedule") or (node.form == "region" and key == "region"):
             raise CommandError("special_setting", "this setting is owned by the special container")
+        if key == "region_window" and node.form != "region":
+            raise CommandError("special_setting", "region_window belongs to a Region container")
         if node.form == "paren" and key != "weight":
             raise CommandError("attention_setting", "attention syntax only carries weight")
         if node.form == "paren":
@@ -418,7 +422,25 @@ def _prompt_settings(doc, node, patch):
         node.raw = opening + ":" + literal + suffix[suffix.index(">"):]
     if not values:
         return
+    # Unit attention is the unweighted prompt. LoRA's explicit strength above
+    # remains part of its invocation syntax, rather than an attention wrapper.
+    if "weight" in values and values["weight"] is not None:
+        _number(values["weight"])
+        if values["weight"] == 1:
+            values["weight"] = None
     if target.kind == "group" and target.form == "paren" and set(values) <= {"weight"}:
+        if values["weight"] is None:
+            owner = _parents(doc)[target.id]
+            position = owner.children.index(target)
+            if position:
+                owner.children[position - 1].sep += target.lead
+            else:
+                owner.lead += target.lead
+            for child in target.children:
+                child.enabled = child.enabled and target.enabled
+            target.children[-1].sep += target.sep
+            owner.children[position:position + 1] = target.children
+            return
         _set_settings(doc, target, values)
         return target
     if target.kind == "group" and target.form == "paren":
@@ -435,6 +457,8 @@ def _prompt_settings(doc, node, patch):
         return target
     if node.kind == "group" and node.form != "paren":
         raise CommandError("invalid_setting", "use block settings for this group")
+    if set(values) == {"weight"} and values["weight"] is None:
+        return
     wrapper = DocNode(_new_id(doc), "group", "", sep=node.sep, opaque=False,
                       children=[node], meta={"presentation": "prompt"})
     node.sep = ""
@@ -458,12 +482,71 @@ def _flatten(node):
     return [part for child in node.children for part in _flatten(child)]
 
 
+def _pool_block(node):
+    if node.kind != 'group' or node.form == 'paren': return False
+    return not (node.meta.get('presentation') == 'prompt' and node.form == 'brace' and len(node.children) == 1
+                and node.children[0].enabled and (node.children[0].kind != 'group' or node.children[0].form == 'paren'))
+
+
+def _pool_key(node):
+    while node.kind == 'group' and len(node.children) == 1 and (node.form == 'paren' or node.meta.get('presentation') == 'prompt'):
+        node = node.children[0]
+    text = _body(node).strip()
+    if node.kind == 'lora': return re.sub(r':([-+\d.eE]+)>$', '>', text)
+    return re.sub(r'\s+', ' ', text.replace('_', ' '))
+
+
+def _merge_pool_block(doc, parent, source, command):
+    if not parent.meta.get('pool') or source.meta.get('pool') != parent.meta['pool'] or source.meta.get('lora'):
+        raise CommandError('invalid_pool', '只能合并属于同一个 Class 的普通 Block')
+    if source.form != 'brace' or source.opaque:
+        raise CommandError('invalid_asset', '合并需要完整普通 Block')
+    prompts, blocks = set(), []
+    def scan(node):
+        if node is not parent:
+            if not _pool_block(node): prompts.add(_pool_key(node)); return
+            blocks.append(node)
+            if node.meta.get('pool'): return
+        for child in node.children: scan(child)
+    scan(parent)
+    def trim(node):
+        if _pool_block(node):
+            # Independent pools and special containers keep their own semantics.
+            if node.meta.get('pool') or node.meta.get('lora') or node.form != 'brace': return node
+            node.children = [part for child in node.children if (part := trim(child)) is not None]
+            return node
+        key = _pool_key(node)
+        if key in prompts: return None
+        prompts.add(key)
+        return node
+    position = _position(parent, command)
+    for child in source.children:
+        occurrence = [*command['occurrence'], child.id]
+        if _pool_block(child):
+            source_id = child.meta.get('source', {}).get('id')
+            if any(existing.meta.get('occurrence') == occurrence or (source_id and existing.meta.get('source', {}).get('id') == source_id) for existing in blocks): continue
+        elif _pool_key(child) in prompts: continue
+        part = trim(_clone_ids(doc, child))
+        if part is None: continue
+        part.meta['occurrence'] = occurrence
+        _separate(part)
+        parent.children.insert(position, part); position += 1
+        if _pool_block(part): format_new_block(doc, part)
+        scan(part)
+
+
 def apply_command(state: EditorState, command: dict) -> EditorState:
     """Return a new state, or reject atomically. Never mutate the caller's snapshot."""
     if isinstance(command.get("revision"), bool) or not isinstance(command.get("revision"), int) or command.get("revision") != state.revision:
         raise CommandError("stale_revision", "document changed; recompute the target against its new revision")
     result = deepcopy(state)
     kind = command.get("type")
+    if kind in ('BindMaskLibrary', 'UnbindMaskLibrary'):
+        from .mask_resources import binding_command
+        result = binding_command(result, command)
+        result.revision = state.revision + 1
+        result.check()
+        return result
     if kind == 'ExpandLibraryReference':
         a, b = (python_offset(result.text, offset) for offset in command['span'])
         if result.text[a:b] != '[' + command['path'] + ']':
@@ -506,6 +589,28 @@ def apply_command(state: EditorState, command: dict) -> EditorState:
         _locate(result, block_id)
     elif kind == "ReplaceText":
         result.replace_text(command["text"])
+        # Native text runs are anchored between actual document children,
+        # including parked blocks with no source offsets. Move the complete
+        # edited run back into that gap; new text must not push existing run
+        # items across a parked block's remembered numeric index.
+        anchor = command.get('insert_anchor')
+        if anchor and result.valid:
+            if not isinstance(anchor, dict) or any(key not in ('parent_id','before_id','edge','run_ids') for key in anchor):
+                raise CommandError('invalid_boundary', 'invalid text insertion anchor')
+            parent = _node(result.doc, anchor['parent_id'])
+            _ordinary_parent(parent)
+            old_ids = {part.id for part in state.doc.root.walk()}
+            run_ids = anchor.get('run_ids', [])
+            if not isinstance(run_ids, list) or any(not isinstance(part, str) for part in run_ids):
+                raise CommandError('invalid_boundary', 'text run IDs must be a list of strings')
+            added = [part for part in parent.children if part.id not in old_ids or part.id in run_ids]
+            if added:
+                parent.children = [part for part in parent.children if part not in added]
+                position = _position(parent, anchor)
+                parent.children[position:position] = added
+                if render(result.doc) != command['text']:
+                    raise CommandError('invalid_boundary', 'text insertion cannot reorder existing enabled content')
+                result.doc = refresh_document(result.doc)
         # Block UI's Prompt Control interval notation is translated to PLv3 by
         # its input adapter. Mark only exact translated shells as prompt rows;
         # manually authored/named blocks keep their ordinary block identity.
@@ -527,6 +632,32 @@ def apply_command(state: EditorState, command: dict) -> EditorState:
                 if not row or row["kind"] != "group" or row["form"] != "brace" or row["settings"].get("region"):
                     raise CommandError("invalid_span", "prompt span must match a schedule/weight shell")
                 _node(result.doc, row["id"]).meta["presentation"] = "prompt"
+        completions = command.get('completion') or []
+        if isinstance(completions, dict):
+            completions = [completions]
+        if not isinstance(completions, list):
+            raise CommandError('invalid_completion', 'completion must be an object or a list')
+        for completion in completions if result.valid else []:
+            # TagAC has already inserted the text and its delimiter. Attach
+            # provenance in that same typing edit, without reflowing the source
+            # or replacing the native input/caret with a structural UI command.
+            span = completion['span']
+            def completed_row(row):
+                if row['span'] == span and (row['kind'] != 'group' or row['form'] == 'paren' or row['meta'].get('presentation') == 'prompt'):
+                    return row
+                return next((found for child in row['children'] if (found := completed_row(child))), None)
+            row = completed_row(projection(result)['tree'])
+            if row:
+                node = _node(result.doc, row['id'])
+                snapshot = DocNode.from_json(completion['snapshot']); snapshot.enabled = True
+                if render(snapshot) == render(node):
+                    part = _clone_ids(result.doc, snapshot)
+                    part.id, part.sep = node.id, node.sep
+                    if node.meta.get('presentation') == 'prompt': part.meta['presentation'] = 'prompt'
+                    parent = _parents(result.doc)[node.id]
+                    parent.children[parent.children.index(node)] = part
+                    node = part
+                node.meta['source'] = deepcopy(completion['source'])
     else:
         result.check()
         doc = result.doc
@@ -536,6 +667,15 @@ def apply_command(state: EditorState, command: dict) -> EditorState:
             raise CommandError('fixed_lora', '请从 LoRA block 设置编辑权重；删除或关闭整个 block')
         if kind == "LocateDetails":
             _locate(result, node.id)
+        elif kind == 'SetRegionEnabled':
+            if node is None or node.form != 'region':
+                raise CommandError('special_setting', 'Select a Region container to enable or bypass its region functionality.')
+            if not isinstance(command.get('enabled'), bool):
+                raise CommandError('invalid_setting', 'Region functionality enabled must be boolean.')
+            if command['enabled']:
+                node.meta.pop('region_enabled', None)
+            else:
+                node.meta['region_enabled'] = False
         elif kind == "SetEnabled":
             if node is doc.root:
                 raise CommandError("root_switch", "the document root cannot be switched off")
@@ -565,12 +705,12 @@ def apply_command(state: EditorState, command: dict) -> EditorState:
             if not isinstance(patch, dict) or any(k not in ("name", "source", "pool", "occurrence") for k in patch):
                 raise CommandError("invalid_metadata", "unsupported editing metadata")
             if "pool" in patch and (node.kind != "group" or node.form == "paren" or (patch["pool"] is not None and (not isinstance(patch["pool"], str) or not patch["pool"]))):
-                raise CommandError("invalid_metadata", "pool must be one Folder id or null on a block")
+                raise CommandError("invalid_metadata", "pool must be one Class id or null on a block")
             if "pool" in patch:
                 if node.form in ('schedule', 'region', 'avg') and patch['pool'] is not None:
-                    raise CommandError('container_pool', 'Schedule / Region / AVG 容器不能绑定 Folder')
+                    raise CommandError('container_pool', 'Schedule / Region / AVG 容器不能绑定 Class')
                 if node.meta.get('lora') and patch['pool'] != node.meta.get('pool'):
-                    raise CommandError('fixed_lora_pool', 'LoRA 的触发词 Folder 为固定绑定')
+                    raise CommandError('fixed_lora_pool', 'LoRA 的触发词 Class 为固定绑定')
             node.meta.update(deepcopy(patch))
         elif kind == "SetSettings":
             _set_settings(doc, node, command["patch"])
@@ -685,7 +825,7 @@ def apply_command(state: EditorState, command: dict) -> EditorState:
                 if slots is not None:
                     for item, interval in zip(owner.children, slots):
                         _schedule_head(doc, item, interval)
-                result.doc = format_document(refresh_document(format_document(doc)))
+                result.doc = refresh_document(doc)
                 result.check()
                 _locate(result, node.id)
                 result.revision += 1
@@ -699,6 +839,14 @@ def apply_command(state: EditorState, command: dict) -> EditorState:
             parent.children.insert(position, node)
             _normalise_schedule(doc, parent)
             _locate(result, node.id)
+        elif kind == 'MergeLibraryBlock':
+            parent = _node(doc, command['parent_id']); _ordinary_parent(parent)
+            if command.get('source', {}).get('kind') != 'block' or not isinstance(command.get('occurrence'), list):
+                raise CommandError('invalid_asset', '合并需要 Library Block 来源')
+            source = DocNode.from_json(command['snapshot'])
+            _merge_pool_block(doc, parent, source, command)
+            _normalise_schedule(doc, parent)
+            _locate(result, parent.id)
         elif kind in ("InsertBlock", "InsertEntry", "InsertLibraryBlock", "EnableCandidate", "InsertLibraryPrompts"):
             parent = _node(doc, command["parent_id"])
             position = _position(parent, command)
@@ -844,7 +992,7 @@ def apply_command(state: EditorState, command: dict) -> EditorState:
         if result.valid and kind not in ("EditTextRun", "LocateDetails"):
             # A switch changes only enabled state. A legacy layout marker must
             # not regenerate separators and discard the user's Enter/blank lines.
-            pretty = kind != 'SetEnabled' and kind not in _LOCAL_INSERT_COMMANDS and (kind in _LAYOUT_COMMANDS or result.doc.root.meta.get('_layout_indent') == 4)
+            pretty = not command.get('resource_update') and kind not in ('SetEnabled','MoveBlock') and kind not in _LOCAL_INSERT_COMMANDS and kind in _LAYOUT_COMMANDS
             if pretty:
                 format_document(result.doc)
             result.doc = refresh_document(result.doc)
@@ -859,6 +1007,9 @@ def apply_command(state: EditorState, command: dict) -> EditorState:
     # New typing may remove the selected instance; choose a surviving parent/root.
     if result.selection.get("node_id") and result.doc.find(result.selection["node_id"]) is None:
         _locate(result, result.doc.root.id)
+    if result.valid and not command.get('resource_update'):
+        from .mask_resources import detach_changed
+        detach_changed(result.doc)
     result.revision += 1
     return result
 

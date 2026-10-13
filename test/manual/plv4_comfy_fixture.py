@@ -17,7 +17,7 @@ SCRATCH = Path(os.environ.get('PLV4_FIXTURE_ROOT', str(Path(tempfile.gettempdir(
 def prepare():
     wrapper = SCRATCH / "custom_nodes" / "plv4_fixture"
     wrapper.mkdir(parents=True, exist_ok=True)
-    for name in ("user", "input", "output", "temp"):
+    for name in ("user", "input", "output", "temp", "models"):
         (SCRATCH / name).mkdir(exist_ok=True)
     (wrapper / "__init__.py").write_text(
         f"import runpy\nglobals().update(runpy.run_path({str(Path(__file__).resolve())!r}, run_name='comfy_fixture'))\n",
@@ -25,9 +25,9 @@ def prepare():
     )
     web = wrapper / "js"
     web.mkdir(exist_ok=True)
-    for name in ("plv3.js", "plv4.js", "tagac.js", "tagac_host.js", "lora_completion.js", "xyz_settings.js", "tagdb_panel.js"):
+    for name in ("plv3.js", "plv4.js", "gallery_topbar.js", "xyz_topbar.js", "tagac.js", "tagac_host.js", "lora_completion.js", "xyz_settings.js", "tagdb_panel.js"):
         shutil.copy2(REPO / "js" / name, web / name)
-    for name in ("plv3", "plv4"):
+    for name in ("plv3", "plv4", "prompt_shared"):
         shutil.copytree(REPO / "js" / name, web / name, dirs_exist_ok=True)
     print(SCRATCH)
 
@@ -38,20 +38,9 @@ else:
     sys.path.insert(0, str(REPO))
     from prompt_library_v3.node import PromptLibraryV3Node, PromptLibraryV3MonacoNode
     from prompt_library_v4.node import PromptLibraryV4Node, PromptLibraryV4MonacoNode
-    from prompt_library_v3 import db, repo, routes
     from server import PromptServer
     from aiohttp import web
 
-    db_path = SCRATCH / "library.db"
-    connection = db.connect_write(db_path)
-    db.migrate(connection)
-    connection.close()
-    repo.init(db_path)
-    if not repo.list_groups():
-        group = repo.write(repo.CreateGroupOp(name="Fixture Library"))
-        repo.write(repo.AddItemOp(group_id=group, kind="prompt", text="library blue", weight=1.3))
-        repo.write(repo.AddItemOp(group_id=group, kind="prompt", text="library red"))
-    routes.register(PromptServer.instance)
     from prompt_library_v4.setup import setup as setup_v4
     import folder_paths
     models = SCRATCH / 'models' / 'loras' / 'characters'

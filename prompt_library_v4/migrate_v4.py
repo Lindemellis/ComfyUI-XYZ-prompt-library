@@ -71,6 +71,7 @@ def convert_workflow(value, mapping):
 class ConvertOp:
     rows: dict
     def apply(self, conn):
+        conn.execute('UPDATE library_structure SET version=1')
         rows = self.rows; mapping = {}; warnings = []; active = set()
         def folder(old_id):
             if not old_id: return None
@@ -153,7 +154,10 @@ def convert(source, target):
         rows={r['id']:{**dict(r),'data':json.loads(r['data_json'])} for r in conn.execute('SELECT * FROM assets ORDER BY position,id')}
     finally: conn.close()
     library=AssetLibrary(target)
-    try: result=library.writer.enqueue(ConvertOp(rows)).result()
+    try:
+        result=library.writer.enqueue(ConvertOp(rows)).result()
+        separated=library.mutate({'action':'separate_types','revision':library.read()['revision']})
+        result['structure']=separated; result['counts']=separated['counts']
     finally: library.close()
     return {'source':str(source),'target':str(target),**result}
 

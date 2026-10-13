@@ -71,9 +71,10 @@ def test_region_mode_switches_the_backend():
     src = "q, {x}.set{region: {imask: 0}}"
     couple = PromptLibraryV3Node().execute(text=src, region_mode="couple")[0]
     masked = PromptLibraryV3Node().execute(text=src, region_mode="mask")[0]
-    # no base group -> no base line; ambient `q` injects into the one region instead
-    assert couple == "COUPLE IMASK(0, 1) q, x"
-    assert masked == "IMASK(0, 1) q, x"
+    # no base group -> no base segment; ambient `q` injects into the region and
+    # draws the area no region covers (never an empty full-image base)
+    assert couple == "FILL() q\nCOUPLE IMASK(0, 1) q, x"
+    assert masked == "MASK(0 1, 0 1, 1) IMASK(0, 1,subtract) q\nAND IMASK(0, 1) q, x"
 
 
 def test_regions_are_kept_now_that_there_is_no_negative_node():

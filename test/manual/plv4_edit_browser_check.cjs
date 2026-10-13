@@ -36,7 +36,7 @@ const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
       return result.result.value;
     };
     await rpc('Page.bringToFront');
-    await pause(7000);
+    await pause(12000); // Wait through ComfyUI's initial workflow restoration.
     await evaluate(`(async()=>{for(let i=0;i<200&&!window.plv4;i++)await new Promise(r=>setTimeout(r,25));if(!window.plv4)throw new Error('PLv4 not loaded');window.editor=plv4.window;window.app=editor.app;const node=LiteGraph.createNode('XYZ Prompt Library V4');app.graph.add(node);node.widgets.find(w=>w.name==='text').value='{ alpha }';await editor.open(node);window.trace=[];editor.blocks.addEventListener('focusout',e=>trace.push(e.target.className));})()`);
     const rect = await evaluate(`(()=>{const r=editor.blocks.querySelector('[data-run-input]').getBoundingClientRect();return{x:r.x+10,y:r.y+r.height/2}})()`);
     await rpc('Input.dispatchMouseEvent', { type: 'mousePressed', ...rect, button: 'left', clickCount: 1 });
@@ -48,7 +48,7 @@ const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
     console.log('PASS real ComfyUI native focus');
     for (const kind of ['bound', 'saved', 'monaco']) {
       await evaluate(`(async()=>{await editor.hide();const client=await import('/extensions/plv4_fixture/plv4/asset_client.js');const node=LiteGraph.createNode(${JSON.stringify(kind === 'monaco' ? 'XYZ Prompt Library V4 Monaco' : 'XYZ Prompt Library V4')});app.graph.add(node);node.widgets.find(w=>w.name==='text').value='{ alpha, beta }';await editor.open(node);const s=editor.context.session,id=s.state.doc.root.children[0].id;
-        if(${JSON.stringify(kind)}==='bound'){const f=await client.libraryRequest('save_folder',{name:'Focus '+Date.now()},true);await editor.command({type:'SetMetadata',id,patch:{pool:f.id}});}
+        if(${JSON.stringify(kind)}==='bound'){const f=await client.libraryRequest('save_class',{name:'Focus '+Date.now()},true);await editor.command({type:'SetMetadata',id,patch:{pool:f.id}});}
         if(${JSON.stringify(kind)}==='saved'){const result=await editor.command({type:'SaveLibrary',id,name:'Saved '+Date.now()});await editor.library.reload();const asset=editor.library.data.assets.find(a=>a.id===result.id);await editor.openLibrary(await editor.library.assetContext(asset));}
       })()`);
       const rect = await evaluate(`(()=>{const r=editor.blocks.querySelector('[data-run-input]').getBoundingClientRect();return{x:r.x+10,y:r.y+r.height/2}})()`);
@@ -93,13 +93,15 @@ const pause = ms => new Promise(resolve => setTimeout(resolve, ms));
     assert.ok(await evaluate(`editor.context.session.state.doc.root.children[0].children[0].form==='schedule'&&editor.context.session.state.doc.root.children[0].children[0].children.length===2`), 'Enter chooses a two-entry Schedule skeleton');
     console.log('PASS native Schedule completion');
 
-    await evaluate(`(async()=>{const client=await import('/extensions/plv4_fixture/plv4/asset_client.js');const root=await client.libraryRequest('save_folder',{name:'Catalog '+Date.now(),data:{autocomplete:true}},true);window.catalog=root.id;window.uniquePrompt='library unique '+Date.now();await client.libraryRequest('save_tag',{parent_id:root.id,text:'blue eyes'},true);await client.libraryRequest('save_tag',{parent_id:root.id,text:uniquePrompt},true);window.catalogAsset=(await client.libraryRequest('tree')).assets.find(asset=>asset.id===root.id);})()`);
+    await evaluate(`(async()=>{const client=await import('/extensions/plv4_fixture/plv4/asset_client.js');const root=await client.libraryRequest('save_class',{name:'Catalog '+Date.now(),data:{autocomplete:true}},true);window.catalog=root.id;window.uniquePrompt='library unique '+Date.now();await client.libraryRequest('save_tag',{parent_id:root.id,text:'blue eyes'},true);await client.libraryRequest('save_tag',{parent_id:root.id,text:uniquePrompt},true);window.catalogAsset=(await client.libraryRequest('tree')).assets.find(asset=>asset.id===root.id);})()`);
     await reset(); await selectInput(); await type('[' + await evaluate('catalogAsset.path'));
     await evaluate(`(async()=>{const list=await field._xyzSourceSuggestions();const choice=list.find(item=>item.asset?.id===catalog);if(!choice)throw new Error('Folder reference absent');await choice.insert();})()`);
     assert.ok(await evaluate(`editor.context.session.valid&&editor.context.session.state.doc.root.children[0].children.some(item=>item.meta?.pool===catalog)&&document.activeElement.isContentEditable`), 'Native Library reference expands with binding and keeps typing focus');
     console.log('PASS native Library expansion');
 
     await reset(); await selectInput(); await evaluate('xyzAcSettings.showTagPreview=true'); await type('blue eyes'); await pause(120);
+    // Dataset and Library results are asynchronous; wait for their merged row.
+    await evaluate(`(async()=>{for(let i=0;i<80&&!document.querySelector('#xyz-tagac-root [data-tagac-index]')?.innerText.includes('L');i++)await new Promise(r=>setTimeout(r,25));})()`);
     const merged = await evaluate(`(()=>{const row=document.querySelector('#xyz-tagac-root [data-tagac-index]');return row.innerText})()`);
     for (const value of ['fixture alias', 'D', 'G', 'L', '🖼']) assert.ok(merged.includes(value), 'Merged tag retains ' + value);
     await evaluate(`(()=>{document.querySelector('#xyz-tagac-root [data-tagac-index]').querySelectorAll('span').forEach(span=>{if(span.textContent==='L')span.dispatchEvent(new MouseEvent('mousedown',{bubbles:true,cancelable:true}));});})()`);

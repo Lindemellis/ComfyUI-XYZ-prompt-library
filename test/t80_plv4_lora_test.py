@@ -79,6 +79,24 @@ def test_read_only_lazy_multi_image_and_on_demand_pool(browser):
         with pytest.raises(CommandError): service.image(info['id'], index)
 
 
+def test_lora_classes_and_descendants_stay_hidden_after_moving_to_a_folder(browser):
+    service, library, _ = browser
+    model = service.list()['items'][0]
+    root = library.read('get', id=service.send(model['id'])['pool_id'])
+    folder = library.mutate({'action': 'save_folder', 'name': 'Storage'})['asset']
+    library.mutate({'action': 'move', 'id': root['id'], 'version': root['version'], 'parent_id': folder['id']})
+    child = library.mutate({'action': 'save_class', 'name': 'Outfit', 'parent_id': root['id']})['asset']
+    tag = library.mutate({'action': 'save_tag', 'text': 'white dress', 'parent_id': child['id']})['asset']
+    rows = {a['id']:a for a in library.read()['assets']}
+    assert rows[root['id']]['kind'] == rows[child['id']]['kind'] == 'class'
+    assert all(rows[ident]['library_hidden'] for ident in (root['id'],child['id'],tag['id']))
+    assert not rows[folder['id']].get('library_hidden')
+    assert library.read('candidates', pool=root['id'])['candidates'][0]['children']
+    state = command(EditorState.create(text=''), 'InsertLora', lora=model, pool_id=root['id'])
+    saved = library.mutate({'action':'save_block', 'name':'Saved LoRA', 'parent_id':folder['id'], 'snapshot':state.doc.root.children[0].to_json()})['asset']
+    assert next(a for a in library.read()['assets'] if a['id']==saved['id'])['library_hidden']
+
+
 def test_completion_reads_only_index_and_excludes_shadowed_or_invalid_paths(browser):
     service, library, root = browser
     (root / 'characters' / 'bad:name.safetensors').write_bytes(b'fixture')
@@ -106,7 +124,7 @@ def test_pool_manual_deletion_stays_deleted_and_explicit_import(browser):
     service.detail(info['id'], ensure=True, import_triggers=True)
     assert 'one' in [row['name'] for row in library.read()['assets']]
     pool = library.read('get', id=info['pool_id'])
-    library.mutate({'action': 'save_folder', 'id': pool['id'], 'version': pool['version'], 'name': 'custom triggers', 'data': {'autocomplete': True}})
+    library.mutate({'action': 'save_class', 'id': pool['id'], 'version': pool['version'], 'name': 'custom triggers', 'data': {'autocomplete': True}})
     assert service.send(info['id'])['pool_id'] == pool['id']
 
 
@@ -181,7 +199,7 @@ def test_regroup_old_flat_pool_preserves_deleted_and_edited_tags(browser):
     payload = {'action': 'ensure_lora', 'lora': {key: info[key] for key in ('id', 'name', 'relative', 'root_id')}, 'triggers': CHARACTERS, 'regroup_existing': True}
     library.mutate(payload)
     assets = library.read()['assets']
-    assert len([asset for asset in assets if asset['parent_id'] == info['pool_id'] and asset['kind'] == 'folder']) == 5
+    assert len([asset for asset in assets if asset['parent_id'] == info['pool_id'] and asset['kind'] == 'class']) == 5
     assert not any(asset['name'] in ('no ahoge', 'mole') for asset in assets)
     assert next(asset for asset in assets if asset['id'] == edited['id'])['parent_id'] == info['pool_id']
     assert {asset['id'] for asset in old if asset['id'] != deleted['id']} <= {asset['id'] for asset in assets}
@@ -197,7 +215,7 @@ def test_outfit_import_retains_complete_bundles_in_sibling_folders(browser, word
     assets = library.read()['assets']
     groups = [asset for asset in assets if asset['parent_id'] == info['pool_id']]
     assert [group['name'] for group in groups] == ['女仆装', '日常装', '兔女郎装']
-    assert all(group['kind'] == 'folder' for group in groups)
+    assert all(group['kind'] == 'class' for group in groups)
     for group, text in zip(groups, OUTFITS):
         tags = [asset['name'] for asset in assets if asset['parent_id'] == group['id']]
         assert tags == text.split(', ')
@@ -218,7 +236,7 @@ def test_outfit_manual_edits_survive_send_and_rename_survives_reimport(browser):
     (root / 'characters' / 'demo.metadata.json').write_text(json.dumps({'trainedWords': [',,'.join(OUTFITS)]}))
     info = service.send(service.list()['items'][0]['id'])
     group = next(asset for asset in library.read()['assets'] if asset['name'] == '女仆装')
-    library.mutate({'action': 'save_folder', 'id': group['id'], 'version': group['version'], 'name': '我的女仆', 'data': {'autocomplete': True}})
+    library.mutate({'action': 'save_class', 'id': group['id'], 'version': group['version'], 'name': '我的女仆', 'data': {'autocomplete': True}})
     tag = next(asset for asset in library.read()['assets'] if asset['parent_id'] == group['id'] and asset['name'] == '1girl')
     library.mutate({'action': 'delete', 'id': tag['id'], 'version': tag['version']})
     library.mutate({'action': 'save_tag', 'parent_id': group['id'], 'text': 'custom trigger'})
@@ -227,7 +245,7 @@ def test_outfit_manual_edits_survive_send_and_rename_survives_reimport(browser):
     assert library.read()['assets'] == before
     service.detail(info['id'], ensure=True, import_triggers=True)
     assets = library.read()['assets']
-    assert len([asset for asset in assets if asset['kind'] == 'folder']) == 4
+    assert len([asset for asset in assets if asset['kind'] == 'class']) == 4
     assert next(asset for asset in assets if asset['id'] == group['id'])['name'] == '我的女仆'
     assert {'1girl', 'custom trigger'} <= {asset['name'] for asset in assets if asset['parent_id'] == group['id']}
 
@@ -250,11 +268,11 @@ def test_explicit_import_reorganises_previously_flat_pool_without_losing_custom_
 def test_outfit_group_name_collisions_are_disambiguated(browser):
     service, library, root = browser
     info = service.send(service.list()['items'][0]['id'])
-    folder = library.mutate({'action': 'save_folder', 'name': '女仆装', 'parent_id': info['pool_id']})['id']
+    folder = library.mutate({'action': 'save_class', 'name': '女仆装', 'parent_id': info['pool_id']})['id']
     (root / 'characters' / 'demo.metadata.json').write_text(json.dumps({'trainedWords': ['1girl, solo, maid_dress,, 1girl, solo, maid_apron']}))
     service.detail(info['id'], ensure=True, import_triggers=True)
     assets = library.read()['assets']
-    assert [asset['name'] for asset in assets if asset['kind'] == 'folder' and asset['parent_id'] == info['pool_id']] == ['女仆装', '女仆装 2', '女仆装 3']
+    assert [asset['name'] for asset in assets if asset['kind'] == 'class' and asset['parent_id'] == info['pool_id']] == ['女仆装', '女仆装 2', '女仆装 3']
     assert not any(asset['parent_id'] == folder for asset in assets)
 
 
@@ -349,7 +367,8 @@ def test_ambient_lora_emitted_once_explicit_repetitions_preserved(mode):
     output = compile_document(EditorState.create(text), seed=42, region_mode=mode)['prompt']
     assert output.count('<lora:demo:0.6>') == 1
     assert output.endswith('<lora:demo:0.6>')
-    assert compile_text(text, region_mode=mode).text.count('<lora:demo:0.6>') == 2
+    # raw compile copies ambient text into both regions and the compiler's fill
+    assert compile_text(text, region_mode=mode).text.count('<lora:demo:0.6>') == 3
     output = compile_document(EditorState.create('<lora:demo:.6>, <lora:demo:.6>'), seed=42, region_mode=mode)['prompt']
     assert output.count('<lora:demo:.6>') == 2
 
@@ -393,7 +412,7 @@ def test_source_removing_reference_releases_special_block_and_cache_semantics():
     node = PromptLibraryV4Node()
     saved = json.dumps(state.doc.to_json())
     output = compile_document(state, seed=42, region_mode='couple')
-    assert node.execute(doc=saved, seed=42) == (output['prompt'], output['plain'])
+    assert node.execute(doc=saved, seed=42)[:2] == (output['prompt'], output['plain'])
     state.doc.root.meta['compiler'] = 'plv4'
     assert PromptLibraryV3Node().execute(doc=json.dumps(state.doc.to_json()), seed=42) == (output['prompt'], output['plain'])
     before = node.IS_CHANGED(doc=saved)
@@ -406,7 +425,7 @@ def test_source_removing_reference_releases_special_block_and_cache_semantics():
 
 def test_pool_observation_excludes_invocation_and_saved_parent_retains_lora(browser):
     _, library, _ = browser
-    pool = library.mutate({'action': 'save_folder', 'name': 'triggers'})['id']
+    pool = library.mutate({'action': 'save_class', 'name': 'triggers'})['id']
     state = command(EditorState.create(''), 'InsertLora', lora={'id': 'a' * 64, 'name': 'demo', 'relative': 'demo.safetensors'}, pool_id=pool)
     state = command(state, 'InsertBlock', parent_id=state.doc.root.children[0].id, text='{ trigger }')
     library.mutate({'action': 'sync_pool', 'state': state.to_json(), 'owner': 'test'})
