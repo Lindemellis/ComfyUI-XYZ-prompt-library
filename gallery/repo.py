@@ -1410,6 +1410,41 @@ class EnsureFolderOp:
         )
 
 
+class SyncDefaultRootsOp:
+    """Make the non-removable roots exactly this instance's ``output`` / ``input``.
+
+    ``gallery.sqlite`` is shared by every ComfyUI that loads the pack, so an
+    isolated instance's dirs end up registered as built-in roots too. Such
+    rows are demoted to removable custom roots — never deleted, because
+    another instance sharing the DB may see the real ``output`` as foreign —
+    and a row this instance owns is promoted back if one ever demoted it.
+    """
+
+    def __init__(self, *, defaults: List[Tuple[str, str, str]]):
+        self.defaults = list(defaults)  # (path, kind, display_name)
+
+    def apply(self, conn: sqlite3.Connection) -> None:
+        paths = [p for p, _, _ in self.defaults]
+        conn.execute(
+            "UPDATE folder SET kind = 'custom', removable = 1 "
+            "WHERE parent_id IS NULL AND removable = 0 AND path NOT IN "
+            f"({','.join('?' * len(paths))})",
+            paths,
+        )
+        for path, kind, display_name in self.defaults:
+            conn.execute(
+                "INSERT OR IGNORE INTO folder"
+                "(path, kind, parent_id, display_name, removable) "
+                "VALUES (?, ?, NULL, ?, 0)",
+                (path, kind, display_name),
+            )
+            conn.execute(
+                "UPDATE folder SET kind = ?, removable = 0 "
+                "WHERE path = ? AND parent_id IS NULL",
+                (kind, path),
+            )
+
+
 # T08: real op for the thumbnail_cache bookkeeping row written after a
 # .webp has already been materialised on disk ("先物理后入队", §4.5).
 # INSERT OR REPLACE keeps the row fresh if the same hash_key is written

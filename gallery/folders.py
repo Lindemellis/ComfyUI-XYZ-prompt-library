@@ -2,7 +2,8 @@
 
 Owns the rows in ``folder`` whose ``parent_id IS NULL`` (= registered roots):
   * Default ``output`` / ``input`` (kind in {'output','input'}, removable=0)
-    — seeded once at startup from ``folder_paths`` (ComfyUI core, C-8).
+    — synced at startup from ``folder_paths`` (ComfyUI core, C-8); another
+    instance's defaults left in the shared DB are demoted to custom roots.
   * Custom roots (kind='custom', removable=1) — added via ``add_root()``.
 
 Mirrors custom-root paths into ``gallery_data/gallery_config.json`` per C-10
@@ -189,11 +190,11 @@ def _enqueue_ensure(write_queue, *, path: str, kind: str, removable: int,
 
 def ensure_default_roots(*, db_path: _PathLike, data_dir: _PathLike,
                          write_queue) -> None:
-    """Idempotently register ComfyUI ``output`` / ``input`` as non-removable roots.
+    """Make this instance's ``output`` / ``input`` the only non-removable roots.
 
-    Safe to call on every startup; ``EnsureFolderOp`` uses INSERT OR IGNORE,
-    and we additionally pre-filter against the current row set so the writer
-    thread is not pestered with no-op inserts on warm starts.
+    Safe to call on every startup; ``SyncDefaultRootsOp`` is idempotent and is
+    only enqueued when the built-in rows differ from this instance's dirs.
+    Built-in rows of other instances become removable (index kept).
 
     Also creates ``gallery_config.json`` with default fields if absent.
     Existing config files are left untouched to preserve manual edits (C-10).
@@ -208,25 +209,23 @@ def ensure_default_roots(*, db_path: _PathLike, data_dir: _PathLike,
         )
         return
 
-    candidates = [
+    defaults = []
+    for kind, raw in (
         ("output", folder_paths.get_output_directory()),
         ("input", folder_paths.get_input_directory()),
-    ]
-    existing = {row["path"] for row in _select_existing_roots(db_path)}
+    ):
+        if raw:
+            posix = _posix(raw)
+            defaults.append((posix, kind, Path(posix).name or kind))
 
-    for kind, raw in candidates:
-        if not raw:
-            continue
-        posix = _posix(raw)
-        if posix in existing:
-            continue
-        _enqueue_ensure(
-            write_queue,
-            path=posix,
-            kind=kind,
-            removable=0,
-            display_name=Path(posix).name or kind,
+    current = {(p, k, 0) for p, k, _ in defaults}
+    builtin = {(r["path"], r["kind"], r["removable"])
+               for r in _select_existing_roots(db_path) if not r["removable"]}
+    if defaults and builtin != current:
+        fut = write_queue.enqueue_write(
+            _repo.HIGH, _repo.SyncDefaultRootsOp(defaults=defaults),
         )
+        fut.result(timeout=_WRITE_TIMEOUT_SEC)
 
     # Touch config file with defaults if it doesn't exist yet.
     cfg_path = _config_path(Path(data_dir))
