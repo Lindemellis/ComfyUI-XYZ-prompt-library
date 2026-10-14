@@ -171,6 +171,19 @@ because `UNIQUE(group_id, text)` is an item's identity). Tests: `test/t62_plv3_s
   expansion) before any write-through, or the first save overwrites the preset you just linked.
 - `node --check` does NOT reliably catch syntax errors in these ESM files. Use
   `node --input-type=module --check < file.js`.
+- **PLv4 performance contracts (2026-10-14).** (1) `prompt_editor_binding.js`: the host
+  mirrors every commit into the node's `text` widget, which rewrites the SHARED Monaco model
+  outside `sync()`. An edit equal to `session.text` with no pending draft is an echo, not a
+  draft — taking it for one made every following command pay a `ReplaceText` + `sync_pool`
+  round trip and two full re-renders (the "second toggle is slow" bug). (2) `model.strict_parse`
+  caches the strict AST by source text and `full_index` / `check` / `refresh_document`
+  (`from_ast`) all share it: **every consumer must treat the AST as read-only** (copy before
+  mutating, as `region_value` does). `render_all(node, memo)` renders a subtree as if every
+  node were on, without the old `full_document(Document(node))` deep copy; the memo is only
+  valid while the tree is not being edited (`formatting` mutates seps, so it passes none).
+  (3) `BlockView.render` collects the new top level and `place()`s it in position; an
+  unchanged cached card must stay attached. `replaceChildren` restyled all ~600 nodes under
+  10k+ CSS rules (60–140 ms of forced layout per edit). Never re-introduce a full clear.
 
 ## Region × Schedule semantics (user decisions 2026-10-13, implemented + rendered)
 

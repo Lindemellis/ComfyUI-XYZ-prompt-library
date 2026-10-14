@@ -7,10 +7,11 @@ an extra AST Group (which would change random paths and selection units).
 from __future__ import annotations
 
 from copy import copy, deepcopy
+import threading
 from dataclasses import dataclass, field
 from typing import Any
 
-from ._v3 import ast_json, PLv3Error, Diagnostics, Document, DocNode, from_text, reconcile, render, Group, parse, validate
+from ._v3 import ast_json, PLv3Error, Diagnostics, Document, DocNode, from_ast, from_text, reconcile, render, render_all, Group, parse, validate
 
 
 class CommandError(ValueError):
@@ -82,9 +83,28 @@ def pair_tree(doc_node: DocNode, ast_node: Any, out: dict, *, visible: bool = Fa
         pair_tree(child, parsed, out, visible=visible)
 
 
-def full_index(doc: Document) -> tuple[str, dict]:
-    source = render(full_document(doc))
-    root, _ = parse(source)
+# One command parses the same source several times (check, full_index,
+# refresh_document, projection). Every consumer only reads the AST, so a strict
+# parse is shared by source text. Errors are never cached: they raise each time.
+_PARSED: dict[str, Any] = {}
+_PARSED_LOCK = threading.Lock()
+
+
+def strict_parse(source: str):
+    with _PARSED_LOCK:
+        root = _PARSED.get(source)
+    if root is None:
+        root, _ = parse(source)
+        with _PARSED_LOCK:
+            if len(_PARSED) >= 32:
+                _PARSED.pop(next(iter(_PARSED)))
+            _PARSED[source] = root
+    return root
+
+
+def full_index(doc: Document, memo: dict | None = None) -> tuple[str, dict]:
+    source = render_all(doc.root, memo)
+    root = strict_parse(source)
     result = {}
     pair_tree(doc.root, root, result)
     return source, result
@@ -124,7 +144,7 @@ def refresh_document(doc: Document) -> Document:
     # A moved/inserted disabled region must not hide an illegal nested region
     # that only becomes apparent when switched on later.
     validate(complete[doc.root.id], Diagnostics(), src=source)
-    fresh = from_text(source, recover=False)
+    fresh = from_ast(source, complete[doc.root.id])
 
     def transfer(old, new):
         new.id, new.enabled, new.meta = old.id, old.enabled, deepcopy(old.meta)
@@ -215,8 +235,8 @@ class EditorState:
     def check(self):
         if not self.valid:
             raise CommandError("invalid_draft", "repair the raw draft before structural editing")
-        root, diags = parse(self.text)
-        validate(root, diags, src=self.text)
+        root = strict_parse(self.text)
+        validate(root, Diagnostics(), src=self.text)
         pair_tree(self.doc.root, root, {}, visible=True)
         if self.scope == "block" and not self.single_root(self.doc):
             raise CommandError("single_root", "a Library block must retain exactly one root block")
@@ -232,7 +252,9 @@ def projection(state: EditorState) -> dict:
                               message="a Library block must retain exactly one root block"))
         return dict(valid=False, revision=state.revision, raw=text,
                     ast=js_ast(ast_json(recovered), text), tree=None, diagnostics=diags)
-    _, complete = full_index(state.doc)
+    # One memo: every row's `source` below is a subtree of this same render.
+    sources = {}
+    _, complete = full_index(state.doc, sources)
     visible = {}
     pair_tree(state.doc.root, recovered, visible, visible=True)
 
@@ -254,7 +276,7 @@ def projection(state: EditorState) -> dict:
             span = [js_offset(text, start), js_offset(text, end)]
         out = dict(id=node.id, parent_id=parent, kind=node.kind, form=node.form,
                    enabled=node.enabled, effective=effective, span=span,
-                   meta=deepcopy(node.meta), source=render(full_document(Document(node))), sep=node.sep,
+                   meta=deepcopy(node.meta), source=render_all(node, sources), sep=node.sep,
                    settings=info.get("settings"), implicit=info.get("implicit", False))
         if current is not None:
             # Root carries the complete AST once for the shared PromptEditor.

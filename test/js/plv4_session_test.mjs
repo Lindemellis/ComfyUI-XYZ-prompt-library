@@ -128,7 +128,10 @@ test('dispose rejects late response and releases subscribers', async () => {
 
 test('embedded and floating editors share one model edit and release leases independently', async () => {
   globalThis.promptInputHelpers = await import('data:text/javascript;base64,' + Buffer.from(await readFile(new URL('../../js/plv4/prompt_text.js', import.meta.url), 'utf8')).toString('base64'));
-  const source = (await readFile(new URL('../../js/plv4/prompt_editor_binding.js', import.meta.url), 'utf8')).replace(/^import .*;\r?\n/gm, 'const { normalizePromptInput } = globalThis.promptInputHelpers;\n');
+  globalThis.textDraftHelpers = await import('data:text/javascript;base64,' + Buffer.from(await readFile(new URL('../../js/plv4/text_draft.js', import.meta.url), 'utf8')).toString('base64'));
+  const source = (await readFile(new URL('../../js/plv4/prompt_editor_binding.js', import.meta.url), 'utf8'))
+    .replace(/^import .*prompt_text\.js';\r?\n/m, 'const { normalizePromptInput } = globalThis.promptInputHelpers;\n')
+    .replace(/^import .*text_draft\.js';\r?\n/m, 'const { draftCompletions } = globalThis.textDraftHelpers;\n');
   const { bindPromptEditor } = await import('data:text/javascript;base64,' + Buffer.from(source).toString('base64'));
   const session = sessionWith(); const listeners = new Set();
   const nativeUndo = () => 'native';
@@ -141,13 +144,21 @@ test('embedded and floating editors share one model edit and release leases inde
   const embedded = pane(); const floating = pane();
   const first = bindPromptEditor(embedded, session);
   const second = bindPromptEditor(floating, session);
-  model.setValue('one edit'); await session.whenIdle();
+  model.setValue('one edit'); await session.flushDrafts(); await session.whenIdle();
   assert.equal(session.past.length, 1); assert.equal(listeners.size, 1);
-  model.setValue('solo， blonde hair， '); await session.whenIdle();
+  model.setValue('solo， blonde hair， '); await session.flushDrafts(); await session.whenIdle();
   assert.equal(session.text,'solo, blonde hair, '); assert.equal(model.value,session.text);
   first.dispose(); assert.notEqual(model.undo, nativeUndo);
-  model.setValue('after embedded removal'); await session.whenIdle(); assert.equal(session.text, 'after embedded removal');
+  model.setValue('after embedded removal'); await session.flushDrafts(); await session.whenIdle(); assert.equal(session.text, 'after embedded removal');
   await model.undo(); assert.equal(session.text, 'solo, blonde hair, '); assert.equal(model.value, session.text);
+  // The host mirrors each commit into the node's text widget, which rewrites this
+  // shared model outside the binding. An echo of the session text is not a draft:
+  // the next command must not pay a ReplaceText + pool sync round trip for it.
+  const echoed = session.past.length; let requests = 0; const request = session.request;
+  session.request = async (...args) => { requests++; return request(...args); };
+  model.value = 'external echo'; session.state.text = 'external echo'; for (const listener of listeners) listener();
+  await session.flushDrafts(); await session.whenIdle();
+  assert.equal(requests, 0); assert.equal(session.past.length, echoed); session.request = request;
   second.dispose(); assert.equal(model.undo, nativeUndo); assert.equal(listeners.size, 0); assert.equal(session.listeners.size, 0);
 });
 

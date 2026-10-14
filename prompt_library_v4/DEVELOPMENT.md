@@ -4,6 +4,14 @@
 
 ## 文档入口与优先级
 
+### 2026-10-14：Blocks 开关响应（假草稿 / 后端深拷贝与重复解析 / 整页重挂）
+
+- 现象：Settings 里 enable 一个 prompt 很快，随后 disable 明显变慢。实际与方向无关，是“上一次命令之后的下一次命令”慢。宿主把每次提交写回节点 `text` widget，节点内嵌 Monaco 与窗口共用同一 model，这次写入在 binding 的 `sync()` 之外，被当成用户输入记成一份与文档完全相同的草稿；下一条命令前 `flushEditor` 先提交它：`ReplaceText` + `sync_pool` 两次往返和两次 Blocks/Details 整页重绘。修复：`prompt_editor_binding.js` 中，内容等于 `session.text` 且无未提交草稿时不算草稿（同时不再无谓设置 `context.raw`，后者会跳过 mask 刷新）。
+- 后端：`projection` 对每个节点 `render(full_document(Document(node)))`，即每个节点深拷贝一次子树；一条命令还会把同一文本严格解析 8 次。新增共享 `render_all(node, memo)`（按全部启用渲染，无拷贝；projection 内同一 memo），`model.strict_parse` 按源文本缓存严格 AST（上限 32、加锁、错误不缓存），`full_index`、`check()`、`refresh_document`（改用 `from_ast` 复用同一 AST）共享。约定：AST 消费方只读，需要修改先复制。用 anima_workflow_3 节点 861 文档对比，命令响应 JSON 修改前后逐字节一致。
+- 前端：`BlockView.render` 原先 `replaceChildren()` 后重挂全部卡片，约 600 个节点在 1 万余条 CSS 规则下整体重新计算样式和布局，结束处读取 `scrollTop` 强制同步布局 60–140ms。改为收集新的顶层节点后 `place()` 就地对齐：未变化的缓存卡片保持挂载，只插入/移动/删除变化部分。注意 `place()` 必须先跳过并删除不在新列表中的旧节点，否则每个新分隔节点会把其后所有卡片“移动”一次（初版即如此，599 个节点照样全挂）。
+- 结果（隔离 8191 fixture，个人 Library 只读 backup 副本 + 节点 861 文档，Details 真实鼠标点击 10 个 block）：Blocks 显示变化 约 430ms → 约 85ms，开关方向一致；后端单条命令 约 26ms → 约 11ms（合成 15×20 文档 约 70 → 25ms）；每次重挂节点 599 → 约 180（只剩开关所在 block）。
+- 验证：`test/js/plv4_session_test.mjs` 修复过时的 import 替换（binding 新增 `text_draft.js` import 后重复声明，整条用例从未运行）与“改动即提交”的旧假设，加入外部回写不产生草稿的回归，11/11；回退修复时该回归失败。PLv4 Python 398 passed，8 个失败与改动前一致（既有）；其余 JS suite 前后一致；mixed 23、Content click 16、menu 25 真实浏览器检查前后均通过（inline 检查缺 playwright，前后均未运行）。正式服务/8188/个人数据未改；需重启正式 ComfyUI 并 Ctrl+F5。
+
 ### 2026-10-13：关闭子 Block 前输入跳位 / 启用与删除响应
 
 - anima_workflow_3 节点 861 的 i173，i305 关闭时，2girls 后新 prompt 在 blur 后越过该子 Block。真实文档副本精确复现：`i174(off), i175(2girls), i305(off), newprompt, i475`。共享 reconcile 按旧数字 index 恢复 parked block，已有 TextRun 却没有结构 anchor。

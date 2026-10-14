@@ -60,7 +60,12 @@ export function bindPromptEditor(pane, session, { onError = console.error, onDra
     if (!matches() || writing) return;
     const text = normalizePromptInput(model.getValue());
     completions = draftCompletions(observed, text, completions, model.__plv4TagCompletion);
-    observed = text; draft = text;
+    observed = text;
+    // The host mirrors every committed edit into the node's text widget, which
+    // writes this shared model outside sync(). That echo is not a draft; taking
+    // it for one costs the next command a ReplaceText + pool sync round trip.
+    if (draft == null && text === session.text) { completions = []; return; }
+    draft = text;
     onDraft(text);
   });
   const unsubscribe = session.subscribe(({ reason }) => {

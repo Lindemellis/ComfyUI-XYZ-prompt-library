@@ -6,8 +6,7 @@ Hand-typed source continues to use the lossless V3 reconciliation path.
 """
 import re
 
-from ._v3 import Document, render
-from .model import full_document
+from ._v3 import Document, render_all
 
 # A newline the user typed (native Enter in Blocks) is never followed by
 # indentation; generated layout always is (a tab or at least two spaces). One
@@ -54,12 +53,12 @@ def format_document(doc, *, depth=0, remember=True):
             else:
                 # A full stop stays with its item and is already a separator.
                 # Region segments have their own heads and need no commas.
-                comma = "" if node.form == "region" or render(full_document(Document(child))).rstrip().endswith(".") else ","
+                comma = "" if node.form == "region" or render_all(child).rstrip().endswith(".") else ","
                 following = node.children[index + 1]
                 # Prompts share a line at every depth; only a block takes its own.
                 whitespace = "\n" + indent if block(child) or block(following) else " "
                 child.sep = comma + (whitespace if any(c.enabled for c in node.children[index + 1:]) else "")
-        node.raw = render(full_document(Document(node)))
+        node.raw = render_all(node)
     layout(doc.root, depth)
     return doc
 

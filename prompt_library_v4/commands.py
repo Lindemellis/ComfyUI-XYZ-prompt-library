@@ -12,7 +12,7 @@ import json
 import math
 import re
 
-from ._v3 import DocNode, Document, from_text, render, ast_json
+from ._v3 import DocNode, Document, from_text, render, render_all, ast_json
 from .model import (CommandError, EditorState, full_document, full_index,
                     projection, python_offset, refresh_document, text_edit)
 from .formatting import format_document, format_new_block
@@ -149,7 +149,7 @@ def _clone_ids(doc, node):
 
 
 def _body(node):
-    return render(full_document(Document(deepcopy(node))))
+    return render_all(node)
 
 
 def _fragment(source, form=None):

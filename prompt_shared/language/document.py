@@ -342,15 +342,26 @@ def _top_level_comma(text: str) -> bool:
     return False
 
 
-def _render_node(node: DocNode, top: bool = False) -> str:
-    if not node.enabled and not top:
+def render_all(node: DocNode, memo: dict | None = None) -> str:
+    """The text the subtree would render to with EVERY node switched on.
+
+    Equivalent to rendering a deep copy with each `enabled` forced true, without
+    the copy. `memo` (keyed by node identity) lets a caller that renders every
+    subtree of one tree render each node once."""
+    return _render_node(node, top=True, everything=True, memo=memo)
+
+
+def _render_node(node: DocNode, top: bool = False, everything: bool = False, memo: dict | None = None) -> str:
+    if not node.enabled and not top and not everything:
         return ""
     if node.kind != "group" or node.opaque:
         return node.raw
+    if memo is not None and id(node) in memo:
+        return memo[id(node)]
 
-    on = [c for c in node.children if c.enabled]
+    on = list(node.children) if everything else [c for c in node.children if c.enabled]
     last = on[-1] if on else None
-    bodies = [_render_node(c) for c in on]
+    bodies = [_render_node(c, everything=everything, memo=memo) for c in on]
     parts = []
     for index, child in enumerate(on):
         body = bodies[index]
@@ -383,7 +394,10 @@ def _render_node(node: DocNode, top: bool = False) -> str:
         ):
             sep = f"{sep.rstrip()}, " if sep.strip() else ", "
         parts.append(body + sep)
-    return f"{node.open}{node.lead}{''.join(parts)}{node.close}"
+    out = f"{node.open}{node.lead}{''.join(parts)}{node.close}"
+    if memo is not None:
+        memo[id(node)] = out
+    return out
 
 
 # --- text edits -------------------------------------------------------------

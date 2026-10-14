@@ -191,26 +191,44 @@ export class BlockView {
     const selection = getSelection();
     const range = selection && !selection.isCollapsed && this.container.contains(selection.anchorNode) && this.container.contains(selection.focusNode)
       ? [selection.anchorNode, selection.anchorOffset, selection.focusNode, selection.focusOffset] : null;
-    this.container.replaceChildren();
+    // Collect the new top level, then reconcile it into the container in place.
+    // Emptying the container detached every cached card, and the browser then
+    // restyled and laid out the whole notebook for a change to one block.
+    const sink = { nodes: [], append(...nodes) { this.nodes.push(...nodes); } };
     if (!session.valid) {
-      this.container.append(element('div', 'plv4-empty plv4-error', '原稿未完成。切换到 PLv3 修复；关闭项仍保存在文档中。')); return;
+      sink.append(element('div', 'plv4-empty plv4-error', '原稿未完成。切换到 PLv3 修复；关闭项仍保存在文档中。'));
+      this.place(sink.nodes); return;
     }
     let root = map.get(context.focus) || session.projection.tree;
     if (context.focus && root.form !== 'root') {
       const path = element('div', 'plv4-path');
       const ancestors = []; for (let n = root; n; n = map.get(n.parent_id)) ancestors.unshift(n);
       for (const n of ancestors) path.append(button(n.form === 'root' ? 'Document' : nameOf(n) || 'Block', '返回父级', () => { context.focus = n.form === 'root' ? null : n.id; this.render(context); }));
-      this.container.append(path);
+      sink.append(path);
     }
-    if (root.form === 'root') this.contents(root, this.container, 0);
-    else this.container.append(this.block(root, 0));
+    if (root.form === 'root') this.contents(root, sink, 0);
+    else sink.append(this.block(root, 0));
     const target = context.asset && root.form === 'root' && root.children.length ? root.children[0] : root;
-    this.container.append(this.addFooter(target));
-    this.container.scrollTop = scroll;
+    sink.append(this.addFooter(target));
+    this.place(sink.nodes);
+    if (this.container.scrollTop !== scroll) this.container.scrollTop = scroll;
     // Reusing cached cards briefly detaches their text nodes. Browser ranges
     // collapse during that detach even when every character stays unchanged.
     if (range && this.container.contains(range[0]) && this.container.contains(range[2])) selection.setBaseAndExtent(...range);
     for (const id of this.cache.keys()) if (!map.has(id)) this.cache.delete(id);
+  }
+  // Make the container's children exactly `nodes`, leaving every node that is
+  // already in position attached. Cached cards then keep their style and layout.
+  place(nodes) {
+    const keep = new Set(nodes);
+    let at = this.container.firstChild;
+    const drop = () => { while (at && !keep.has(at)) { const next = at.nextSibling; at.remove(); at = next; } };
+    for (const node of nodes) {
+      drop();
+      if (node === at) { at = at.nextSibling; continue; }
+      this.container.insertBefore(node, at);
+    }
+    while (at) { const next = at.nextSibling; at.remove(); at = next; }
   }
   addFooter(target) {
     const footer = element('div', 'block-add-footer');
