@@ -56,9 +56,11 @@ On first run, the prebuilt Danbooru dataset downloads in the background. Autocom
 
 ## User interface
 
-The top bar exposes XYZ Gallery and **XYZ Tools**, including the V4 editor, original V3 editor/Library, TagDB maintenance, settings, Krita and the optional agent launcher. Prompt nodes' **Editor** button opens the V4 window; V3 nodes remain supported.
+The top bar exposes XYZ Gallery and **XYZ Tools**, including the V4 editor, TagDB maintenance, settings, Krita and the optional agent launcher. Prompt nodes' **Editor** button opens the V4 window; deprecated V3 nodes remain supported.
 
 V4 separates a block's ordered **Content** from optional **Pool** candidates. Add candidates with **+**, edit or disable them in Content, and explicitly save reusable blocks. Single-click Library browsing uses one temporary tab; editing or double-clicking pins it. See the [V4 manual](prompt_library_v4/README.md) for dragging, search, Region/Schedule controls and migration.
+
+In Settings, Content offers **Disable all / Enable all** for all nested content, with one undo step per action. Pool Subclass rows offer **＋内容** to merge loose tags from the entire subtree into the current Block using the saved-Block deduplication rules, or **＋子 block** to insert them in a new child bound to that Subclass. Existing merged tags keep their order and enabled state; candidate Block contents are excluded.
 
 ## Data and privacy
 

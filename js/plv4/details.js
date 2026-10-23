@@ -153,6 +153,7 @@ export class DetailsPane {
     }
     const prompts = this.section('Content');
     prompts.classList.add('detail-content-section');
+    prompts.append(this.contentActions(row));
     const contentTree = element('div', 'detail-contents-tree'); contentTree.dataset.depth = 0; prompts.append(contentTree);
     this.localContents(row.children.filter(child => !child.meta?.lora_invocation), contentTree, session, row);
     const folder = row.meta?.pool && this.host.library?.data?.assets?.find(asset => asset.id === row.meta.pool);
@@ -278,6 +279,20 @@ export class DetailsPane {
     container.append(card);
   }
   command(type, row, extra = {}) { return this.applyCommand({ type, id: row.id, ...extra }); }
+  contentActions(row) {
+    const actions = element('div', 'plv4-row');
+    const apply = async enabled => {
+      for (const control of actions.children) control.disabled = true;
+      try { await this.command('SetContentEnabled', row, { enabled }); }
+      finally { for (const control of actions.children) control.disabled = disabled; }
+    };
+    const disabled = row.enabled === false || row.effective === false || !row.children.some(child => !child.meta?.lora_invocation && child.form !== 'moss');
+    for (const [enabled, label] of [[false, 'Disable all'], [true, 'Enable all']]) {
+      const control = button(label, `${enabled ? '启用' : '关闭'}全部 Content（含子 Block 和提示词）`, () => apply(enabled), 'small-add');
+      control.disabled = disabled; actions.append(control);
+    }
+    return actions;
+  }
   async applyCommand(command, session = this.session) {
     const selectionEpoch = session.selectionEpoch;
     this.commandsPending.set(session, (this.commandsPending.get(session) || 0) + 1);
@@ -443,6 +458,21 @@ export class DetailsPane {
     });
     this.poolPending.set(session, task.catch(() => {})); return task;
   }
+  insertPoolClass(session, owner, candidate, asBlock) {
+    const task = (this.poolPending.get(session) || Promise.resolve()).then(async () => {
+      if (this.host.context?.session !== session) return;
+      const source = await libraryRequest('class_block', { id: candidate.id, fill: true, recursive: true });
+      if (this.host.context?.session !== session) return;
+      const current = indexTree(session.projection.tree).get(owner.id);
+      if (!current || current.enabled === false || current.effective === false || ['schedule', 'region', 'avg'].includes(current.form)) return;
+      const target = { parent_id: current.id, edge: 'end' };
+      const entry = await this.host.entryTarget(current, target);
+      if (entry === false || this.host.context?.session !== session) return;
+      return this.applyCommand({ type: asBlock ? 'InsertLibraryBlock' : 'MergeClassTags', ...target, snapshot: source.snapshot, source: source.source,
+        occurrence: [candidate.id], ...(entry ? { entry } : {}) }, session);
+    });
+    this.poolPending.set(session, task.catch(() => {})); return task;
+  }
   previewContents(children, container, session, owner, depth, key) {
     for (const node of children || []) {
       if (isBlock(node)) {
@@ -539,13 +569,11 @@ export class DetailsPane {
           head.title = `第 ${actualDepth + 1}${chain.length > 1 ? `–${actualDepth + chain.length}` : ''} 层 · Class · ${terminal.name}`;
           head.append(this.treeIcon('class'), element('span', 'pool-branch-name', label));
           if (terminal.id !== pool) {
-            const insert = button('＋子 block', '作为 sub block 插入：本层全部散装 tag，默认启用', async () => {
-              const source = await libraryRequest('class_block', { id: terminal.id, fill: true });
-              const target = { parent_id: current.id, edge: 'end' };
-              const entry = await this.host.entryTarget(current, target); if (entry === false) return;
-              return this.host.command({ type: 'InsertLibraryBlock', ...target, snapshot: source.snapshot, source: source.source, ...(entry ? { entry } : {}) });
-            }, 'pool-insert');
-            insert.disabled = !active || ['schedule', 'region', 'avg'].includes(current.form); insert.dataset.action = 'insert-folder-block'; head.append(insert);
+            const actions = element('span', 'pool-class-actions');
+            const merge = button('＋内容', '把此 Class 及全部 Subclass 的散装 tag 加到当前 Block：去重，已有内容保持原状态', () => this.insertPoolClass(session, current, terminal, false), 'pool-insert');
+            merge.disabled = !active || ['schedule', 'region', 'avg'].includes(current.form); merge.dataset.action = 'insert-class-tags'; actions.append(merge);
+            const insert = button('＋子 block', '作为 subblock 插入：此 Class 及全部 Subclass 的散装 tag，默认启用', () => this.insertPoolClass(session, current, terminal, true), 'pool-insert');
+            insert.disabled = !active || ['schedule', 'region', 'avg'].includes(current.form); insert.dataset.action = 'insert-folder-block'; actions.append(insert); head.append(actions);
           }
           parent.append(box); walk(terminal.children, body, depth + 1, terminal.name, actualDepth + chain.length);
           if (!terminal.children.length) body.append(element('span', 'pool-empty', '空Class')); return;

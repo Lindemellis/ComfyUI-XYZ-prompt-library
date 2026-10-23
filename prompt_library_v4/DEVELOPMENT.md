@@ -4,6 +4,23 @@
 
 ## 文档入口与优先级
 
+### 2026-10-23：Content / Subclass 功能发布
+
+- 用户随后授权更新 GitHub 和 README。本次提交仅含 Content 批量启停、Pool Subclass 两种插入及对应中英文说明；根 README 移除已退役的 V3 独立 Editor / Library 菜单入口描述。此前实施条目中的「无 commit/push」指当时状态。
+- 从已发布 HEAD b204244 独立检出并提取本轮改动，发布版本通过 t70/t74/t83 **175 passed**、独立临时 Library + Chrome **46 真实鼠标检查**（Content 34、Subclass 12），errors=[]；ESM / Python 语法、定向 diff 检查通过。未依赖本地待发布的 MOSS、性能、LoRA 等其他改动，这些改动保留本地；不包含个人数据库、workflow 或测试资产。更新后重启 ComfyUI + Ctrl+F5。
+
+### 2026-10-23：Pool Subclass 两种插入
+
+- 用户明确包含全部后代 Subclass 的 tag。Subclass 行提供「＋内容 / ＋子 block」；`class_block {fill:true,recursive:true}` 只递归散装 tag，兄弟重复去重，不读候选 Block；未传 recursive 的其他 Class 插入入口保持原本本层读取规则。
+- `MergeClassTags` 复用 `MergeLibraryBlock` 的 `_merge_pool_block`，保留当前绑定，已有 prompt（含关闭项）不重新启用 / 排序；未绑定后代参与查重，自有绑定的子 Block 保留既有边界。全重复时原快照不变，不多记 Undo。subblock 插入继续走 InsertLibraryBlock，绑定所选 Subclass，内容默认启用。Details 两个入口共用 poolPending 串行及 session / 当前 owner 守卫。两个悬停按钮放入同一个 flex 工具条，避免旧 absolute-right 样式把两者叠在一起。
+- 验证：t70/t74/t83 **175 passed**；独立临时 Library fixture + 独立 Chrome **12 真实鼠标 checks**，覆盖两入口、整树 tag、候选 Block 排除、关闭项/绑定保留、重复 no-op、单步 Undo/Redo，errors=[]。直接检查默认本层读取和 recursive 兄弟去重通过；ESM/Python 语法及定向 diff 检查通过。未操作正式 / 持久 8190 / 个人数据，无 commit/push。临时脚本 `%TEMP%/xyz-subclass-pool-check.cjs`；需重启 ComfyUI + Ctrl+F5。
+
+### 2026-10-23：Settings Content 批量启停
+
+- Content 顶部增加 Disable all / Enable all；`SetContentEnabled` 单条原子命令递归改变当前 Block 的全部后代 enabled，保留当前 Block、自身以外的兄弟、稳定 ID、内容和顺序，排除固定 LoRA invocation / MOSS settings。当前 Block 或祖先关闭时拒绝；裸特殊 entry 沿用 `_explicit` 补括号以保证空正文可解析。
+- 复用窗口 flush / FIFO、Session 历史及 Details pointer guard，一次批量操作一个撤销步骤；走 stateless Document，不收集 Pool、不占 Library writer。按钮提交中禁用，空 Content 不可用。
+- 验证：t70 **142 passed**；临时独立 LoRA fixture + 独立 Chrome **34 真实鼠标 checks**（nested/root/Schedule/Region/AVG、一次 Undo/Redo、ID/空行、正文失焦后单击、空列表），errors=[]；另直接 API 检查固定 LoRA、范围、boolean、关闭祖先和裸 entry。生产 ESM 语法及定向 diff 检查通过。非完整 ComfyUI / 模型执行验证；未操作个人库、正式实例或持久 8190，无 commit/push。临时脚本 `%TEMP%/xyz-content-batch-check.cjs`；需重启 ComfyUI + Ctrl+F5。
+
 ### 2026-10-14：Blocks 开关响应（假草稿 / 后端深拷贝与重复解析 / 整页重挂）
 
 - 现象：Settings 里 enable 一个 prompt 很快，随后 disable 明显变慢。实际与方向无关，是“上一次命令之后的下一次命令”慢。宿主把每次提交写回节点 `text` widget，节点内嵌 Monaco 与窗口共用同一 model，这次写入在 binding 的 `sync()` 之外，被当成用户输入记成一份与文档完全相同的草稿；下一条命令前 `flushEditor` 先提交它：`ReplaceText` + `sync_pool` 两次往返和两次 Blocks/Details 整页重绘。修复：`prompt_editor_binding.js` 中，内容等于 `session.text` 且无未提交草稿时不算草稿（同时不再无谓设置 `context.raw`，后者会跳过 mask 刷新）。

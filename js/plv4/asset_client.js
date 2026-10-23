@@ -22,7 +22,7 @@ export async function libraryDocumentRequest(operation, body) {
   // These commands introduce no pool tag identities or unresolved paths.
   // Deleted observation rows were never removed by observe; parked tags are
   // already included in the baseline. Keep them off the Library writer.
-  if (['LocateDetails', 'SetEnabled', 'Delete'].includes(body.command.type)) return documentRequest(operation, body);
+  if (['LocateDetails', 'SetEnabled', 'SetContentEnabled', 'Delete'].includes(body.command.type)) return documentRequest(operation, body);
   const command = body.command;
   const emptyBlock = command.type === 'InsertBlock' && !command.snapshot &&
     (command.form ? ['schedule', 'region', 'avg'].includes(command.form) : !command.text || /^\s*\{\s*\}\s*$/.test(command.text));

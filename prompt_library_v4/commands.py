@@ -18,10 +18,10 @@ from .model import (CommandError, EditorState, full_document, full_index,
 from .formatting import format_document, format_new_block
 
 _LAYOUT_COMMANDS = {"WrapSelection", "MoveBlock", "InsertBlock", "InsertEntry", "InsertLibraryBlock",
-                    "InsertLibraryPrompts", "MergeLibraryBlock", "EnableCandidate", "CompleteLibrary",
+                    "InsertLibraryPrompts", "MergeLibraryBlock", "MergeClassTags", "EnableCandidate", "CompleteLibrary",
                     "UpdateLibraryBlock", "SetSettings", "SetPromptSettings",
                     "SetRegion", "SetScheduleBoundary", "Delete"}
-_LOCAL_INSERT_COMMANDS = {"WrapSelection", "InsertBlock", "InsertEntry", "InsertLibraryBlock", "InsertLibraryPrompts", "MergeLibraryBlock", "EnableCandidate", "SetPromptSettings", "InsertLora"}
+_LOCAL_INSERT_COMMANDS = {"WrapSelection", "InsertBlock", "InsertEntry", "InsertLibraryBlock", "InsertLibraryPrompts", "MergeLibraryBlock", "MergeClassTags", "EnableCandidate", "SetPromptSettings", "InsertLora"}
 
 
 def _new_container(form):
@@ -497,7 +497,9 @@ def _pool_key(node):
 
 
 def _merge_pool_block(doc, parent, source, command):
-    if not parent.meta.get('pool') or source.meta.get('pool') != parent.meta['pool'] or source.meta.get('lora'):
+    class_tags = command['type'] == 'MergeClassTags'
+    pool = command.get('source', {}).get('id') if class_tags else parent.meta.get('pool')
+    if not pool or not parent.meta.get('pool') or source.meta.get('pool') != pool or source.meta.get('lora'):
         raise CommandError('invalid_pool', '只能合并属于同一个 Class 的普通 Block')
     if source.form != 'brace' or source.opaque:
         raise CommandError('invalid_asset', '合并需要完整普通 Block')
@@ -519,7 +521,7 @@ def _merge_pool_block(doc, parent, source, command):
         if key in prompts: return None
         prompts.add(key)
         return node
-    position = _position(parent, command)
+    position = start = _position(parent, command)
     for child in source.children:
         occurrence = [*command['occurrence'], child.id]
         if _pool_block(child):
@@ -533,6 +535,7 @@ def _merge_pool_block(doc, parent, source, command):
         parent.children.insert(position, part); position += 1
         if _pool_block(part): format_new_block(doc, part)
         scan(part)
+    return position != start
 
 
 def apply_command(state: EditorState, command: dict) -> EditorState:
@@ -676,22 +679,34 @@ def apply_command(state: EditorState, command: dict) -> EditorState:
                 node.meta.pop('region_enabled', None)
             else:
                 node.meta['region_enabled'] = False
-        elif kind == "SetEnabled":
-            if node is doc.root:
+        elif kind in ("SetEnabled", "SetContentEnabled"):
+            content = kind == "SetContentEnabled"
+            if content and node.kind != 'group':
+                raise CommandError("invalid_command", "select a block to switch its Content")
+            if not content and node is doc.root:
                 raise CommandError("root_switch", "the document root cannot be switched off")
             parent_map = _parents(doc)
-            parent = parent_map[node.id]
+            parent = node if content else parent_map[node.id]
             while parent is not doc.root:
                 if not parent.enabled:
                     raise CommandError("disabled_ancestor", "enable the parent block first")
                 parent = parent_map[parent.id]
             if not isinstance(command["enabled"], bool):
                 raise CommandError("invalid_command", "enabled must be boolean")
-            # Empty bare entry bodies need braces to remain parsable.
-            owner = parent_map[node.id]
-            if owner.form in ("schedule_entry", "region_entry", "avg_entry"):
-                _explicit(owner)
-            node.enabled = command["enabled"]
+            def switch(target):
+                # These are fixed syntax/settings, never Content switches.
+                if content and (target.meta.get('lora_invocation') or target.form == 'moss'):
+                    return
+                # Empty bare entry bodies need braces to remain parsable.
+                owner = parent_map[target.id]
+                if owner.form in ("schedule_entry", "region_entry", "avg_entry"):
+                    _explicit(owner)
+                target.enabled = command["enabled"]
+                if content:
+                    for child in target.children:
+                        switch(child)
+            for target in node.children if content else [node]:
+                switch(target)
         elif kind == "Delete":
             parent = _parents(doc).get(node.id)
             if parent is None:
@@ -839,12 +854,17 @@ def apply_command(state: EditorState, command: dict) -> EditorState:
             parent.children.insert(position, node)
             _normalise_schedule(doc, parent)
             _locate(result, node.id)
-        elif kind == 'MergeLibraryBlock':
+        elif kind in ('MergeLibraryBlock', 'MergeClassTags'):
             parent = _node(doc, command['parent_id']); _ordinary_parent(parent)
-            if command.get('source', {}).get('kind') != 'block' or not isinstance(command.get('occurrence'), list):
-                raise CommandError('invalid_asset', '合并需要 Library Block 来源')
+            source_kind = 'class' if kind == 'MergeClassTags' else 'block'
+            if command.get('source', {}).get('kind') != source_kind or not isinstance(command.get('occurrence'), list):
+                raise CommandError('invalid_asset', '合并需要 Library Block / Class 来源')
             source = DocNode.from_json(command['snapshot'])
-            _merge_pool_block(doc, parent, source, command)
+            added = _merge_pool_block(doc, parent, source, command)
+            if kind == 'MergeClassTags' and not added:
+                # A repeated insert leaves the whole snapshot/history untouched.
+                result = deepcopy(state); result.revision += 1
+                return result
             _normalise_schedule(doc, parent)
             _locate(result, parent.id)
         elif kind in ("InsertBlock", "InsertEntry", "InsertLibraryBlock", "EnableCandidate", "InsertLibraryPrompts"):

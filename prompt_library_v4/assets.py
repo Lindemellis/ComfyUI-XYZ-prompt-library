@@ -366,13 +366,23 @@ def move_into_block(conn, previous, destination, expected):
     return dest['id'] + '/' + target.id
 
 
-def folder_block(conn, folder_id, fill=False):
+def folder_block(conn, folder_id, fill=False, recursive=False):
     pool_asset(conn, folder_id); asset = row(conn, folder_id)
     node = EditorState.create(text='{ }').doc.root.children[0]
     node.meta = {'name':asset['name'], 'pool':folder_id}
     if fill:
-        for value in conn.execute("SELECT data_json FROM assets WHERE kind='tag' AND parent_id=? ORDER BY position,id",(folder_id,)):
-            child = DocNode.from_json(json.loads(value['data_json'])['snapshot']); child.enabled = True; child.sep = ', '; node.children.append(child)
+        seen = set()
+        def collect(pool_id):
+            for value in conn.execute("SELECT id,kind,data_json FROM assets WHERE parent_id=? ORDER BY position,id",(pool_id,)):
+                if recursive and value['kind'] in ('class', 'folder'):
+                    collect(value['id'])
+                elif value['kind'] == 'tag':
+                    child = DocNode.from_json(json.loads(value['data_json'])['snapshot'])
+                    key = tag_key(child)
+                    if recursive and key in seen: continue
+                    seen.add(key)
+                    child.enabled = True; child.sep = ', '; node.children.append(child)
+        collect(folder_id)
     renumber(node); set_header_dict = set_header(node.to_json(), asset['path'])
     return {'snapshot':set_header_dict, 'source':{'kind':'class','id':folder_id,'version':asset['version'],'path':asset['path']}}
 
@@ -569,7 +579,7 @@ class MutationOp:
                     node.__dict__.update(DocNode.from_json(set_header(node.to_json(),saved['path'])).__dict__); state.doc=refresh_document(state.doc)
                 state.revision+=1
             if state.valid and not command.get('defer_pool'):
-                library_changed = observe(conn,state,body.get('owner'),collect=action!='observe',suppress=command.get('type') in ('Delete','SetEnabled','LocateDetails')) or library_changed
+                library_changed = observe(conn,state,body.get('owner'),collect=action!='observe',suppress=command.get('type') in ('Delete','SetEnabled','SetContentEnabled','LocateDetails')) or library_changed
             if action=='sync_pool': state.revision+=1
             if action!='observe': response={'state':state.to_json(),'projection':projection(state),'edit':text_edit(previous.text,state.text)}
         else: raise CommandError('invalid_action','未知 Library 操作')
@@ -635,7 +645,7 @@ class AssetLibrary:
                     try: result[asset_id]=row(conn,asset_id)['version']
                     except CommandError: pass
                 return {'revision':revision,'versions':result}
-            if action in ('class_block','folder_block'): return {**folder_block(conn,args['id'],args.get('fill',False)),'revision':revision}
+            if action in ('class_block','folder_block'): return {**folder_block(conn,args['id'],args.get('fill',False),args.get('recursive',False)),'revision':revision}
             if action=='expand':
                 snapshot=expand(conn,args['id']); validate_snapshot(snapshot)
                 return {'snapshot':snapshot,'source':snapshot['meta']['source'],'revision':revision}

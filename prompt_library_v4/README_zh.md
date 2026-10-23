@@ -94,6 +94,8 @@ Schedule / Region 容器的第一层只放阶段 / 区域 entry；从容器的�
 
 每个 Block 都有 **Content**：按文档实际顺序显示 prompt / subblock，可递归编辑，关闭项原位灰显或划掉。开关负责启停，**×** 删除当前副本的内容。权重输入框左右的 **− / +** 每次增减 **0.05**，也可直接输入。
 
+Content 顶部的 **Disable all / Enable all** 一次关闭 / 启用全部内容，包含嵌套子 Block 和提示词，保留内容及顺序，不改变当前 Block 自身开关。每次操作可一步撤销 / 重做；当前 Block 或祖先关闭时不可用。
+
 Region 和 Schedule 设置默认展开，并记住手动折叠状态。Region 父 Block 的设置也包含各 Region 子 Block 的区域参数。PLv3 Region / Schedule 语法不变。
 
 Schedule / Region **容器**不提供 Shuffle、Dropout、Random select 或 Format 设置，这些选项用于 entry 或正文 Block。Format 对直接子项逐项套用，subblock 的完整输出作为一项，保留它自己的权重 / 时间包装。Dropout 为 **0–1、步长 0.05** 的滑条，拖动显示数值，松开记一次撤销。Random select 的两个框分别为 **a / b**，要求非负整数且 **a ≤ b**：先在闭区间内随机数量 c，再无放回选择 c 个直接子项；不足 c 个时全部保留。两个框留空关闭该设置，**0 / 0** 表示不选择任何子项。
@@ -176,7 +178,7 @@ Content、Pool prompt 及候选 Block 的展开预览共用自动补全 / relate
 - 已添加项持续显著标记，包括关闭的项；Class、Block、Prompt 仍有各自明确的样式。
 - 支持**全部展开 / 折叠**，以及可组合的独立筛选：类型（全部 / Prompt / Block）与使用状态（全部 / 未添加）。
 - 展开候选 Block 只读预览；加入后的副本从 Content 编辑。
-- Subclass 的 **+ subblock** 新建临时子 Block，绑定该子 Class，放入其本层全部散装 tag，默认启用，不自动保存到库。
+- Subclass 的 **＋内容** 将它及全部后代 Subclass 的散装 tag 直接合并到当前 Block，复用保存 Block 的去重规则；已有项保持位置和启用状态。**＋子 block** 则新建绑定该 Subclass 的子 Block，装入整棵子树的散装 tag 并默认启用。不包含候选 Block 的内容，不自动保存到库；两种插入均可整体撤销。
 
 从 Class 的专用插入 handle 拖到编辑器，会在目标位置新建**绑定该 Class 的空 Block**；拖到 Block 内部则创建子 Block。已有 Block 的绑定从设置显式修改。保存 Block 保留**保留结构**和**只插 prompts**两种插入方式。
 

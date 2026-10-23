@@ -56,9 +56,11 @@ V3 独立 Editor／Library 不再启动。旧 workflow 节点、共用语言和�
 
 ## 界面入口
 
-顶栏提供 XYZ Gallery，以及 **XYZ Tools** 菜单中的 V4 编辑器、原 V3 编辑器/库、TagDB 维护、设置、Krita 和可选 Agent 启动器。提示词节点的 **Editor** 按钮打开 V4 窗口，V3 节点继续兼容。
+顶栏提供 XYZ Gallery，以及 **XYZ Tools** 菜单中的 V4 编辑器、TagDB 维护、设置、Krita 和可选 Agent 启动器。提示词节点的 **Editor** 按钮打开 V4 窗口，已弃用的 V3 节点继续兼容。
 
 V4 将有序 **Content** 和可选 **Pool** 候选分开：用 **+** 添加，在 Content 编辑或关闭，显式保存常用 Block。单击 Library 浏览共用一个临时标签；编辑或双击后常驻。拖拽、搜索、Region / Schedule 设置和迁移见 [V4 手册](prompt_library_v4/README_zh.md)。
+
+Settings 的 Content 提供 **Disable all / Enable all**，批量启停全部嵌套内容，每次操作可一步撤销。Pool 的 Subclass 行提供 **＋内容**，按保存 Block 的去重规则将整棵子树的散装 tag 合并到当前 Block；也可用 **＋子 block** 插入绑定该 Subclass 的新子 Block。合并时已有 tag 保持顺序与开关状态，不包含候选 Block 的内容。
 
 ## 数据与隐私
 

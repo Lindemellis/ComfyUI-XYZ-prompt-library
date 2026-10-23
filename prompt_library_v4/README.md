@@ -92,6 +92,8 @@ Schedule/Region containers contain only stage/region entries at their first leve
 
 Every block has **Content** in the settings pane. It follows actual document order, including disabled items, and lets you edit prompts and nested subblocks. Switches enable or disable; **×** removes content from this copy. Weight controls use **− / +** in steps of **0.05** and also accept direct input.
 
+**Disable all / Enable all** at the top of Content switches all content, including nested blocks and prompts, preserving content and order. The current block's own switch stays unchanged. Each action takes one undo/redo step. The buttons are unavailable while the current block or an ancestor is disabled.
+
 Region and Schedule settings open expanded by default and remember folding choices. A Region parent's settings include region controls for its subblocks. PLv3 Region/Schedule syntax is unchanged.
 
 Schedule and Region containers omit Shuffle, Dropout, Random select and Format controls; use them on entries or body blocks. Format applies to direct children, treating each subblock's complete output as one item while preserving its own weight/schedule wrappers. Dropout is a 0–1 slider with a 0.05 step and one undo step per release. Random select has integer bounds **a / b**, with **0 ≤ a ≤ b**: draw c from the inclusive range, then select c direct children without replacement, capped at the available count. Leave both fields empty to disable it; **0 / 0** selects none. Header type badges precede the block name; Schedule interval and Region setting badges follow it.
@@ -170,7 +172,7 @@ Content, Pool prompts and expanded candidate Block previews use the same **🖼*
 - Added entries remain visibly marked, even when disabled. Class, block and prompt styles stay distinct.
 - Use **expand all / collapse all**, a type filter (**All / Prompt / Block**) and an independent usage filter (**All / Unused**). Filters can be combined.
 - Expand candidate blocks for read-only previews; edit inserted copies in Content.
-- A Subclass's **+ subblock** creates a temporary child bound to that Subclass, filled with its local loose tags, enabled by default. It does not save a Library block.
+- A Subclass's **＋内容** merges loose tags from its entire subtree into the current Block, using the saved-Block deduplication rules and preserving existing items' positions and enabled states. **＋子 block** inserts those tags in a new child bound to that Subclass, enabled by default. Neither action includes candidate Block contents or automatically saves a Library Block. Each insertion takes one undo step.
 
 Drag a Class's dedicated insertion handle into the editor to create an **empty block bound to that Class**. Dropping inside a block creates a child. Change an existing block's binding explicitly in settings. Saved blocks support **keep structure** and **prompts only** insertion.
 
