@@ -82,9 +82,9 @@ export function replaceTextPreservingFolding(model, next) {
   model.applyEdits([{ range, text: next.slice(s, e2) }]);
 }
 
-/** Round to 3 decimals and clamp — kills the 1.2000000004 that plain float adds give. */
-function clampRound(v, min, max) {
-  return Math.min(max, Math.max(min, Math.round(v * 1000) / 1000));
+/** Round to 3 decimals — kills the 1.2000000004 that plain float adds give. */
+function roundWeight(v) {
+  return Math.round(v * 1000) / 1000;
 }
 
 /** A number as short source text: 1.1 not 1.100, 0.95 not 0.9500. */
@@ -94,7 +94,7 @@ function fmtNum(v) {
 
 /** One Ctrl+↑/↓ step on a piece of prompt text. Returns the rewritten text.
  *
- *   - `<lora:name:0.8>`  -> bump the LoRA weight (its own range; may go negative)
+ *   - `<lora:name:0.8>`  -> bump the LoRA weight
  *   - `(tag:1.1)`        -> bump the attention weight; back to bare `tag` at exactly 1.0
  *   - `tag`              -> wrap it: `(tag:1.05)`
  *
@@ -103,7 +103,7 @@ function fmtNum(v) {
 function bumpWeight(text, dir, s) {
   const lora = text.match(/^<([^:<>]+):([^:<>]+):(-?\d*\.?\d+)(?::(-?\d*\.?\d+))?>$/);
   if (lora) {
-    const w = clampRound(parseFloat(lora[3]) + dir * s.loraStep, s.loraMin, s.loraMax);
+    const w = roundWeight(parseFloat(lora[3]) + dir * s.loraStep);
     const clip = lora[4] !== undefined ? `:${lora[4]}` : '';
     return `<${lora[1]}:${lora[2]}:${fmtNum(w)}${clip}>`;
   }
@@ -111,7 +111,7 @@ function bumpWeight(text, dir, s) {
   const att = text.match(/^\(\s*([\s\S]*?)\s*:\s*(-?\d*\.?\d+)\s*\)$/);
   const inner = att ? att[1] : text;
   const weight = att ? parseFloat(att[2]) : 1.0;
-  const nw = clampRound(weight + dir * s.weightStep, s.weightMin, s.weightMax);
+  const nw = roundWeight(weight + dir * s.weightStep);
   if (Math.abs(nw - 1.0) < 1e-9) return inner;   // neutral again — drop the parens
   return `(${inner}:${fmtNum(nw)})`;
 }

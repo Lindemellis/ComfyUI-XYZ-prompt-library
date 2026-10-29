@@ -3,6 +3,7 @@
 import { provideCompletions, braceContextsText } from '../plv3/complete.js';
 import { indexTree } from './details.js';
 import { canInsertContainer } from './drop_preview.js';
+import { mossAllows } from './output_mode.js';
 
 export function textModel(text, session) {
   const lines = text.split('\n');
@@ -25,7 +26,10 @@ export async function nativeCompletions(text, caret, session) {
   const monaco = { languages: { CompletionItemKind: { Struct: 1, Module: 2 }, CompletionItemInsertTextRule: { InsertAsSnippet: 4 } } };
   const result = await provideCompletions(monaco, model, position, { onInsertBlock: true });
   const map = indexTree(session.parent.projection.tree), owner = map.get(session.owner);
+  const moss = session.parent.state?.doc?.root?.meta?.output_mode === 'moss';
+  const mossForm = { '@region': 'moss_region' };
   return result.suggestions.filter(item => {
+    if (moss && mossForm[item.label]) return !owner || mossAllows(owner, mossForm[item.label]);
     if (item.label === '@region' && (braceContextsText(before).includes('region') || session.canInsertRegion === false || (owner && !canInsertContainer(owner, 'region', map)))) return false;
     return !item.command || typeof item.command.arguments[0] === 'object';
   }).map(item => {

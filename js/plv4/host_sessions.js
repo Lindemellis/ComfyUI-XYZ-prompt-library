@@ -95,7 +95,7 @@ export class NodeSessions {
     if (context.bindings.has(pane)) return;
     pane.syncOnBlur = false;
     pane.params = () => this.inputs(context.node);
-    const binding = bindPromptEditor(pane, context.session, { onError: report, onDraft: text => this.persist(context, text) });
+    const binding = bindPromptEditor(pane, context.session, { onError: report, onDraft: text => this.persist(context, text), isExternalUpdate: () => this.writing.has(context.node) });
     context.bindings.set(pane, binding);
   }
   unbind(context, pane) { context?.bindings.get(pane)?.dispose(); context?.bindings.delete(pane); }
@@ -118,23 +118,33 @@ export class NodeSessions {
     let seed = widget(node, 'seed')?.value;
     const modeInput = node.inputs?.find(i => i.name === 'region_mode');
     let regionMode = widget(node, 'region_mode')?.value || 'couple';
-    if (input?.link != null || modeInput?.link != null) {
+    const moss = this.contexts.get(node)?.session.state.doc.root.meta?.output_mode === 'moss';
+    const dimensions = {};
+    const linkedSize = moss && node.inputs?.some(i => ['width', 'height'].includes(i.name) && i.link != null);
+    if (input?.link != null || modeInput?.link != null || linkedSize) {
       // graphToPrompt propagates virtual widgets and calls their callbacks. Mark
       // the entire graph read before invoking it, and share concurrent readers,
       // so those callbacks cannot recursively start another Preview/lint read.
       this._inputPrompt ??= Promise.resolve().then(() => this.app.graphToPrompt()).finally(() => { this._inputPrompt = null; });
       const prompt = await this._inputPrompt;
       const resolved = prompt.output[String(node.id)]?.inputs;
-      seed = resolved?.seed;
-      regionMode = resolved?.region_mode;
+      seed = input?.link != null ? resolved?.seed : (resolved?.seed ?? seed);
+      regionMode = modeInput?.link != null ? resolved?.region_mode : (resolved?.region_mode ?? regionMode);
       // Virtual/Primitive/global widget links are resolved by ComfyUI itself.
       // A backend-only upstream node is evaluated at execution, never guessed.
       if (Array.isArray(seed)) throw new Error('seed 由上游节点计算；运行工作流后查看实际输出。');
       if (Array.isArray(regionMode)) throw new Error('region_mode 由上游节点计算；运行工作流后查看实际输出。');
+      if (moss) for (const name of ['width', 'height']) {
+        const value = resolved?.[name];
+        // Backend-only dimensions are unknown until execution. The editor can
+        // still compile captions with provisional source rectangle coordinates.
+        if (Array.isArray(value)) continue;
+        if (value != null) dimensions[name] = value;
+      }
     }
     if (!Number.isSafeInteger(Number(seed))) throw new Error('节点 seed 必须是可准确表示的整数');
     if (!['couple', 'mask'].includes(regionMode)) throw new Error('region_mode 必须为 couple 或 mask');
-    return { seed: Number(seed), region_mode: regionMode };
+    return { seed: Number(seed), region_mode: regionMode, ...dimensions };
   }
   async flush() { await Promise.all([...this.contexts.values()].map(async c => { await c.session.flushDrafts(); await c.session.whenIdle(); await c.session.commitPool(); this.persist(c); })); }
   remove(node) {

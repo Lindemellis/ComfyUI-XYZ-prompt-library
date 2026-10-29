@@ -23,7 +23,15 @@ class PromptLibraryV4Node(PromptNodeSchema):
         'Resolved rectangle/image masks. Connect to XYZ PLV4 Mask Preview / Attach Masks.')
 
     @classmethod
-    def IS_CHANGED(cls, text='', seed=0, region_mode='couple', doc='', **_):
+    def INPUT_TYPES(cls):
+        schema = super().INPUT_TYPES()
+        # Append sockets, preserving every historical widget/socket position.
+        schema['optional'].update(width=('INT', {'forceInput': True, 'min': 16, 'max': 16384, 'step': 16}),
+                                  height=('INT', {'forceInput': True, 'min': 16, 'max': 16384, 'step': 16}))
+        return schema
+
+    @classmethod
+    def IS_CHANGED(cls, text='', seed=0, region_mode='couple', doc='', width=None, height=None, **_):
         # LoRA block markers protect the invocation during its own randomisation.
         # Other presentation/pool metadata remains irrelevant to generation.
         try:
@@ -34,12 +42,12 @@ class PromptLibraryV4Node(PromptNodeSchema):
         except (ValueError, TypeError, KeyError, AttributeError, OSError):
             # A broken resource must never reuse an earlier successful execution.
             return float('nan')
-        return hashlib.sha256(f'{content}\0{seed}\0{region_mode}\0plv4'.encode()).hexdigest()
+        return hashlib.sha256(f'{content}\0{seed}\0{region_mode}\0{width}\0{height}\0plv4'.encode()).hexdigest()
 
-    def execute(self, text='', seed=0, region_mode='couple', doc='', **_):
+    def execute(self, text='', seed=0, region_mode='couple', doc='', width=None, height=None, **_):
         # A supplied corrupt document must surface, not silently execute older text.
         state = EditorState.create(doc=json.loads(doc)) if doc and doc.strip() else EditorState.create(text=text)
-        result = compile_document(state, seed=seed, region_mode=region_mode, include_metadata=True)
+        result = compile_document(state, seed=seed, region_mode=region_mode, include_metadata=True, width=width, height=height)
         return result['prompt'], result['plain'], result['metadata'], result['mask_bundle']
 
 

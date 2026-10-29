@@ -20,17 +20,24 @@ from .formatting import format_document, format_new_block
 _LAYOUT_COMMANDS = {"WrapSelection", "MoveBlock", "InsertBlock", "InsertEntry", "InsertLibraryBlock",
                     "InsertLibraryPrompts", "MergeLibraryBlock", "MergeClassTags", "EnableCandidate", "CompleteLibrary",
                     "UpdateLibraryBlock", "SetSettings", "SetPromptSettings",
-                    "SetRegion", "SetScheduleBoundary", "Delete"}
+                    "SetRegion", "SetScheduleBoundary", "Delete", "ConvertRegionContainer"}
 _LOCAL_INSERT_COMMANDS = {"WrapSelection", "InsertBlock", "InsertEntry", "InsertLibraryBlock", "InsertLibraryPrompts", "MergeLibraryBlock", "MergeClassTags", "EnableCandidate", "SetPromptSettings", "InsertLora"}
 
 
-def _new_container(form):
+def _new_container(form, moss=False):
+    if moss and form != 'moss_region':
+        raise CommandError('moss_unsupported', 'MOSS mode has ordinary blocks and region blocks only')
+    if not moss and form == 'moss_region':
+        raise CommandError('moss_only', 'Region blocks belong to MOSS mode')
+    if form == 'moss_region':
+        node = _fragment('[@region mask: [0, 0.5, 0, 1], type: object]: { }')
+        node.meta['name'] = 'Region'
+        return node
     if form == "schedule":
         node = _fragment("[@schedule]: { 0 - 0.5: { }, 0.5 - 1: { } }")
         names = ["阶段 1", "阶段 2"]
     elif form == "region":
-        node = _fragment("[@region]: { [base]: { } [mask: [0, 0.5, 0, 1]]: { } "
-                         "[mask: [0.5, 1, 0, 1]]: { } [fill]: { } }")
+        node = _fragment("[@region]: { [base]: { } [mask: [0, 0.5, 0, 1]]: { } [mask: [0.5, 1, 0, 1]]: { } [fill]: { } }")
         names = ["Base", "Mask 1", "Mask 2", "Fill"]
     elif form == 'avg':
         node = _fragment('[@avg]: { 1: { }, 1: { } }')
@@ -89,6 +96,81 @@ def region_head(value):
     return "[" + ", ".join(parts) + "]"
 
 
+def moss_region_head(region, moss_type):
+    """`[@region mask: […], type: …]`: a MOSS region block's head."""
+    if not isinstance(region, dict) or region.get('kind', 'mask') != 'mask':
+        raise CommandError('invalid_setting', 'a MOSS region needs a rectangle mask')
+    if moss_type not in ('object', 'character', 'text'):
+        raise CommandError('invalid_setting', 'MOSS type must be object, character or text')
+    # Feather / weights mean nothing to MOSS: the head carries the rectangle only.
+    head = region_head({'kind': 'mask', 'mask': region.get('mask')})
+    return '[@region ' + head[1:-1] + ', type: ' + moss_type + ']'
+
+
+def moss_settings_text(canvas):
+    """The whole `[@moss]: { … }` line (canvas None = leave out)."""
+    parts = []
+    if canvas is not None:
+        if canvas not in ('single', 'multi_panel', 'collage'):
+            raise CommandError('invalid_setting', 'canvas must be single, multi_panel or collage')
+        parts.append('canvas: ' + canvas)
+    return '[@moss]: { ' + ', '.join(parts) + (' }' if parts else '}')
+
+
+def _moss_settings_node(doc, create=True):
+    found = next((n for n in doc.root.children if n.form == 'moss'), None)
+    if found is None and create:
+        found = _clone_ids(doc, _fragment(moss_settings_text(None)))
+        found.sep = '\n'
+        doc.root.children.insert(0, found)
+    return found
+
+
+def _region_container_to_blocks(doc, container):
+    """Unwrap a `[@region]` container into MOSS region blocks, keeping every body
+    (and its identity). Mask entries take their old type and visible text;
+    base / fill / IMASK bodies become caption blocks."""
+    parents = _parents(doc)
+    owner = parents[container.id]
+    replacements = []
+    for entry in container.children:
+        _explicit(entry)
+    # Read every head before rewriting any: a half-converted container no longer parses.
+    _, index = full_index(doc)
+    regions = {entry.id: index[entry.id].settings.region for entry in container.children}
+    for entry in container.children:
+        region = regions[entry.id]
+        start = entry.open.index('{')
+        moss = entry.meta.get('moss', {})
+        if region is not None and region.kind == 'mask':
+            label = moss.get('type') if moss.get('type') in ('object', 'character', 'text') else 'object'
+            # MOSS has no use for feather / weights: a region block is the rectangle.
+            value = dict(kind='mask', mask=list(region.mask))
+            entry.open = moss_region_head(value, label) + ': ' + entry.open[start:]
+            entry.form = 'moss_region'
+            if label == 'text' and moss.get('text', '').strip():
+                literal = re.sub(r'([\\{}\[\]])', r'\\\1', moss['text'])
+                text = _clone_ids(doc, _fragment('{ ' + literal + ' }.set{type: text}'))
+                if entry.children:
+                    _separate(entry.children[-1])
+                entry.children.append(text)
+        else:
+            entry.open = entry.open[start:]
+            entry.form = 'brace'
+        moss = {k: v for k, v in moss.items() if k == 'upsample'}
+        if moss: entry.meta['moss'] = moss
+        else: entry.meta.pop('moss', None)
+        if '\n' not in entry.sep:
+            entry.sep = '\n'  # blocks at the top level stand on their own lines
+        entry.enabled = entry.enabled and container.enabled  # a parked container parks its regions
+        replacements.append(entry)
+    at = owner.children.index(container)
+    if replacements:
+        replacements[-1].sep = container.sep
+    owner.children[at:at + 1] = replacements
+    return replacements
+
+
 def setting_value(key, value):
     if key == "seed":
         raise CommandError("node_seed_only", "PLv4 randomness uses the ComfyUI node seed input")
@@ -113,6 +195,10 @@ def setting_value(key, value):
         return "{" + ", ".join(_number(n) for n in _interval(value)) + "}"
     if key == "region":
         return region_head(value)
+    if key == "type":
+        if value not in ('caption', 'meta', 'palette', 'tag', 'text'):
+            raise CommandError("invalid_setting", "type must be caption, meta, palette, tag or text")
+        return value
     if key in ("weight", "dropout"):
         result = _number(value)
         if value < 0 or (key == "dropout" and value > 1):
@@ -488,6 +574,29 @@ def _pool_block(node):
                 and node.children[0].enabled and (node.children[0].kind != 'group' or node.children[0].form == 'paren'))
 
 
+def _append_pool_prompt(parent, part, position):
+    """Keep the closing-brace layout line at the end when appending a prompt."""
+    if (position != len(parent.children) or not parent.children or _pool_block(part)
+            or parent.form == 'root' or not re.match(r'\s*\n[ \t]+', parent.lead or '')):
+        return
+    previous = parent.children[-1]
+    if _pool_block(previous):
+        return  # A subblock and the following prompt deliberately occupy separate lines.
+    closing = re.match(r'\s*', parent.close or '').group()
+    tail = previous.sep + closing
+    layout = re.search(r'\n[ \t]*\Z', tail)
+    if not layout:
+        return
+    # Only the final line belongs to the closing brace. Earlier Enter/blank
+    # lines remain at the insertion boundary, including before period items.
+    previous.sep = tail[:layout.start()]
+    _separate(previous)
+    if not previous.sep[-1:].isspace():
+        previous.sep += ' '
+    parent.close = parent.close[len(closing):]
+    part.sep = part.sep.rstrip(' \t') + layout.group()
+
+
 def _pool_key(node):
     while node.kind == 'group' and len(node.children) == 1 and (node.form == 'paren' or node.meta.get('presentation') == 'prompt'):
         node = node.children[0]
@@ -532,6 +641,7 @@ def _merge_pool_block(doc, parent, source, command):
         if part is None: continue
         part.meta['occurrence'] = occurrence
         _separate(part)
+        _append_pool_prompt(parent, part, position)
         parent.children.insert(position, part); position += 1
         if _pool_block(part): format_new_block(doc, part)
         scan(part)
@@ -540,6 +650,10 @@ def _merge_pool_block(doc, parent, source, command):
 
 def apply_command(state: EditorState, command: dict) -> EditorState:
     """Return a new state, or reject atomically. Never mutate the caller's snapshot."""
+    return apply_checked(state, command)
+
+
+def _apply_command(state: EditorState, command: dict) -> EditorState:
     if isinstance(command.get("revision"), bool) or not isinstance(command.get("revision"), int) or command.get("revision") != state.revision:
         raise CommandError("stale_revision", "document changed; recompute the target against its new revision")
     result = deepcopy(state)
@@ -591,15 +705,15 @@ def apply_command(state: EditorState, command: dict) -> EditorState:
             raise CommandError('invalid_selection', '无法把这段文字转换为 block')
         _locate(result, block_id)
     elif kind == "ReplaceText":
-        result.replace_text(command["text"])
+        anchor = command.get('insert_anchor')
+        if anchor is not None and (not isinstance(anchor, dict) or any(key not in ('parent_id','before_id','edge','run_ids') for key in anchor)):
+            raise CommandError('invalid_boundary', 'invalid text insertion anchor')
+        result.replace_text(command["text"], edit_parent=anchor.get('parent_id') if anchor else None)
         # Native text runs are anchored between actual document children,
         # including parked blocks with no source offsets. Move the complete
         # edited run back into that gap; new text must not push existing run
         # items across a parked block's remembered numeric index.
-        anchor = command.get('insert_anchor')
         if anchor and result.valid:
-            if not isinstance(anchor, dict) or any(key not in ('parent_id','before_id','edge','run_ids') for key in anchor):
-                raise CommandError('invalid_boundary', 'invalid text insertion anchor')
             parent = _node(result.doc, anchor['parent_id'])
             _ordinary_parent(parent)
             old_ids = {part.id for part in state.doc.root.walk()}
@@ -666,12 +780,16 @@ def apply_command(state: EditorState, command: dict) -> EditorState:
         doc = result.doc
         local_format_id = None
         node = _node(doc, command["id"]) if "id" in command else None
+        if node and node.form == 'moss' and kind in ('SetEnabled', 'Delete', 'MoveBlock', 'SetSettings', 'SetMetadata'):
+            raise CommandError('moss_settings', 'The MOSS settings block cannot be switched off, deleted or moved')
         if node and node.meta.get('lora_invocation') and kind not in ('LocateDetails',):
             raise CommandError('fixed_lora', '请从 LoRA block 设置编辑权重；删除或关闭整个 block')
         if kind == "LocateDetails":
             _locate(result, node.id)
         elif kind == 'SetRegionEnabled':
-            if node is None or node.form != 'region':
+            if node is not None and node is doc.root and doc.root.meta.get('output_mode') == 'moss':
+                pass  # MOSS: the node itself is the region container
+            elif node is None or node.form != 'region':
                 raise CommandError('special_setting', 'Select a Region container to enable or bypass its region functionality.')
             if not isinstance(command.get('enabled'), bool):
                 raise CommandError('invalid_setting', 'Region functionality enabled must be boolean.')
@@ -717,8 +835,24 @@ def apply_command(state: EditorState, command: dict) -> EditorState:
                 _locate(result, parent.id)
         elif kind == "SetMetadata":
             patch = command["patch"]
-            if not isinstance(patch, dict) or any(k not in ("name", "source", "pool", "occurrence") for k in patch):
+            if not isinstance(patch, dict) or any(k not in ("name", "source", "pool", "occurrence", "moss", "output_mode", "sentence_case", "moss_weights") for k in patch):
                 raise CommandError("invalid_metadata", "unsupported editing metadata")
+            if any(k in patch for k in ('output_mode', 'sentence_case', 'moss_weights')) and (node.form != 'root' or result.scope != 'document'):
+                raise CommandError('invalid_metadata', 'Output settings belong to the workflow document root')
+            if 'output_mode' in patch and patch['output_mode'] not in ('prompt_control', 'moss'):
+                raise CommandError('invalid_metadata', 'Unknown output mode')
+            if patch.get('output_mode') == 'moss':
+                # The document settings line is always there to be seen in MOSS mode.
+                _moss_settings_node(doc)
+            for key in ('sentence_case', 'moss_weights'):
+                if key in patch and type(patch[key]) is not bool: raise CommandError('invalid_metadata', f'{key} must be boolean')
+            if 'moss' in patch:
+                meta = patch['moss']
+                if not isinstance(meta, dict) or set(meta) - {'upsample'}:
+                    raise CommandError('invalid_metadata', 'Invalid MOSS settings: type and text are written in the region block')
+                if 'upsample' in meta and type(meta['upsample']) is not bool: raise CommandError('invalid_metadata', 'MOSS upsample must be boolean')
+                patch = deepcopy(patch)
+                patch['moss'] = {**node.meta.get('moss', {}), **meta}
             if "pool" in patch and (node.kind != "group" or node.form == "paren" or (patch["pool"] is not None and (not isinstance(patch["pool"], str) or not patch["pool"]))):
                 raise CommandError("invalid_metadata", "pool must be one Class id or null on a block")
             if "pool" in patch:
@@ -771,8 +905,32 @@ def apply_command(state: EditorState, command: dict) -> EditorState:
             if changed and changed.form != 'paren':
                 local_format_id = changed.id
                 format_new_block(doc, changed)
+        elif kind == 'SetMossSettings':
+            target = _moss_settings_node(doc)
+            _, index = full_index(doc)
+            config = index[target.id].moss_config or {}
+            canvas = command['canvas'] if 'canvas' in command else config.get('canvas')
+            _replace_shell(target, _fragment(moss_settings_text(canvas)))
+        elif kind == 'SetMossType':
+            if node.form != 'moss_region':
+                raise CommandError('special_setting', 'select a MOSS region block')
+            _, index = full_index(doc)
+            ast = index[node.id]
+            if command['moss_type'] != 'text' and any(index[c.id].settings.moss_field == 'text' for c in node.children if c.kind == 'group'):
+                raise CommandError('moss_structure', 'Change the text blocks to another type first')
+            region = dict(kind='mask', mask=list(ast.settings.region.mask))
+            _local_edits(doc, node, [(ast.spans.region_decl, moss_region_head(region, command['moss_type']))])
+        elif kind == 'ConvertRegionContainer':
+            if node.form != 'region':
+                raise CommandError('special_setting', 'select a Region container')
+            converted = _region_container_to_blocks(doc, node)
+            _locate(result, converted[0].id if converted else doc.root.id)
         elif kind == "SetRegion":
-            if node.form == "region_entry":
+            if node.form == 'moss_region':
+                _, index = full_index(doc)
+                ast = index[node.id]
+                _local_edits(doc, node, [(ast.spans.region_decl, moss_region_head(command["region"], ast.moss_type or 'object'))])
+            elif node.form == "region_entry":
                 _, index = full_index(doc)
                 _local_edits(doc, node, [(index[node.id].spans.region_decl, region_head(command["region"]))])
             else:
@@ -893,7 +1051,7 @@ def apply_command(state: EditorState, command: dict) -> EditorState:
             if kind == "InsertEntry":
                 source = _fragment("{ }")
             elif kind == "InsertBlock" and "form" in command:
-                source = _new_container(command["form"])
+                source = _new_container(command["form"], doc.root.meta.get('output_mode') == 'moss')
             elif "snapshot" in command:
                 source = DocNode.from_json(command["snapshot"])
             else:
@@ -927,6 +1085,8 @@ def apply_command(state: EditorState, command: dict) -> EditorState:
                 _attach_entry(doc, parent, part, command.get("entry"))
                 doc.root.children.remove(part)
                 _separate(part)
+                if kind == 'EnableCandidate':
+                    _append_pool_prompt(parent, part, position)
                 parent.children.insert(position, part)
                 if part.kind == 'group' and part.form != 'paren':
                     format_new_block(doc, part)
@@ -1032,6 +1192,31 @@ def apply_command(state: EditorState, command: dict) -> EditorState:
         detach_changed(result.doc)
     result.revision += 1
     return result
+
+
+# Typing in Source may write any structure (it is greyed out, never refused);
+# every structural command must leave MOSS structure no worse than it found it.
+_FREE_COMMANDS = {'ReplaceText', 'EditTextRun', 'ReplaceItem', 'SetEnabled', 'SetContentEnabled', 'LocateDetails', 'SetMetadata',
+                  'ExpandLibraryReference', 'Delete', 'BindMaskLibrary', 'UnbindMaskLibrary', 'SetRegionEnabled'}
+
+
+def _mode_violations(state):
+    from .model import mode_reasons
+    from .output_policy import options
+    if not state.valid or options(state.doc)['output_mode'] != 'moss':
+        return {}
+    _, complete = full_index(state.doc)
+    return mode_reasons(state.doc, complete)
+
+
+def apply_checked(state: EditorState, command: dict) -> EditorState:
+    after = _apply_command(state, command)
+    if command.get('type') not in _FREE_COMMANDS:
+        before = _mode_violations(state)
+        added = {k: v for k, v in _mode_violations(after).items() if k not in before}
+        if added:
+            raise CommandError('moss_structure', next(iter(added.values())))
+    return after
 
 
 def command_response(state: EditorState, command: dict) -> dict:

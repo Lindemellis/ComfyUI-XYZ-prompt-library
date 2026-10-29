@@ -56,6 +56,15 @@ def check_prompt(value, *, node_snapshot=True):
         raise ValueError('PLV4 metadata is missing prompt text or seed')
     if value.get('region_mode') not in ('couple', 'mask') or value.get('compiler_policy') != 'plv4':
         raise ValueError('Invalid PLV4 compiler policy')
+    if value.get('output_mode', 'prompt_control') not in ('prompt_control', 'moss'):
+        raise ValueError('Invalid PLV4 output mode')
+    if value.get('output_mode') == 'moss':
+        canvas = value.get('moss')
+        if not isinstance(canvas, dict) or any(
+            (type(canvas.get(k)) is not int or canvas[k] <= 0 or canvas[k] % 16)
+            for k in ('width', 'height') if canvas.get('items') or canvas.get(k) is not None
+        ):
+            raise ValueError('Invalid MOSS canvas metadata')
     doc = value.get('document')
     if not isinstance(doc, dict) or doc.get('version') != 2 or not isinstance(doc.get('root'), dict):
         raise ValueError('PLV4 metadata requires a Document v2 snapshot')

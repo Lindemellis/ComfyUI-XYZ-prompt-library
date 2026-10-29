@@ -4,6 +4,27 @@
 
 ## 文档入口与优先级
 
+### 2026-10-29：本地累积改动发布
+
+- 用户授权将当前本地改动提交并推送 GitHub：包含 MOSS 输出与扩写节点、Blocks 输入和提交性能、重复空 Block 身份、LoRA 子目录路径及 Pool 追加换行修复。下方历史条目的「未提交 / 无 commit/push」指各轮实施当时状态。
+- 本次发布前定向 Python（t70/t74/t83/t87/t59/t60/t47/t48/t49）**406 passed**；DocumentSession 与 asset routing 两个 Node 文件 **14 passed**。沿用各功能条目记录的浏览器验证范围，不将其当作本次重新执行的验收。
+- 不发布个人数据库、workflow、HANDOFF 或临时资产，不重启正式 ComfyUI / 持久 8190；更新生效需重启 ComfyUI 后 Ctrl+F5。
+
+### 2026-10-28：Class Pool 添加 prompt 偶发多出换行
+
+- `EnableCandidate` 追加 prompt 时，原末项的 sep 仍含闭括号排版换行；句号项无需自动补逗号、已有逗号项也不改 sep，因此该换行进入两个 prompt 之间，在 Blocks 中成为可见换行。纯词尾的自动补逗号路径恰好覆盖空白，故表现为偶发；候选快照本身不含换行。
+- `commands._append_pool_prompt` 只在已排版 Block 的 prompt 末尾追加时，把最后一条闭括号布局换行移给新末项，其余用户换行原位保留，并显式补齐旧末项分隔。`EnableCandidate` 与 Pool 内容合并复用；不重排其他 Block，不改变关闭项/ID/绑定。尾部匹配使用 `\Z`，不能用会匹配最终换行之前的 `$`。
+- 回归先复现失败再修复；t70/t74/t83 **192 passed**，覆盖句号/逗号/普通末项、用户换行、连续添加/序列化、权重、两类内容合并、关闭末项和无关源码。独立临时 Library + Chrome **31 项真实鼠标/DOM 检查**通过，包含 Pool 加入、Source/Blocks 往返、Undo/Redo，errors=[]。不是完整 ComfyUI 工作流或模型执行验收；临时脚本 `%TEMP%/xyz-pool-newline-check.cjs`。未改个人数据/正式服务/持久8190，无 commit/push；需重启 ComfyUI 后 Ctrl+F5。
+
+### 2026-10-27：Blocks 提交卡顿与相同空 AVG entry 串写
+
+- Chrome 156 / CDP 在独立真实 CPU ComfyUI（8197）复现：新建 AVG 后向第一个空 entry 输入，再点击第二个，两个位置都显示同文。共享 reconcile 的相同源码优先匹配把未编辑的第二项匹配到第一项 ID，编辑项获得另一个 ID；缓存中的旧输入 DOM 随该 ID 一起搬移。普通相同空 Block / 多层相同祖先也有同一风险。
+- Native RunSession 的所有空输入都携带 `insert_anchor.parent_id`。V4 在核对 parent body 以外源码不变后，为 reconcile 提供 enabled-child ordinal path，固定 owner 及祖先身份；owner 内仍用原 matching / parked 规则。共享 Source / V3 不传 path，默认行为不变；不修改 AST 缓存。t70 新增 AVG、普通与多层相同空 Block 的三项回归，关闭 path 的进程内对照全部失败，修复后通过。
+- `BlockView.closeEditor` 只使已编辑 body 及祖先的 cache key 失效，不再 clear 整页。框架 / header / body 分别复用；正文未变时保留 native field，子项变化只在原父框架里对齐 DOM。折叠摘要仍随内容刷新。工作流副本节点 861 的同一路径，提交后整页重绘约 73ms → 约 6ms；这是隔离页面的一次对照，不是所有工作流/整机响应保证。打开窗口后 idle 预热共享 `NativeEditorInput`，仍复用 Monaco 的输入、配对和权重操作。
+- Settings 的非 opaque / 非 paren Block 普通 header 设置与 AVG weight / Schedule boundary / Region switch 走 stateless Document，不占 Library writer；原子 prompt / attention 权重、内容、类型与 pool 绑定仍走原收录路径。来源版本按 Library revision 和 IDs 共用请求，库事件清理缓存。只改 owner header 时，Details 保持未变的 Content / Pool 原 DOM；内容、enabled、模式、绑定或 Library revision 改变时重建。实际权重点击确认只有一次 Document command、无 Library mutate / 重复 versions read，保留的 Content 批量按钮仍更新当前文档。
+- 验证：t70 / t59 / t60 / t81 定向 **203 passed / 1 deselected**；被排除的既有 t81 节点测试仍硬编码 V4 只有两个输出（现有实现为四个），与本修复无关。Session / 新增 asset routing 两个 Node 文件 **14 passed**。独立真实 Chrome **20 专项键鼠检查 + 原有 16 Content checks**，errors=[]，覆盖 AVG 三种 blur 目的地、独立续写、Undo/Redo/Source 往返、重复 Ctrl+↑/↓ 不逐键提交、关闭项/空行、新建自动聚焦、Content/Pool/正文 DOM 身份、折叠摘要、实际 More click 与 hover submenu。另试跑的旧 inline suite 有缺 `draftCompletions` 等桩依赖和旧 suggestion 断言；旧 drag suite 有 Region/Schedule 菜单顺序断言，未为这些既有桩修改产品。四个生产 ESM、三个 Python AST 与定向 diff 检查通过。
+- 工作流 `My_workflow/anima_workflow_3.json` 只读加载到 scratch；Library 用 SQLite readonly backup 副本，无模型执行。浏览器扩展未连接、用户 Chrome 未开放 9222，使用独立 Chrome；未停止用户 Chrome、正式服务或持久 8190，未写个人 workflow / DB，无 commit/push。临时脚本、CPU profiles、截图与日志在 `%TEMP%/xyz-oct27-*`；临时服务和独立 Chrome 于结束时关闭。**本轮需重启正式 ComfyUI，再 Ctrl+F5，不能仅刷新来加载后端身份修复。**
+
 ### 2026-10-23：Content / Subclass 功能发布
 
 - 用户随后授权更新 GitHub 和 README。本次提交仅含 Content 批量启停、Pool Subclass 两种插入及对应中英文说明；根 README 移除已退役的 V3 独立 Editor / Library 菜单入口描述。此前实施条目中的「无 commit/push」指当时状态。
@@ -20,6 +41,42 @@
 - Content 顶部增加 Disable all / Enable all；`SetContentEnabled` 单条原子命令递归改变当前 Block 的全部后代 enabled，保留当前 Block、自身以外的兄弟、稳定 ID、内容和顺序，排除固定 LoRA invocation / MOSS settings。当前 Block 或祖先关闭时拒绝；裸特殊 entry 沿用 `_explicit` 补括号以保证空正文可解析。
 - 复用窗口 flush / FIFO、Session 历史及 Details pointer guard，一次批量操作一个撤销步骤；走 stateless Document，不收集 Pool、不占 Library writer。按钮提交中禁用，空 Content 不可用。
 - 验证：t70 **142 passed**；临时独立 LoRA fixture + 独立 Chrome **34 真实鼠标 checks**（nested/root/Schedule/Region/AVG、一次 Undo/Redo、ID/空行、正文失焦后单击、空列表），errors=[]；另直接 API 检查固定 LoRA、范围、boolean、关闭祖先和裸 entry。生产 ESM 语法及定向 diff 检查通过。非完整 ComfyUI / 模型执行验证；未操作个人库、正式实例或持久 8190，无 commit/push。临时脚本 `%TEMP%/xyz-content-batch-check.cjs`；需重启 ComfyUI + Ctrl+F5。
+
+### 2026-10-21：恢复被 Git reset 撤掉的 LoRA 子目录路径修复
+
+- 用户报告近期 PLV4 LoRA 不生效，并指出 Claude 之前已修复。核对历史会话与真实 Git 对象：2026-10-18 的 `fe86f79` 已在共享 IR 的 `native_lora` / Lora render 分支修正 Windows 路径，且提交了 `t80::test_lora_folder_separators_follow_this_machine`。reflog 记录 2026-10-19 17:45:35 -0400 reset 到 `b204244`，这两处在当前工作区均缺失。reflog 能证实回退，不能据此断言是谁或为何执行。不是 prompt-control 新改了格式，也不是本轮 Blocks 性能改动删除了路径处理。
+- 原样恢复该提交的两处实现及既有回归测试，保留当前 IR 的 MOSS 排除分支和其他未提交改动；没有整体 cherry-pick / reset / 自动迁移个人数据。Document / Source 仍存 `/`，仅编译出的 LoRA 名称按 `os.sep` 输出，供 PC 与本机 `folder_paths.get_filename_list` 精确匹配。恢复前，真实 PC resolver + 8188 文件列表对 `anima/clothing/Anima_Harem_Outfit.safetensors` 返回 None；反斜杠全路径和无扩展名 basename 均找到真实文件。
+- 只读检查近期 history / PNG metadata：00:52:16 成功图的所有 PLV4 LoRA Block 均关闭且外部 Loader 无 active；后续三次启用 Anima_Harem_Outfit（model=.5 / clip=1）的尝试均在 KSampler 被中断，但编译调用确实因路径未匹配而被 PC 丢弃。01:00:04 成功图的 PLV4 LoRA 仍全关闭，改由外部 LoRA Manager 以 1 / 1 加载该 LoRA。metadata 记录调用不等于模型实际应用。
+- 验证：恢复的 t80 路径回归先失败（native_lora 不存在），恢复后通过；t80 共 **30 passed / 1 既有失败**。既有失败为 invalid draft 的 IS_CHANGED 返回 NaN 而旧测试要求 hash 长度；进程内将 native_lora 置为 identity、关闭本修复后仍同样失败，未为此扩改缓存。ComfyUI Python / CPU 下用三次真实 API 提交文档，经过 V4 compile → 当前安装 PC parser → consolidate_schedule → PCLazyLoraLoader.execute 的 **17 项断言通过**，确认生成真实文件路径的 LoraLoader 图、输入链与 .5 / 1 权重，并确认关闭项不输出 LoRA。不加载实际权重、不采样，不声称已验收修后画面。Python AST / 定向 diff 检查通过。
+- **需重启正式 ComfyUI 才能载入恢复的后端实现，Ctrl+F5 不能替代重启。** 未重启/停止正式实例、未提交队列、未改个人 workflow / DB、无 commit/push。证据与只读快照在 TEMP `xyz-lora-diagnosis-61_qg691`；本轮未启动持久测试服务。
+
+### 2026-10-21：Blocks 大段粘贴 / 全选删除响应
+
+- 约 3,080 字符的森林场景正文在真实隔离 ComfyUI Monaco 节点中，全选删除原耗时约 330–430ms；Chromium 逐一删除 prompt span / 拖放 decoration，触发约 148 次布局和 220 次样式计算，后端失焦提交并非主要瓶颈。局部 CSS containment 无明显改善，单一原生文本节点对照约 24ms。
+- `block_view.js`：超过 16 个有效叶子的 TextRun 合并连续启用正文为原生文本节点，仅关闭项保留 parked span。显示 / Source offsets 继续复用 `displayRun`；点击和右键按源映射定位 prompt，缓存 card 前序正文长度变化时以当前 projection 校正偏移。CSS Custom Highlight 保留选中反馈（低于 Find 的优先级）；拖放按字符位置解析同一 before/after 命令，以独立 caret marker 显示插入点。未改变 Document、解析器、顺序、关闭项、历史或原生 Backspace / Delete / Enter 行为；无 Highlight API 时保留原渲染。
+- `design_components.js` 删除 plaintext-only 上多余的 paste → execCommand(insertText) 转发：原一次多段粘贴触发 16 个 input，现浏览器原生一次 input，保留准确段落与尾部空行。`typeInline` 合并同一轮等待 ready 的草稿持久化。
+- 同场景关闭项验收发现 Blocks 草稿回写共享 Monaco 被当作第二份 Source 草稿，重复 ReplaceText，Undo 先撤掉无效重复提交。`NodeSessions.bind` 给 binding 传入现有 writing guard；宿主同步只更新 observed，不建立 Source 草稿，真正 Source 输入仍按原历史提交。不要仅用 text===session.text 判草稿来源：原生 run 输入与 reconcile 后 parked 分隔空白可能不同。
+- 定向验证：独立 CPU ComfyUI（8197）+ 独立 Chrome、Monaco 节点 / Nodes 1.0，25 项真实剪贴板 / 键鼠检查通过，覆盖逐项选中与高亮、右键、实际拖放、缓存偏移、Source 输入 / 往返 / Undo、关闭项批量删除与单步 Undo、尾部空行和原生 Backspace；errors=[]。原有 Content click 16 项通过；Session Node suite 13 项通过。六个改动 ESM 语法与定向 diff 检查通过。额外旧 menu suite 在修前 / 修后均因预期 Schedule 在 Region 前的顺序断言失败（实际 submenu 已正确打开，现有 insertForms 顺序为 Region / Schedule / AVG），未改其测试或产品菜单以迎合旧断言。
+- 最终版本三轮相同正文：删除键鼠往返 32 / 32 / 46ms；原生粘贴 74–96ms（自动化另含固定 50ms 等待），每次只有一个 input / persist；粘贴失焦提交 58–72ms。以上是该隔离页面的操作耗时，非帧率或所有工作流的保证。
+- 仅前端，Ctrl+F5 生效，不需重启后端。正式进程、个人 Library / workflow、持久 8190 未操作，无 commit/push。临时观察脚本 / profile / fixture 在 TEMP `xyz-bulk-input-zkrjfmzk`，不放入正式安装或个人库。自有 CPU fixture PID8504 / port8197 和轻量 fixture PID34204 已按完整命令行核对关闭，独立 Chrome 均由脚本 finally 关闭。
+
+### 2026-10-19：MOSS 输出模式与逐区域扩写
+
+同一 V4 节点 General Settings 新增 Output mode / Sentence case；MOSS 复用矩形 Region，支持 character / object / text 和独立 literal text。可选 width / height 直接输入，仅执行实际矩形时缺项报错；没有有效矩形时输出 simple prompt，无需宽高，有矩形时输出原生 Layout JSON。编译走独立 `moss.py`，不经 COUPLE / AND、无 ambient 注入；共享语言 AST 只读，复制后求值。随机复用 `_randomise`，V4 忽略 group seed。`output_policy.py` 同步 projection / resource resolve / 编译排除规则，MOSS 不读取被排除的 IMASK 图片资源。
+
+同日修复用户实报 Preview 已接宽高仍报错及空 Monaco 执行要求尺寸：`host_sessions.inputs` 不再因后端尺寸 link 数组中断，保留未连接 seed/mode widget；Session compile 显式 preview=true，后端默认仍是执行严格模式。先完成随机选择，再对实际 items 做坐标换算 / 尺寸校验；Preview 缺宽高返回 normalized yxyx（旧像素 / 混合空间明确单位）+ preview_notice / preview_only，不产出 metadata。零 items 的空 / 纯文本 / 区域关闭 / 排除输出无需尺寸；version1 metadata 对无 items 快照允许缺尺寸，区域快照仍必须有画布。不要重新在 compiler 入口无条件校验尺寸。
+
+Mask Library `mask_editor.js`：选中矩形在局部绘制序列最后画，命中先判断选中矩形内部 / handles，再查其他矩形；不改变 canvas.masks 数据顺序 / stable ID / 输出映射。仅显式拖动列表 handle 才排序。
+
+上述修正验证：t87 78 项、同组 Python 合计 273 passed / 1 torch skip；Session 13 和 Window 预览定向 2 passed。全量 Window suite 六项现有桩依赖缺失（window / maskBindings / folderNameControl / containerForms），未扩改生产代码以迎合桩。真实 Nodes 1.0 浏览器 34 检查通过，覆盖实际后端尺寸连线的比例预览、注入已知数值的最终坐标显示、重叠矩形真实鼠标选中 / 移动 / resize 及持久顺序；已知数值路径不是 Primitive 集成验收。真实队列三例：空 / 普通 MOSS Monaco 无尺寸执行成功、后端 Resolution 连接输出最终像素 Layout 成功。临时 fixture 与截图仍在 TEMP xyz-moss-comfy-athshjwb，无模型推理或正式数据写入。
+
+输出设置保存在 Document root meta，SetMetadata 和历史共用；加载 Library 文档先保留当前节点设置再重建 projection。旧 workflow 的 width / height 在 onConfigure 追加，绝不能重排旧输入和四个输出。旧模式默认值与编译结果保持；region_mode 继续只存 couple / mask，不能用 moss 重解释它。MOSS 的类型 / literal / upsample 位于区域 meta.moss；部分字段命令必须合并，不能在正文 blur 与 checkbox 连续提交时覆盖 type。原文分隔规则已支持逗号 / 保留句号，本次不改 lexer。
+
+新增 XYZ PLV4 MOSS Upsample，输入 metadata + 原有 CLIP，逐 caption 调原生 TextGenerate；临时控制经 metadata 旁路，不污染最终 JSON。输出新 metadata 必须沿保存链传给 Image Metadata，否则记录的是扩写前提示词。缓存以模型 patch UUID / 身份和稳定区域 ID、内容、seed、生成配置区分，有界且不强持模型；未选区域、bbox、type、literal 不交给模型改写。普通权重需显式 NegPip weights + 外接节点；LoRA strength 在 MOSS UI 禁用，外部 Loader 才负责实际加载。
+
+同日用户明确扩写应对标 TextGenerate：现已补齐全部原生生成控制（含采样开关、所有 sampling 参数、thinking、template、MTP、自定义 system_prompt、可选 image/video/audio）。继续 V1 INPUT_TYPES 平铺以兼容 Nodes 1.0，不复制原生推理实现。prompt 为普通文本 / Layout，metadata 改 optional；metadata 单独输入时 prompt 留空，两者有值必须匹配。未连接 metadata 默认处理所有 caption；连接时遵守原开关，输出更新快照。第四槽追加 thinking（Layout 按稳定 ID 的 JSON）。普通文本 / summary 保留原 seed，区域派生；缓存包含全部参数与推理，多模态禁缓存；prompt dynamicPrompts=False 保护 JSON。max_length 与原生一致 1–32768，按每个 caption 计算。后续验证 260 passed / 1 torch skip、JS 13、一次性真实 Nodes 1.0 浏览器 23 检查；新增两次真实队列调用实际 TextGenerate + 合成 CLIP 成功，另 ComfyUI Python 原生 on/off / MTP / 模板 / reasoning 验证通过。未进行真实权重推理。
+
+验证与边界：定向 Python 241 passed / 1 torch skip（ComfyUI Python 补跑 1 passed），Session Node 13 passed；一次性真实 CPU ComfyUI + 独立 Chrome、明确 Nodes 1.0，共 19 真实键鼠检查，errors=[]，两次无模型节点执行 success。额外 t82 两项桩失败已在 HEAD TEMP baseline 原样复现（folder_paths.get_input_directory、mask_nodes package）。变更 Python / ESM 语法检查通过。未用真实 Qwen 权重扩写、未采样 MOSS，不宣称验证生成质量。细节与用法见 `../plv4_moss_plan.md` / README；fixture TEMP `xyz-moss-comfy-athshjwb`。个人库、原 workflow、正式 / 持久 8190 未改，无 commit/push；生效需重启正式 ComfyUI + Ctrl+F5。
 
 ### 2026-10-14：Blocks 开关响应（假草稿 / 后端深拷贝与重复解析 / 整页重挂）
 

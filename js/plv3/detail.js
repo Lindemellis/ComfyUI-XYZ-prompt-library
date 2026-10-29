@@ -25,8 +25,17 @@ import {
   T, button, div, dualSlider, el, field, fmt, iconButton, input, numberInput,
   sectionLabel, slider, splitter, tint, toggle, treeRow,
 } from './theme.js';
-import { loraRange, settings, weightRange } from './settings.js';
+import { settings } from './settings.js';
 import { showConfirm, showContextMenu, showPrompt, toast } from './ui.js';
+
+function weightInput(value, onCommit, isLora = false) {
+  const field = numberInput(value, { step: isLora ? settings().loraStep : settings().weightStep });
+  field.style.width = '100%';
+  field.onchange = () => {
+    if (field.value !== '' && Number.isFinite(Number(field.value))) onCommit(Number(field.value));
+  };
+  return field;
+}
 
 // Which group cards the user has folded shut, remembered across reloads.
 //
@@ -1038,10 +1047,7 @@ export class DetailPane {
     if (body.kind === 'lora') { box.style.color = T.lora; box.style.fontFamily = T.mono; }
 
     const w = div('width:132px;flex-shrink:0;');
-    // A LoRA's weight is not a prompt weight: it lives inside `<…>` and may go negative
-    // (subtracting a style), so it gets its own range.
-    const range = node.kind === 'lora' ? loraRange() : weightRange();
-    w.append(slider(weight, range, { onCommit: (v) => this.itemWeight(node, v) }));
+    w.append(weightInput(weight, (v) => this.itemWeight(node, v), node.kind === 'lora'));
 
     row.append(box, w);
     // A plain item lives only in the text, so deleting it is just removing it from there.
@@ -1433,8 +1439,7 @@ export class DetailPane {
       row.append(box);
       const weight = this.enabledWeight(entry.node, src);
       const w = div('width:132px;flex-shrink:0;');
-      const range = isLora ? loraRange() : weightRange();
-      w.append(slider(weight, range, { onCommit: (v) => this.itemWeight(entry.node, v) }));
+      w.append(weightInput(weight, (v) => this.itemWeight(entry.node, v), isLora));
       row.append(w);
       row.append(iconButton('✕', 'Delete this item from the library and the text',
         () => this.deleteLibraryItem(group, { item: entry.item, text: entry.text, span: entry.node.span }, src)));
@@ -1469,8 +1474,7 @@ export class DetailPane {
     const w = div('width:132px;flex-shrink:0;');
     const remembered = isLora ? 1 : (this.memGet(group.header, entry.text) ?? 1);
     if (!isLora) {
-      w.append(slider(remembered, weightRange(),
-        { onCommit: (v) => this.memSet(group.header, entry.text, v) }));
+      w.append(weightInput(remembered, (v) => this.memSet(group.header, entry.text, v)));
     }
     row.append(w);
     row.append(iconButton('✕', 'Delete this item from the library',
@@ -1538,8 +1542,7 @@ export class DetailPane {
     const s = group.settings;
     switch (key) {
       case 'weight':
-        return field('weight', slider(s.weight ?? 1, weightRange(),
-          { onCommit: (v) => this.groupWeight(group, v) }));
+        return field('weight', weightInput(s.weight ?? 1, (v) => this.groupWeight(group, v)));
       case 'format':
         return field('format', textbox(s.format ?? '', (v) =>
           this.setField(group, 'format', `"${v.replace(/"/g, '\\"')}"`)));
@@ -1694,15 +1697,13 @@ export class DetailPane {
 
     // cond weight = semantic strength; every kind carries it (compiles to a trailing :w).
     const cw = div('width:110px;flex-shrink:0;');
-    cw.append(slider(r.cond_weight ?? 1, weightRange(),
-      { onCommit: (v) => this.setRegionField(group, 'cond_weight', fmt(v)) }));
+    cw.append(weightInput(r.cond_weight ?? 1, (v) => this.setRegionField(group, 'cond_weight', fmt(v))));
     row.append(chip('cond weight', cw));
 
     // mask weight = spatial share; base/mask/imask have it, fill does not.
     if (kind !== 'fill') {
       const mw = div('width:110px;flex-shrink:0;');
-      mw.append(slider(r.mask_weight ?? 1, weightRange(),
-        { onCommit: (v) => this.setRegionField(group, 'mask_weight', fmt(v)) }));
+      mw.append(weightInput(r.mask_weight ?? 1, (v) => this.setRegionField(group, 'mask_weight', fmt(v))));
       row.append(chip('mask weight', mw));
     }
 

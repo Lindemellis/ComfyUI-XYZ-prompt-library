@@ -12,17 +12,10 @@
 const KEY = 'xyz.plv3.settings';
 
 export const DEFAULTS = {
-  // Prompt weight — `(tag:1.2)`. 2.0 is already extreme for most models; the range is
-  // what the slider can REACH, so a wider one only makes the useful part harder to hit.
-  weightMin: 0,
-  weightMax: 2,
+  // Prompt weight — `(tag:1.2)`. Unbounded, with a configurable shortcut step.
   weightStep: 0.05,
 
-  // LoRA weight — `<lora:name:0.8>`. A different control with a different range: a
-  // negative LoRA weight is a real technique (subtracting a style), which is nonsense
-  // for a prompt weight, and that is why these are not one setting.
-  loraMin: -1,
-  loraMax: 2,
+  // LoRA weight — `<lora:name:0.8>`. Its shortcut step is independent.
   loraStep: 0.05,
 
   // Schedule — `[@schedule] 0 - 0.3:`. The step of the two-handle range slider. 0.05 is
@@ -41,7 +34,7 @@ export const DEFAULTS = {
   autosaveDelayMs: 400,
 };
 
-const state = { ...DEFAULTS, ...read() };
+const state = { ...DEFAULTS, ...Object.fromEntries(Object.entries(read()).filter(([key]) => key in DEFAULTS)) };
 
 function read() {
   try { return JSON.parse(localStorage.getItem(KEY) || '{}'); }
@@ -63,15 +56,4 @@ export function reset() {
   Object.assign(state, DEFAULTS);
   try { localStorage.removeItem(KEY); } catch { /* ignore */ }
   document.dispatchEvent(new CustomEvent('plv3:settings-changed', { detail: {} }));
-}
-
-/** The slider config a prompt weight control wants — read at render time, so a change
- *  in the settings panel shows up on the next repaint without a reload. */
-export function weightRange() {
-  return { min: state.weightMin, max: state.weightMax, step: state.weightStep };
-}
-
-/** ...and the LoRA one, which is genuinely a different range (it may go negative). */
-export function loraRange() {
-  return { min: state.loraMin, max: state.loraMax, step: state.loraStep };
 }

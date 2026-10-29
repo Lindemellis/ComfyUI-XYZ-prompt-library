@@ -8,6 +8,7 @@ import { DetailsPreferences } from './details_preferences.js';
 import { assetIcon } from './asset_icons.js';
 import { compactFolders, compareNames } from './folder_tree.js';
 import { regionMasks } from './mask_region.js';
+import { isMoss, outputOptions, fieldsAt, FIELD_LABELS } from './output_mode.js';
 
 export const isBlock = row => row.kind === 'group' && row.form !== 'paren' && !inlinePrompt(row);
 export function indexTree(tree) { const map = new Map(); const visit = n => { if (!n) return; map.set(n.id, n); n.children.forEach(visit); }; visit(tree); return map; }
@@ -26,6 +27,8 @@ export class DetailsPane {
   constructor(container, host) {
     this.container = container; this.host = host; this.sections = {}; this.promptStates = new WeakMap(); this.poolViews = new WeakMap(); this.scrollStates = new WeakMap(); this.poolFilters = new WeakMap(); this.poolPending = new WeakMap(); this.commandsPending = new WeakMap();
     this.preferences = new DetailsPreferences(host);
+    this.sourceVersions = new Map();
+    globalThis.window?.addEventListener('xyz-plv4-library-changed', () => this.sourceVersions.clear());
     container.addEventListener('pointerdown', event => this.retainClickTarget(event), true);
   }
   retainClickTarget(event) {
@@ -70,10 +73,15 @@ export class DetailsPane {
     if (!row) { this.container.replaceChildren(element('div', 'plv4-empty', '原稿尚未完成，先在 PLv3 中修复。')); return; }
     this.ownerId = row.id;
     const page = element('div', 'plv4-scroll plv4-details');
+    if (row.mode_disabled) page.append(element('p', 'setting-help plv4-error', row.mode_disabled + '. Preserved for Prompt Control mode.'));
+    if (isMoss(this.host) && row.form === 'region') page.append(button('转换为 Region blocks', '把每个 mask entry 变成一个 [@region …] block（保留类型、可见文字与扩写开关）',
+      () => this.command('ConvertRegionContainer', row), 'small-add'));
     const top = element('div', 'inspector-head');
     const name = input(row.meta?.name || '', value => this.command('SetMetadata', row, { patch: { name: value } }), { title: 'Block 名称' }); name.placeholder = 'Block 名称'; name.dataset.field = 'name';
     name.classList.add('detail-name'); top.append(name, button('×', '关闭 Details', () => this.host.toggleDetails(false), 'tiny-button')); page.append(top);
-    if (row.form !== 'root') {
+    if (row.form === 'moss') {
+      const section = this.section('MOSS'); this.mossSettings(section, session); page.append(section);
+    } else if (row.form !== 'root') {
       if (row.meta?.lora) {
         const section = this.section('LoRA');
         const match = row.children[0]?.source?.trim().match(/^<lora:[^:<>]+:([-+\d.eE]+)(?::([-+\d.eE]+))?>$/);
@@ -83,29 +91,45 @@ export class DetailsPane {
           this.field('CLIP strength', this.weightControl(clip, value => this.command('SetLoraStrength', row, { clip: value }), { title: 'CLIP strength' })),
           this.folderBinding(row, true),
           button('打开 LoRA 详情', '浏览此 LoRA 的预览图和触发词 Class', () => this.host.openLoraDetails(row.meta.lora.id), 'detail-open-lora'));
+        if (isMoss(this.host)) {
+          section.querySelectorAll('.detail-weight-control input,.detail-weight-control button').forEach(control => { control.disabled = true; });
+        }
         page.append(section);
       }
       const common = this.section('GENERAL');
-      common.append(this.field('Enable', check(row.enabled, enabled => this.command('SetEnabled', row, { enabled }))),
+      common.append(this.field('Enable', check(row.enabled, enabled => this.command('SetEnabled', row, { enabled }))));
+      const fields = isMoss(this.host) && ['brace', 'implicit'].includes(row.form) ? fieldsAt(byId.get(row.parent_id)) : [];
+      if (fields.length) {
+        const type = element('select'); type.setAttribute('aria-label', 'MOSS block type');
+        for (const field of fields) { const option = element('option', '', FIELD_LABELS[field]); option.value = field; type.append(option); }
+        type.value = row.settings?.type || 'caption';
+        type.onchange = () => this.host.run(() => this.setting(row, 'type', type.value === 'caption' ? null : type.value));
+        common.append(this.field('Type', type));
+      }
+      if (!isMoss(this.host) || outputOptions(this.host).moss_weights) common.append(
         row.form === 'avg_entry'
           ? this.field('AVG weight', this.weightControl(row.settings?.avg_weight ?? 1, value => this.command('SetAvgWeight', row, { value }), { min: 0, title: '相对混合权重；各 entry 按比例归一化，0 不参与' }))
-          : this.field('Weight', this.weightControl(row.settings?.weight ?? 1, value => this.setting(row, 'weight', value), { min: 0 })));
+          : this.field('Weight', this.weightControl(row.settings?.weight ?? 1, value => this.setting(row, 'weight', value))));
       page.append(common);
-      if (!['schedule', 'region', 'avg', 'avg_entry'].includes(row.form)) {
+      if (!['schedule', 'region', 'avg', 'avg_entry', 'moss'].includes(row.form) && row.settings?.type !== 'text') {
         const field = this.field('Format', input(row.settings?.format || '', value => this.setting(row, 'format', value || null), { title: '对直接子项套用格式，subblock 作为整体；$p 为该项内容' }));
         field.querySelector('input').classList.add('format-input');
         common.append(this.field('Shuffle', check(!!row.settings?.shuffle, value => this.setting(row, 'shuffle', value))), field);
         const random = this.section('RANDOM');
         random.append(this.randomSelect(row), this.dropout(row)); page.append(random);
       }
-      if (!['schedule', 'region', 'avg'].includes(row.form)) {
+      if (isMoss(this.host) && row.form === 'moss_region') {
+        const section = element('div');
+        this.regionFields(section, row.settings?.region || { kind: 'mask', mask: [0, 1, 0, 1] }, region => this.command('SetRegion', row, { region }), false, false, row);
+        const timing = this.section('REGION'); timing.append(...section.children); page.append(timing);
+      } else if (!isMoss(this.host) && !['schedule', 'region', 'avg'].includes(row.form)) {
         const timing = this.section('TIMING & REGION');
-        if (row.form === 'schedule_entry') this.interval(timing, row.settings.schedule, (value, side) => this.command('SetScheduleBoundary', row, { side, value }));
-        else {
+        if (!isMoss(this.host) && row.form === 'schedule_entry') this.interval(timing, row.settings.schedule, (value, side) => this.command('SetScheduleBoundary', row, { side, value }));
+        else if (!isMoss(this.host)) {
           timing.append(this.field('Schedule', check(!!row.settings?.schedule, enabled => this.setting(row, 'schedule', enabled ? [0, 1] : null))));
           if (row.settings?.schedule) this.interval(timing, row.settings.schedule, interval => this.setting(row, 'schedule', interval));
         }
-        if (row.form !== 'region_entry') timing.append(this.field('Region', check(!!row.settings?.region, enabled => this.setting(row, 'region', enabled ? { kind: 'base' } : null))));
+        if (row.form !== 'region_entry') timing.append(this.field('Region', check(!!row.settings?.region, enabled => this.setting(row, 'region', enabled ? (isMoss(this.host) ? { kind: 'mask', mask: [0, 1, 0, 1] } : { kind: 'base' }) : null))));
         if (row.settings?.region || row.form === 'region_entry') {
           const region = element('div'); this.region(region, row, row.form === 'region_entry');
           timing.append(...region.querySelectorAll('.plv4-field,.mask-coordinates,.mask-region-control'));
@@ -122,8 +146,8 @@ export class DetailsPane {
         this.sourceStatus(row, status, token).catch(error => { if (token === this.token) status.append(element('span', 'plv4-badge', error.message)); });
       }
     }
-    if (row.form === 'region') this.regionTiming(page, row);
-    if (['schedule', 'region', 'avg'].includes(row.form)) {
+    if (row.form === 'region' && !isMoss(this.host)) this.regionTiming(page, row);
+    if ((isMoss(this.host) ? ['region'] : ['schedule', 'region', 'avg']).includes(row.form)) {
       const entries = this.section({ schedule: 'Schedule entries', region: 'Region entries', avg: 'AVG entries' }[row.form]);
       if (row.form === 'region') {
         const enabled = row.meta?.region_enabled !== false;
@@ -137,7 +161,6 @@ export class DetailsPane {
         }, 'Enable region splitting for this container');
         toggle.setAttribute('aria-label', 'Enable Region functionality'); toggle.dataset.field = 'region-enabled';
         entries.append(this.field('Region', toggle));
-        if (!enabled) entries.append(element('p', 'setting-help', 'Region is off. Enabled entries merge into the prompt.'));
       }
       const regionTree = row.form === 'region' ? element('div', 'detail-contents-tree detail-region-tree') : null;
       if (regionTree) entries.append(regionTree);
@@ -151,23 +174,37 @@ export class DetailsPane {
       }
       entries.append(button('+', '添加 entry', () => this.host.addBlock(row.id, true))); page.append(entries);
     }
-    const prompts = this.section('Content');
-    prompts.classList.add('detail-content-section');
-    prompts.append(this.contentActions(row));
-    const contentTree = element('div', 'detail-contents-tree'); contentTree.dataset.depth = 0; prompts.append(contentTree);
-    this.localContents(row.children.filter(child => !child.meta?.lora_invocation), contentTree, session, row);
-    const folder = row.meta?.pool && this.host.library?.data?.assets?.find(asset => asset.id === row.meta.pool);
+    // Header-only edits (e.g. Block Weight) leave Content and Pool unchanged.
+    // Keep those often-large trees attached, with their focus and fold state.
+    const contentStamp = node => [node.id, node.kind, node.form, node.enabled, node.effective, node.mode_disabled,
+      node.children.length ? null : node.source, node.meta, node.settings, node.children.map(contentStamp)];
+    const output = outputOptions(this.host);
+    const tailKey = JSON.stringify([row.id, row.form, row.enabled, row.effective, row.mode_disabled, row.meta,
+      row.settings?.region, row.settings?.schedule, output.output_mode, output.moss_weights, this.host.library?.data?.revision, row.children.map(contentStamp)]);
+    const retainTail = this.mountedSession === session && this.mountedOwner === row.id && this.mountedTailKey === tailKey && this.container.contains(this.mountedPage);
     let pending = null;
-    if (!['schedule', 'region', 'avg'].includes(row.form)) prompts.append(button('＋ 添加 prompt', '添加 prompt', () => this.host.addPrompt(row), 'small-add'));
-    page.append(prompts);
-    if (row.meta?.pool && !['schedule', 'region', 'avg'].includes(row.form)) {
-      const poolSection = this.section('Pool'), poolTree = element('div', 'plv4-candidates pool-tree');
-      poolSection.classList.add('detail-pool-section');
-      poolSection.append(poolTree); page.append(poolSection);
-      if (folder) pending = this.candidates(session, row, row.meta.pool, poolTree, token).catch(error => {
-        if (token === this.token) poolTree.replaceChildren(element('p', 'pool-help', `池读取失败：${error.message}`));
-      });
-      else poolTree.append(element('p', 'pool-help', 'Class 已删除 / 不在本机。当前内容仍可在 Content 编辑。'));
+    if (retainTail) {
+      for (const name of ['Content', 'Pool']) {
+        const placeholder = element('div'); placeholder.dataset.retainSection = name; page.append(placeholder);
+      }
+    } else {
+      const prompts = this.section('Content');
+      prompts.classList.add('detail-content-section');
+      prompts.append(this.contentActions(row));
+      const contentTree = element('div', 'detail-contents-tree'); contentTree.dataset.depth = 0; prompts.append(contentTree);
+      this.localContents(row.children.filter(child => !child.meta?.lora_invocation), contentTree, session, row);
+      const folder = row.meta?.pool && this.host.library?.data?.assets?.find(asset => asset.id === row.meta.pool);
+      if (!['schedule', 'region', 'avg', 'moss'].includes(row.form)) prompts.append(button('＋ 添加 prompt', '添加 prompt', () => this.host.addPrompt(row), 'small-add'));
+      if (row.form !== 'moss') page.append(prompts);
+      if (row.meta?.pool && !['schedule', 'region', 'avg'].includes(row.form)) {
+        const poolSection = this.section('Pool'), poolTree = element('div', 'plv4-candidates pool-tree');
+        poolSection.classList.add('detail-pool-section');
+        poolSection.append(poolTree); page.append(poolSection);
+        if (folder) pending = this.candidates(session, row, row.meta.pool, poolTree, token).catch(error => {
+          if (token === this.token) poolTree.replaceChildren(element('p', 'pool-help', `池读取失败：${error.message}`));
+        });
+        else poolTree.append(element('p', 'pool-help', 'Class 已删除 / 不在本机。当前内容仍可在 Content 编辑。'));
+      }
     }
     const poolSectionKey = `${row.id}:${row.meta?.pool || ''}:section`, sectionKey = `${row.id}:Pool`;
     const views = this.preferences.map(session, 'views');
@@ -195,11 +232,26 @@ export class DetailsPane {
       // never collapses to an empty placeholder between toggle and redraw.
       this.rememberScroll();
       const scroll = this.scrollStates.get(session)?.get(row.id) || { outer: 0, inner: 0 };
-      this.container.replaceChildren(page); page.scrollTop = scroll.inner; this.container.scrollTop = scroll.outer;
+      let mounted = page;
+      if (retainTail && this.container.contains(this.mountedPage)) {
+        mounted = this.mountedPage;
+        const sections = new Map([...mounted.children].map(section => [section.querySelector('.section-title')?.textContent.trim(), section]));
+        const desired = [...page.children].map(part => part.dataset.retainSection ? sections.get(part.dataset.retainSection) : part).filter(Boolean);
+        const keep = new Set(desired); let at = mounted.firstChild;
+        for (const part of desired) {
+          while (at && !keep.has(at)) { const next = at.nextSibling; at.remove(); at = next; }
+          if (part === at) at = at.nextSibling;
+          else mounted.insertBefore(part, at);
+        }
+        while (at) { const next = at.nextSibling; at.remove(); at = next; }
+      } else {
+        this.container.replaceChildren(page); page.scrollTop = scroll.inner; this.container.scrollTop = scroll.outer;
+      }
+      this.mountedPage = mounted; this.mountedTailKey = tailKey;
       this.mountedSession = session; this.mountedOwner = row.id;
       // Kind changes are already committed; show their controls immediately and
       // retain keyboard focus without waiting for the select to lose focus.
-      if (regionKind !== null) [...page.querySelectorAll('select[data-region-kind]')].find(select => select.dataset.regionKind === regionKind)?.focus({ preventScroll: true });
+      if (regionKind !== null) [...mounted.querySelectorAll('select[data-region-kind]')].find(select => select.dataset.regionKind === regionKind)?.focus({ preventScroll: true });
     };
     if (pending) {
       if (this.mountedSession !== session || this.mountedOwner !== row.id) {
@@ -213,12 +265,37 @@ export class DetailsPane {
     this.mountGuard?.field.removeEventListener('blur', this.mountGuard.listener); this.mountGuard = null;
     this.session = session; this.ownerId = null;
     const control = this.host.regionModeControl; control.update();
-    if (this.mountedSession === session && this.mountedOwner === '@general' && this.container.contains(this.generalPage)) return;
+    const config = session.state.doc.root.meta || {};
+    // MOSS lists the region blocks here, so any document change may change the page.
+    const stamp = JSON.stringify([config.output_mode, config.sentence_case, config.moss_weights, config.moss, config.output_mode === 'moss' ? session.revision : 0]);
+    if (this.mountedSession === session && this.mountedOwner === '@general' && this.container.contains(this.generalPage) && this.generalStamp === stamp) return;
+    this.generalStamp = stamp;
     const page = element('div', 'plv4-scroll plv4-details plv4-general-page');
     const top = element('div', 'inspector-head');
     top.append(element('span', 'detail-name', 'General Settings'), button('×', '关闭 Settings', () => this.host.toggleDetails(false), 'tiny-button')); page.append(top);
-    const section = this.section('Region');
-    section.append(this.field('Region algorithm', control.element)); page.append(section);
+    const root = session.projection.tree;
+    const update = patch => this.command('SetMetadata', root, { patch });
+    const output = this.section('OUTPUT');
+    const mode = element('select'); mode.setAttribute('aria-label', 'Output mode');
+    for (const [value, label] of [['prompt_control', 'Prompt Control (Anima etc.)'], ['moss', 'MOSS Image']]) {
+      const option = element('option', '', label); option.value = value; mode.append(option);
+    }
+    mode.value = config.output_mode || 'prompt_control'; mode.onchange = () => update({ output_mode: mode.value });
+    output.append(this.field('Output mode', mode), this.field('Sentence case', check(!!config.sentence_case, value => update({ sentence_case: value }), 'Capitalize sentence starts in output only')));
+    page.append(output);
+    if (isMoss(this.host)) {
+      output.append(this.field('Summary upsample', check(!!config.moss?.upsample, value => update({ moss: { upsample: value } }))),
+        this.field('NegPip weights', check(!!config.moss_weights, value => update({ moss_weights: value }))));
+      const settings = this.section('MOSS'); this.mossSettings(settings, session); page.append(settings);
+      page.append(this.mossRegions(session));
+    } else {
+      const section = this.section('REGION'); section.append(this.field('Region algorithm', control.element)); page.append(section);
+    }
+    const folds = {};
+    for (const [key, open] of Object.entries(this.sections)) if (key.startsWith('@general:')) folds[key] = open;
+    for (const section of page.querySelectorAll(':scope > .section')) folds['@general:' + section.querySelector('.section-title').textContent.trim()] ??= true;
+    XYZPLv4Design.foldSections(page, { id: '@general', type: 'normal' }, folds);
+    page.querySelectorAll('details.section').forEach(detail => detail.addEventListener('toggle', () => { this.sections['@general:' + detail.querySelector('.section-title').textContent.trim()] = detail.open; }));
     this.container.replaceChildren(page);
     const scroll = this.scrollStates.get(session)?.get('@general');
     page.scrollTop = scroll?.inner || 0; this.container.scrollTop = scroll?.outer || 0;
@@ -267,6 +344,7 @@ export class DetailsPane {
     container.append(line, panel);
   }
   promptSetting(container, item, values, kind) {
+    if (isMoss(this.host) && (kind === 'schedule' || !outputOptions(this.host).moss_weights)) return;
     const card = element('div', 'prompt-setting'); card.dataset.settingKind = kind;
     const title = kind[0].toUpperCase() + kind.slice(1);
     const head = element('div', 'prompt-setting-head'); head.append(element('label', '', title));
@@ -357,7 +435,14 @@ export class DetailsPane {
   }
   async sourceStatus(row, container, token) {
     const source = row.meta.source; const expected = { ...source.dependencies, [source.id]: source.version };
-    const latest = await libraryRequest('versions', { ids: Object.keys(expected) }); if (token !== this.token) return;
+    const key = JSON.stringify([this.host.library?.data?.revision, Object.keys(expected).sort()]);
+    let read = this.sourceVersions.get(key);
+    if (!read) {
+      if (this.sourceVersions.size >= 100) this.sourceVersions.clear();
+      read = libraryRequest('versions', { ids: Object.keys(expected) }); this.sourceVersions.set(key, read);
+      read.catch(() => { if (this.sourceVersions.get(key) === read) this.sourceVersions.delete(key); });
+    }
+    const latest = await read; if (token !== this.token) return;
     if (!(source.id in latest.versions)) { container.append(element('span', 'plv4-badge', '来源已删除 · 本地快照保留')); return; }
     container.append(button('从库更新', '用最新来源更新此副本', () => this.host.updateSource(row)));
     if (Object.entries(expected).some(([id, version]) => latest.versions[id] !== version)) container.append(element('span', 'plv4-badge', '来源有更新'));
@@ -678,7 +763,7 @@ export class DetailsPane {
     if (row.meta?.region_enabled === false) {
       rail.classList.add('disabled'); handles.forEach(handle => { handle.disabled = true; });
     }
-    section.append(rail, label, element('p', 'setting-help', '外侧两点之外：整个 Region 不生效。外侧与内侧之间：不分区，条目合并成普通提示词。内侧之间：分区。'));
+    section.append(rail, label);
     page.append(section);
   }
   schedule(page, row) { const section = this.section('Schedule boundary'); this.interval(section, row.settings.schedule, (value, side) => this.command('SetScheduleBoundary', row, { side, value })); page.append(section); }
@@ -701,6 +786,28 @@ export class DetailsPane {
     if (!active) body.querySelectorAll('input,button,select').forEach(control => { control.disabled = true; });
     container.append(box);
   }
+  // The `[@moss]` line's canvas. Empty leaves the field out.
+  mossSettings(section, session) {
+    const root = session.projection.tree;
+    const row = root.children.find(child => child.form === 'moss'), config = row?.moss_config || {};
+    const write = values => this.command('SetMossSettings', root, values);
+    const canvas = element('select'); canvas.setAttribute('aria-label', 'MOSS canvas');
+    for (const value of ['', 'single', 'multi_panel', 'collage']) { const option = element('option', '', value || '—'); option.value = value; canvas.append(option); }
+    canvas.value = config.canvas || ''; canvas.onchange = () => this.host.run(() => write({ canvas: canvas.value || null }));
+    section.append(this.field('canvas', canvas));
+  }
+  // MOSS: the node is the region container. Same controls as a Region container.
+  mossRegions(session) {
+    const root = session.projection.tree, section = this.section('REGION');
+    const enabled = root.meta?.region_enabled !== false;
+    const toggle = check(enabled, value => this.command('SetRegionEnabled', root, { enabled: value }), 'Enable region splitting for this node');
+    toggle.setAttribute('aria-label', 'Enable Region functionality'); toggle.dataset.field = 'region-enabled';
+    section.append(this.field('Region', toggle));
+    const tree = element('div', 'detail-contents-tree detail-region-tree');
+    root.children.filter(child => child.form === 'moss_region').forEach((entry, index) => this.regionEntry(tree, root, entry, session, index));
+    section.append(tree, button('+', '添加 Region block', () => this.host.addBlock(root.id, true, 'moss_region')));
+    return section;
+  }
   region(page, row, entry) {
     const section = this.section('Region');
     const value = row.settings?.region || { kind: 'base' };
@@ -711,12 +818,24 @@ export class DetailsPane {
   regionFields(section, value, apply, allowNone = false, none = false, row = null) {
     const select = element('select');
     select.dataset.regionKind = row?.id || '';
-    for (const kind of [...(allowNone ? ['none'] : []), 'base', 'mask', 'imask', 'fill']) { const option = element('option', '', kind); option.value = kind; select.append(option); }
+    const kinds = isMoss(this.host) ? ['mask'] : ['base', 'mask', 'imask', 'fill'];
+    if (isMoss(this.host) && !none && !kinds.includes(value.kind)) kinds.push(value.kind);
+    for (const kind of [...(allowNone ? ['none'] : []), ...kinds]) { const option = element('option', '', kind); option.value = kind; option.disabled = isMoss(this.host) && !['none', 'mask'].includes(kind); select.append(option); }
     select.value = none ? 'none' : value.kind;
     select.onchange = () => this.host.run(() => apply(select.value === 'none' ? null : { ...value, kind: select.value, mask: select.value === 'mask' ? value.mask || [0, 1, 0, 1] : null, imask: select.value === 'imask' ? value.imask ?? 0 : null }));
     section.append(this.field('Kind', select));
     if (select.value === 'none') return;
-    if (row) regionMasks(section, row, this.host, value, apply);
+    if (row && (!isMoss(this.host) || value.kind === 'mask')) regionMasks(section, row, this.host, value, apply);
+    if (isMoss(this.host)) {
+      if (value.kind !== 'mask' || !row || row.form !== 'moss_region') return;
+      const type = element('select'); type.setAttribute('aria-label', 'MOSS element type'); type.dataset.regionKind = row.id;
+      for (const label of ['object', 'character', 'text']) { const option = element('option', '', label); option.value = label; type.append(option); }
+      type.value = row.moss_type || 'object';
+      type.onchange = () => this.host.run(() => this.command('SetMossType', row, { moss_type: type.value }));
+      const upsample = check(!!row.meta?.moss?.upsample, value => this.command('SetMetadata', row, { patch: { moss: { upsample: value } } }));
+      section.append(this.field('MOSS type', type), this.field('Upsample caption', upsample));
+      return;
+    }
     const keys = [...(['mask','imask'].includes(value.kind) ? ['feather'] : []), ...(value.kind !== 'fill' ? ['mask_weight'] : []), 'cond_weight'];
     for (const key of keys) {
       const change = number => apply({ ...value, [key]: number });

@@ -49,6 +49,7 @@ def _settings(s: Settings) -> dict:
         "schedule": list(s.schedule) if s.schedule else None,
         "region": _region(s.region),
         **({"region_window": list(s.region_window)} if s.region_window else {}),
+        **({"type": s.moss_field} if s.moss_field else {}),
     }
 
 
@@ -66,6 +67,7 @@ def _spans(s: Spans) -> dict:
         "region_fields": _fields(s.region_fields),
         "region_form": s.region_form,
         "schedule_form": s.schedule_form,
+        **({"block_head": _span(s.block_head)} if s.block_head else {}),
     }
 
 
@@ -96,6 +98,9 @@ def to_json(node: Node) -> dict:
             "settings": _settings(node.settings),
             "spans": _spans(node.spans),
             "children": [to_json(c) for c in node.children],
+            **({"block_type": node.block_type} if node.block_type else {}),
+            **({"moss_type": node.moss_type} if node.moss_type else {}),
+            **({"moss_config": dict(node.moss_config)} if node.moss_config is not None else {}),
         }
 
     raise TypeError(f"unknown node {node!r}")  # pragma: no cover

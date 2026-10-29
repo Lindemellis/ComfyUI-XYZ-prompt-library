@@ -53,7 +53,8 @@ def format_document(doc, *, depth=0, remember=True):
             else:
                 # A full stop stays with its item and is already a separator.
                 # Region segments have their own heads and need no commas.
-                comma = "" if node.form == "region" or render_all(child).rstrip().endswith(".") else ","
+                # The [@moss] settings line is configuration, not a prompt item.
+                comma = "" if node.form == "region" or child.form == "moss" or render_all(child).rstrip().endswith(".") else ","
                 following = node.children[index + 1]
                 # Prompts share a line at every depth; only a block takes its own.
                 whitespace = "\n" + indent if block(child) or block(following) else " "

@@ -2,7 +2,52 @@
 
 **English** | [中文](README_zh.md)
 
-Edit prompts as nested blocks, reuse saved combinations, and collect tags into Class pools. V4 uses the [PLv3 language](../prompt_library_v3/README.md) and compiles to [comfyui-prompt-control](https://github.com/asagi4/comfyui-prompt-control).
+Edit prompts as nested blocks, reuse saved combinations, and collect tags into Class pools. V4 uses the [PLv3 language](../prompt_library_v3/README.md) and outputs either [comfyui-prompt-control](https://github.com/asagi4/comfyui-prompt-control) syntax or MOSS Image prompts.
+
+## MOSS Image
+
+Select **General Settings → Output mode → MOSS Image** in the existing editor (classic Nodes 1.0 supported). The optional **width / height** sockets are required at execution only when MOSS actually emits rectangle regions (positive multiples of 16). Prompt Control does not require these sockets.
+
+With nothing but a caption (no region, meta, canvas or palette — a negative prompt, say) MOSS outputs plain text with the escapes as typed; anything else is Layout JSON (`{"summary": {...}}` alone when there is no region), empty fields left out. MOSS documents have a strict block structure:
+
+```text
+[@moss]: { canvas: single }
+{ poster, anime illustration }.set{type: meta}
+a shop interior, warm light.
+[@region mask: [0, 0.5, 0, 1], type: character]: {
+    a girl, school uniform.
+    { saber \(fate\), 1girl, { solo } }.set{type: tag}
+    { red, white }.set{type: palette}
+}
+[@region mask: [0.5, 1, 0, 0.3], type: text]: { bold red sign. { OPEN
+NOW }.set{type: text} }
+```
+
+- **Top level:** ordinary blocks, `[@region …]` blocks and the `[@moss]` line. A top-level block picks its **Type** in Details: caption / meta / palette (default caption), written `.set{type: …}`.
+- **Inside a region:** ordinary blocks typed caption / tag / palette, plus text in a `type: text` region. Subblocks pick no type: they inherit it, at any depth.
+- Library Classes and Blocks import as they are and take a Type afterwards; a Library block keeps its `[path]` head and `.set{format}`.
+- Captions join into `caption`; every meta / tag / palette item is one array entry (`summary.meta`, `summary.palette`, `items[].tags`, `items[].palette`), concatenated without duplicates. Text keeps its line breaks (`\n` counts) and fills `text` for text regions. Sentence case touches captions only.
+- **The MOSS block:** in MOSS mode the top of Blocks holds the one `[@moss]` block with a canvas dropdown (single / multi_panel / collage, empty to omit). It appears on switching to MOSS, cannot be deleted, switched off or moved, and is hidden in Prompt Control. General Settings shows canvas too.
+- Menus only offer what may stand there and drops refuse anything else; hand-written violations in Source are greyed out with a reason and left out.
+- There are no Region containers: the node is the container, and General Settings carries its Region switch and region list. With Region off, region captions, tags and palettes merge into the summary. An old `[@region]` container is greyed out in MOSS; **转换为 Region blocks** in Details converts it.
+- `\(` is written as a bare paren in the JSON (the encoder reads the JSON source, where ComfyUI's escape pass would leave one backslash). `plain` keeps the source escapes.
+- In Prompt Control, `[@region …]` reads as a block with that region; `[@moss]` and meta / palette blocks are not output; other types read as ordinary blocks.
+
+Rectangles retain their original coordinates; output uses centered pixel `yxyx` coordinates, rounded outward.
+
+**Upsample caption** on each region and **Summary upsample** in General Settings default to off. Connect PLV4 **metadata** and the MOSS **CLIP** to **XYZ PLV4 MOSS Upsample**. Its `prompt` goes to native CLIP Text Encode; its updated `metadata` goes to XYZ PLV4 Image Metadata for saving. Flags travel through metadata, not the final JSON. Only selected captions are rewritten; boxes, types, text, tags, palettes and order are retained. It reuses the existing text encoder and has a bounded caption cache. Disable any whole-prompt template upsampler after this node.
+
+Generation delegates to native **TextGenerate** with sampling on/off, temperature, top-k/top-p/min-p, repetition/presence penalties, seed, max_length (1–32768 per caption), thinking, template control, MTP, editable system_prompt and optional image/video/audio (encoder support required). Sampling controls remain flat for Nodes 1.0; off uses native greedy defaults. The default system prompt provides visual-caption expansion instructions and can be replaced or cleared; it applies to each selected caption.
+
+Standalone `prompt` + CLIP also works: prose calls TextGenerate once; Layout JSON expands the summary and every item.caption. Optional PLV4 metadata applies individual flags and produces updated saving metadata; leave prompt blank when using metadata alone, or connect matching prompt and metadata. Plain prompts retain the native seed, while regions derive independent seeds. The appended fourth `thinking` output contains native reasoning separately (keyed JSON for Layouts). JSON braces are protected from frontend dynamic prompt expansion. No PLV4 snapshot is fabricated without input metadata.
+
+**Sentence case** defaults to off and only changes output sentence starts, preserving Source, Document, Library, tags and visible text. It is a conservative character rule, protecting common abbreviations, URLs, underscore tags and mixed-case names, not a language model. Output settings survive loading saved Library documents.
+
+Schedule / AVG containers, timed blocks, IMASK, Base / Fill and conditioning format operations are excluded as entire subtrees in MOSS mode, with visible notices. Their original enabled flags/data remain intact and switching back restores them. Ordinary blocks, pools, random selection, shuffle and dropout remain available. Feather, mask/conditioning strengths and include-in-base do not map to Layout. **NegPip weights** optionally preserves prompt weighting syntax and requires an external MOSS-compatible CLIP NegPip node. LoRAs still require external model loaders; native text encoding does not load them from prompt syntax or metadata.
+
+Preview remains available without dimensions, including when connected backend nodes cannot yet resolve them. Captions and the complete Layout are shown with provisional normalized `yxyx` coordinates and a visible notice; legacy pixel rectangles retain explicit units. Resolved sizes produce final centered pixel coordinates. Provisional coordinates never enter execution or saved image metadata; executing actual regions still requires dimensions. `plain` provides flattened description text.
+
+In the Mask Library rectangle editor, the selected mask is displayed above other rectangles and receives overlapping drag/resize gestures first. Selection changes neither saved mask order nor output slots; use the list's drag handle to reorder masks.
 
 V3's standalone Editor / Library are retired and its Library writer no longer starts. Saved V3 nodes remain compatible and their Editor buttons open V4. Loading an old workflow preserves V3 compiler policy; opening its node in V4 adopts V4's node seed and LoRA behavior while retaining IDs and disabled items. V3 data remains intact and can still be explicitly imported with a backup.
 

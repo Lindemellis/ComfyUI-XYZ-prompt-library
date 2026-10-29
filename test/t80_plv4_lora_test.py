@@ -483,3 +483,13 @@ def test_lora_http_read_send_and_media_boundaries(browser):
                 assert (await client.post(base + '/xyz/plv4/loras/list', json=[])).status == 400
         finally: await runner.cleanup()
     asyncio.run(check())
+
+def test_lora_folder_separators_follow_this_machine():
+    # The browser stores posix paths; prompt-control compares names verbatim with
+    # folder_paths, which spells them with `\` on Windows.
+    from prompt_shared.language import ir
+    assert ir.native_lora('<lora:anima/clothing/x.safetensors:1>', '\\') == r'<lora:anima\clothing\x.safetensors:1>'
+    assert ir.native_lora(r'<lora:anima\clothing\x.safetensors:0.5:1>', '/') == '<lora:anima/clothing/x.safetensors:0.5:1>'
+    assert ir.native_lora('<loractl:a/b:1>', '\\') == r'<loractl:a\b:1>'
+    out = compile_text('<lora:anima/clothing/x.safetensors:1>, cat', 1, 'couple').text
+    assert ir.native_lora('<lora:anima/clothing/x.safetensors:1>') in out

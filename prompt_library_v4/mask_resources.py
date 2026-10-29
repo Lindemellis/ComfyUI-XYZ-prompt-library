@@ -49,14 +49,21 @@ def resolve(state, library=None, *, binding_id=None):
     state = deepcopy(state)
     items, keys, images, diagnostics = [], {}, {}, []
     _, index = full_index(state.doc)
+    from .output_policy import options
+    from .model import mode_reasons
+    moss = options(state.doc)['output_mode'] == 'moss'
+    reasons = mode_reasons(state.doc, index)
     rows = []
     def visit(node, active=True, regional=True):
+        if node.id in reasons:
+            return  # subtrees this mode cannot use must not read image resources
         active = active and node.enabled
         regional = regional and not (node.form == 'region' and node.meta.get('region_enabled') is False)
         region = getattr(getattr(index[node.id], 'settings', None), 'region', None)
         if region and (regional or node.id == binding_id): rows.append((node.id, active and regional))
         for child in node.children: visit(child, active, regional)
-    visit(state.doc.root)
+    # MOSS: the node itself is the region container and owns the Region switch.
+    visit(state.doc.root, regional=not (moss and state.doc.root.meta.get('region_enabled') is False))
     referenced = {node_id for node_id, _ in rows}
     library = (library or current()) if any(n.id in referenced and n.meta.get('mask_library') for n in state.doc.root.walk()) else None
     snap = library.snapshot() if library else dict(canvases=[], tombstones={}, directories=[])

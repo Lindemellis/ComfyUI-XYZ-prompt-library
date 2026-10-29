@@ -123,6 +123,23 @@ test('Preview replaces its loading message with input/compile errors and permits
   assert.ok(win.output.children.some(n=>n.textContent==='cat'));assert.ok(!win.output.children.some(n=>n.textContent==='正在编译…'));
 });
 
+test('MOSS Preview accepts backend-only dimensions and uses exact resolved primitive dimensions',async()=>{
+  const host=(await readFile(new URL('../../js/plv4/host_sessions.js',import.meta.url),'utf8')).replace(/^import .*;\r?\n/gm,'').replace(/export \{ NODE_TYPES \} from .*;\r?\n/, '');
+  const {NodeSessions}=await import('data:text/javascript;base64,'+Buffer.from(host).toString('base64'));
+  const node={id:17,inputs:[{name:'width',link:1},{name:'height',link:2}],widgets:[{name:'seed',value:7},{name:'region_mode',value:'couple'}]};
+  let dimensions={width:['resolution',0],height:['resolution',1]};
+  // Only input resolution is under test; event subscriptions belong to the browser fixture.
+  const sessions=Object.create(NodeSessions.prototype);
+  sessions.app={graphToPrompt:async()=>({output:{17:{inputs:dimensions}}})};
+  sessions.contexts=new Map();
+  sessions.contexts.set(node,{session:{state:{doc:{root:{meta:{output_mode:'moss'}}}}}});
+  assert.deepEqual(await sessions.inputs(node),{seed:7,region_mode:'couple'});
+  dimensions={width:1024,height:768};
+  assert.deepEqual(await sessions.inputs(node),{seed:7,region_mode:'couple',width:1024,height:768});
+  dimensions={width:1024,height:['resolution',1]};
+  assert.deepEqual(await sessions.inputs(node),{seed:7,region_mode:'couple',width:1024});
+});
+
 test('opening a Library block resets source/focused views to the node Blocks editor with subblocks visible',async()=>{
  const win=Object.create(PLv4Window.prototype);
  const context={focus:'nested',folded:new Set(['nested']),savedRevision:4,session:{valid:true,revision:4,view:'syntax',state:{selection:{},doc:{root:{children:[{id:'i1'}]}}},setView(view){this.view=view;}}};

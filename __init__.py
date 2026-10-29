@@ -1,6 +1,7 @@
 from .prompt_library_v3 import PromptLibraryV3Node, PromptLibraryV3MonacoNode
 from .prompt_library_v4.node import PromptLibraryV4Node, PromptLibraryV4MonacoNode
 from .prompt_library_v4.image_metadata_node import PLV4ImageMetadataNode
+from .prompt_library_v4.moss_upsample_node import PLV4MOSSUpsample
 from .prompt_library_v4.mask_nodes import PLV4MaskPreview, PLV4AttachMasks
 from .mask_nodes import XYZAttachMasks, XYZMaskEditor
 from .krita_nodes import (
@@ -30,6 +31,7 @@ NODE_CLASS_MAPPINGS = {
     "XYZ Prompt Library V4": PromptLibraryV4Node,
     "XYZ Prompt Library V4 Monaco": PromptLibraryV4MonacoNode,
     "XYZ PLV4 Image Metadata": PLV4ImageMetadataNode,
+    "XYZ PLV4 MOSS Upsample": PLV4MOSSUpsample,
     "XYZ PLV4 Mask Preview": PLV4MaskPreview,
     "XYZ PLV4 Attach Masks": PLV4AttachMasks,
     "XYZ Mask Editor": XYZMaskEditor,

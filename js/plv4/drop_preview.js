@@ -1,4 +1,5 @@
 import { element } from './ui.js';
+import { mossAllows } from './output_mode.js';
 
 export const isEntry = row => ['schedule_entry', 'region_entry', 'avg_entry'].includes(row?.form);
 export const isContainer = row => ['schedule', 'region', 'avg'].includes(row?.form);
@@ -13,8 +14,10 @@ export function canInsertContainer(parent, form, map) {
   return true;
 }
 
-export function canDropBlock(parent, moving = null) {
+export function canDropBlock(parent, moving = null, moss = false) {
   if (!parent) return false;
+  // MOSS: only where the block's kind may stand (a Library drop is an ordinary block).
+  if (moss) return moving?.form !== 'moss' && mossAllows(parent, moving?.form || 'brace', moving?.settings?.type);
   if (moving?.form === 'avg_entry') return false;
   if (isEntry(moving)) return parent.id === moving.parent_id;
   return !isContainer(parent);
@@ -69,6 +72,10 @@ export class DropPreview {
     if (target.command && this.host.context?.session.view === 'block') {
       const slot = this.host.blockView.showDrop(target.parent.id, target.command, target.placement === 'inline');
       if (slot) slot.dataset.dropLabel = dropLocation(target);
+      else if (target.caret) {
+        this.mark.hidden = false;
+        Object.assign(this.mark.style, { left: `${target.caret.x}px`, top: `${target.caret.y}px`, height: `${target.caret.height}px` });
+      }
     } else if (target.caret) {
       this.mark.hidden = false;
       Object.assign(this.mark.style, { left: `${target.caret.x}px`, top: `${target.caret.y}px`, height: `${target.caret.height}px` });

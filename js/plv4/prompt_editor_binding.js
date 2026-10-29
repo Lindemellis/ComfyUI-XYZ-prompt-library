@@ -4,7 +4,7 @@ import { normalizePromptInput } from './prompt_text.js';
 import { draftCompletions } from './text_draft.js';
 const bindings = new WeakMap();
 
-export function bindPromptEditor(pane, session, { onError = console.error, onDraft = () => {} } = {}) {
+export function bindPromptEditor(pane, session, { onError = console.error, onDraft = () => {}, isExternalUpdate = () => false } = {}) {
   const model = pane.model();
   if (!model || pane.editSession) throw new Error('bind one initialized PromptEditor model at a time');
   const existing = bindings.get(model);
@@ -59,6 +59,9 @@ export function bindPromptEditor(pane, session, { onError = console.error, onDra
   const change = (model.onDidChangeContent ?? pane.editor.onDidChangeModelContent).call(model.onDidChangeContent ? model : pane.editor, () => {
     if (!matches() || writing) return;
     const text = normalizePromptInput(model.getValue());
+    // Blocks persists its draft into the same widget/model. That is already
+    // owned by the native run, not a second Source draft to reconcile on blur.
+    if (isExternalUpdate()) { observed = text; return; }
     completions = draftCompletions(observed, text, completions, model.__plv4TagCompletion);
     observed = text;
     // The host mirrors every committed edit into the node's text widget, which

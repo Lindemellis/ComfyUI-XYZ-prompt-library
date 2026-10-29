@@ -170,3 +170,35 @@ test('loading a saved document keeps disabled content and is one cross-view undo
   session.setView('syntax'); await session.undo(); assert.equal(session.text, 'a');
   session.setView('block'); await session.redo(); assert.equal(session.state.doc.root.children[0].raw, 'parked'); assert.equal(session.revision, 3);
 });
+
+test('MOSS preview forwards optional dimensions without inventing defaults', async () => {
+  let received;
+  const session = sessionWith(async (operation, body) => {
+    received = body;
+    return { revision: body.state.revision, prompt: 'caption', plain: 'caption' };
+  });
+  await session.compile({ seed: 42, region_mode: 'couple', width: 1024, height: 768 });
+  assert.equal(received.width, 1024); assert.equal(received.height, 768);
+  assert.equal(received.preview, true);
+  await session.compile({ seed: 42, region_mode: 'couple' });
+  assert.equal(Object.hasOwn(received, 'width'), false);
+  assert.equal(Object.hasOwn(received, 'height'), false);
+});
+
+test('loading content retains node output choices and reprojects them atomically', async () => {
+  let opens = 0;
+  const session = sessionWith(async (operation, body) => {
+    assert.equal(operation, 'open'); opens++;
+    const result = opened(); result.state.text = 'loaded';
+    if (body.doc) result.state.doc = structuredClone(body.doc);
+    result.projection.tree = { ...result.state.doc.root, children: [] };
+    return result;
+  });
+  session.state.doc.root.meta = { output_mode: 'moss', sentence_case: true };
+  await session.loadDocument({ text: 'loaded' });
+  assert.equal(opens, 2);
+  assert.equal(session.past.length, 1);
+  assert.equal(session.state.doc.root.meta.output_mode, 'moss');
+  assert.equal(session.projection.tree.meta.output_mode, 'moss');
+  assert.equal(session.state.doc.root.meta.sentence_case, true);
+});

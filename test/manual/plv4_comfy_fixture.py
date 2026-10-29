@@ -73,12 +73,26 @@ else:
         def execute(self, prompt, plain):
             return {"ui": {"prompt": [prompt], "plain": [plain]}}
 
+    class Resolution:
+        CATEGORY = 'PLv4 Fixture'
+        FUNCTION = 'execute'
+        RETURN_TYPES = ('INT', 'INT')
+        RETURN_NAMES = ('width', 'height')
+
+        @classmethod
+        def INPUT_TYPES(cls):
+            return {'required': {}}
+
+        def execute(self):
+            return 1024, 768
+
     NODE_CLASS_MAPPINGS = {
         'XYZ Prompt Library V3': PromptLibraryV3Node,
         'XYZ Prompt Library V3 Monaco': PromptLibraryV3MonacoNode,
         'XYZ Prompt Library V4': PromptLibraryV4Node,
         'XYZ Prompt Library V4 Monaco': PromptLibraryV4MonacoNode,
         'PLv4 Fixture Capture': Capture,
+        'PLv4 Fixture Resolution': Resolution,
     }
     NODE_DISPLAY_NAME_MAPPINGS = {name: name for name in NODE_CLASS_MAPPINGS}
     WEB_DIRECTORY = str(SCRATCH / "custom_nodes" / "plv4_fixture" / "js")

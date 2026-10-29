@@ -114,7 +114,7 @@ def normalise_metadata(doc: Document):
     from .lora_block import normalise
     normalise(doc)
     for node in doc.root.walk():
-        if node.form != 'region':
+        if node.form not in ('region', 'root'):  # MOSS: the node itself is the region container
             node.meta.pop('region_enabled', None)
         if node.form in ('schedule', 'region', 'avg'):
             node.meta.pop('pool', None)
@@ -204,7 +204,7 @@ class EditorState:
             state.check()
         return state
 
-    def replace_text(self, text: str):
+    def replace_text(self, text: str, *, edit_parent: str | None = None):
         if not isinstance(text, str):
             raise CommandError("invalid_text", "source must be a string")
         text = lf(text)
@@ -214,7 +214,27 @@ class EditorState:
             return
         previous = deepcopy(self.doc)
         previous.draft = None
-        merged = reconcile(previous, text, recover=False)
+        edit_path = None
+        if edit_parent is not None:
+            source = render(previous)
+            visible = {}
+            pair_tree(previous.root, strict_parse(source), visible, visible=True)
+            target = visible.get(edit_parent)
+            content = getattr(getattr(target, 'spans', None), 'content', None)
+            if content is None or not text.startswith(source[:content[0]]) or not text.endswith(source[content[1]:]):
+                raise CommandError('invalid_boundary', 'native text edit must stay inside its parent')
+            def path(node):
+                if node.id == edit_parent:
+                    return ()
+                for index, child in enumerate(c for c in node.children if c.enabled):
+                    found = path(child)
+                    if found is not None:
+                        return (index, *found)
+                return None
+            edit_path = path(previous.root)
+            if edit_path is None:
+                raise CommandError('invalid_boundary', 'native text parent is not enabled')
+        merged = reconcile(previous, text, recover=False, edit_path=edit_path)
         # A library draft with extra roots is kept verbatim, never silently sliced.
         if self.scope == "block" and not self.single_root(merged):
             self.doc.draft = text
@@ -242,6 +262,39 @@ class EditorState:
             raise CommandError("single_root", "a Library block must retain exactly one root block")
 
 
+def mode_reasons(doc: Document, complete: dict) -> dict:
+    """{node id: why it is left out of this output mode} for the TOP of every
+    subtree the current mode cannot use; descendants are implied.
+
+    `complete` maps every document id (disabled ones included) to its AST, as
+    `full_index` returns it. MOSS checks the strict block structure; Prompt
+    Control only drops the MOSS-only data blocks."""
+    from .output_policy import options, moss_rule, moss_child_context, pc_rule
+    moss = options(doc)['output_mode'] == 'moss'
+    out = {}
+    first_settings = []
+
+    def visit(node, parent, region_type):
+        for child in node.children:
+            if child.kind != 'group':
+                continue
+            ast = complete[child.id]
+            if moss:
+                reason = moss_rule(child.form, ast.settings, parent, region_type)
+                if not reason and child.form == 'moss':
+                    if first_settings:
+                        reason = 'Only the first [@moss] settings block is used'
+                    first_settings.append(child.id)
+            else:
+                reason = pc_rule(child.form, ast.settings)
+            if reason:
+                out[child.id] = reason
+                continue
+            visit(child, *moss_child_context(child.form, parent, region_type, getattr(ast, 'moss_type', None)))
+    visit(doc.root, 'root', None)
+    return out
+
+
 def projection(state: EditorState) -> dict:
     """Full ordered tree, visible UTF-16 spans, TextRuns, and a recoverable draft."""
     text = state.text
@@ -258,11 +311,15 @@ def projection(state: EditorState) -> dict:
     visible = {}
     pair_tree(state.doc.root, recovered, visible, visible=True)
 
-    def visit(node, parent=None, active=True):
+    from .output_policy import options
+    moss = options(state.doc)['output_mode'] == 'moss'
+    reasons = mode_reasons(state.doc, complete)
+    def visit(node, parent=None, active=True, mode_disabled=None):
         effective = active and node.enabled
         ast = complete[node.id]
         current = visible.get(node.id) if effective else None
         info = ast_json(ast)
+        mode_disabled = mode_disabled or reasons.get(node.id)
         span = None
         if current is not None:
             start, end = current.pos, current.end
@@ -278,6 +335,9 @@ def projection(state: EditorState) -> dict:
                    enabled=node.enabled, effective=effective, span=span,
                    meta=deepcopy(node.meta), source=render_all(node, sources), sep=node.sep,
                    settings=info.get("settings"), implicit=info.get("implicit", False))
+        if moss or mode_disabled: out['mode_disabled'] = mode_disabled
+        for key in ('block_type', 'moss_type', 'moss_config'):
+            if key in info: out[key] = info[key]
         if current is not None:
             # Root carries the complete AST once for the shared PromptEditor.
             # Per-row ASTs only need their own fields/spans, not another copy
@@ -287,7 +347,7 @@ def projection(state: EditorState) -> dict:
                 row_ast = copy(current)
                 row_ast.children = []
             out["ast"] = js_ast(ast_json(row_ast), text)
-        children = [visit(c, node.id, effective) for c in node.children]
+        children = [visit(c, node.id, effective, mode_disabled) for c in node.children]
         out["children"] = children
         runs = []
         for child in children:

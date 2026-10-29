@@ -164,7 +164,13 @@ function specialBlocks(monaco, model, position, range, needle, ctx) {
   const indent = (line.match(/^\s*/) || [''])[0];
   const I = `${indent}    `;
 
-  const items = ctx === 'region'
+  const moss = model.__plv4Session?.state?.doc?.root?.meta?.output_mode === 'moss';
+  const items = moss ? [
+      // MOSS: no containers. A region is one block with its head in the brackets.
+      ['@region', 'MOSS region block', 'One rectangle; type is object, character or text',
+        '@region mask: [${1:0}, ${2:0.5}, ${3:0}, ${4:1}], type: ${5:object}]: { ${0} }'],
+    ]
+    : ctx === 'region'
     ? regionKinds(I)
     : model.__plv4Session ? [
       ['@schedule', 'schedule block', 'Two empty schedule entries', '@schedule]: { 0 - 0.5: { }, 0.5 - 1: { } }'],

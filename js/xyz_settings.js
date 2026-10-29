@@ -239,23 +239,14 @@ class SettingsPage {
   }
 
   buildPlv3Pane(wrap) {
-    const rangeRow = (label, helper, keys, bounds) => {
-      const [minKey, maxKey, stepKey] = keys;
-      const controls = el('div', { style: { display: 'flex', gap: '6px', alignItems: 'center' } },
-        numberCtrl(() => plv3()[minKey], (value) => plv3Set(minKey, value), { ...bounds, width: '62px' }),
-        el('span', { style: { color: C.sub, fontSize: '12px' } }, '→'),
-        numberCtrl(() => plv3()[maxKey], (value) => plv3Set(maxKey, value), { ...bounds, width: '62px' }),
-        el('span', { style: { color: C.sub, fontSize: '12px', marginLeft: '6px' } }, 'step'),
-        numberCtrl(() => plv3()[stepKey], (value) => plv3Set(stepKey, value),
-          { min: 0.01, max: 1, step: 0.01, width: '62px' }));
-      return row(label, helper, controls);
-    };
     wrap.append(
       sectionTitle('Prompt Library V3', 'Editor, slider and library-window preferences.'),
-      rangeRow('Prompt weight', 'Attention syntax such as (tag:1.2).',
-        ['weightMin', 'weightMax', 'weightStep'], { min: -5, max: 10, step: 0.1 }),
-      rangeRow('LoRA weight', 'LoRA syntax such as <lora:name:0.8>.',
-        ['loraMin', 'loraMax', 'loraStep'], { min: -5, max: 10, step: 0.1 }),
+      row('Prompt weight step', 'Ctrl + ↑/↓ adjustment for attention syntax such as (tag:1.2).',
+        numberCtrl(() => plv3().weightStep, (value) => plv3Set('weightStep', value),
+          { min: 0.01, max: 1, step: 0.01, width: '62px' })),
+      row('LoRA weight step', 'Ctrl + ↑/↓ adjustment for LoRA syntax such as <lora:name:0.8>.',
+        numberCtrl(() => plv3().loraStep, (value) => plv3Set('loraStep', value),
+          { min: 0.01, max: 1, step: 0.01, width: '62px' })),
       row('Schedule step', 'Resolution of schedule sliders.',
         numberCtrl(() => plv3().scheduleStep, (value) => plv3Set('scheduleStep', value),
           { min: 0.01, max: 0.5, step: 0.01 })),

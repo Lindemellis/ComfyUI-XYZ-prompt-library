@@ -16,7 +16,7 @@ def dispatch(operation, body):
     if operation == "command":
         return command_response(state, body["command"])
     if operation == "compile":
-        result = compile_document(state, seed=body["seed"], region_mode=body["region_mode"])
+        result = compile_document(state, seed=body["seed"], region_mode=body["region_mode"], width=body.get('width'), height=body.get('height'), preview=body.get('preview') is True)
         from .mask_resources import metadata
         result['mask_bundle'] = metadata(result['mask_bundle'])
         return dict(ok=True, **result)

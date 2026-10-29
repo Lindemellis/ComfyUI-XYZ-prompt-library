@@ -6,9 +6,10 @@ async function load(file, dependencies = '') {
   const source = (await readFile(new URL(`../../js/plv4/${file}`, import.meta.url), 'utf8')).replace(/^import .*;\r?\n/gm, '');
   return import('data:text/javascript;base64,' + Buffer.from(dependencies + source).toString('base64'));
 }
-globalThis.dragHelpers = await load('drop_preview.js');
+globalThis.outputHelpers = await load('output_mode.js');
+globalThis.dragHelpers = await load('drop_preview.js', 'const {mossAllows}=globalThis.outputHelpers;');
 globalThis.detailHelpers = await load('details.js');
-const { BlockView } = await load('block_view.js', 'const {blockPlacement,nearestBlockBoundary,dropLocation,isEntry,isContainer,canInsertContainer,canDropBlock}=globalThis.dragHelpers; const {indexTree,nameOf}=globalThis.detailHelpers;');
+const { BlockView } = await load('block_view.js', 'const {blockPlacement,nearestBlockBoundary,dropLocation,isEntry,isContainer,canInsertContainer,canDropBlock}=globalThis.dragHelpers; const {indexTree,nameOf}=globalThis.detailHelpers; const {insertForms,plainAllowed,FORM_LABELS,isMoss}=globalThis.outputHelpers;');
 const { dropLocation } = globalThis.dragHelpers;
 
 function fixture({ library = false } = {}) {

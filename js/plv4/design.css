@@ -48,6 +48,13 @@ body{overflow:hidden}.comfy-stage{position:fixed;inset:0;background:#131619;z-in
 .block-type[data-kind="schedule"]{color:var(--time);border-color:#756046;background:#d5b27b0a}
 .block-type[data-kind="region"]{color:var(--region);border-color:#52677e;background:#a1bce60a}
 .block-type[data-kind="lora"]{color:var(--lora);border-color:#74658b;background:#c4b2e50a}
+.block-type[data-kind="tag"]{color:var(--accent);border-color:#536e62;background:#93d9c10a}
+.block-type[data-kind="meta"]{color:var(--region);border-color:#52677e;background:#a1bce60a}
+.block-type[data-kind="caption"]{color:var(--text);border-color:#53655c}
+.block-type[data-kind="text"]{color:var(--time);border-color:#756046;background:#d5b27b0a}
+.block-type[data-kind="palette"]{color:var(--lora);border-color:#74658b;background:#c4b2e50a}
+.block-type[data-kind="moss"]{color:var(--region);border-color:#52677e;background:#a1bce60a}
+.moss-settings-summary{padding:0 8px}
 .header-controls{display:flex;align-items:center;gap:2px;margin-left:auto;flex:0 0 auto}
 .header-controls button{display:grid;place-items:center;width:22px;height:24px;padding:0;border:1px solid transparent;border-radius:3px;font:12px/1 var(--ui);color:#87958f}
 .header-controls button[aria-pressed="true"]{background:#93d9c111;border-color:#618370;color:#b8e5d2}
@@ -461,9 +468,6 @@ body.pane-resizing,body.pane-resizing *{cursor:col-resize!important;user-select:
 :scope .plv4-region-mode[hidden]{display:none}
 :scope .plv4-region-mode select{font:inherit;color:var(--text);background:var(--panel);border:0;border-radius:5px;padding:4px 6px}
 :scope .plv4-general-settings[aria-pressed="true"]{color:var(--accent);background:#93d9c118}
-:scope .plv4-general-page .setting-row{align-items:stretch;flex-direction:column;gap:8px;padding:7px 0}
-:scope .plv4-general-page .plv4-region-mode{width:100%;min-width:0}
-:scope .plv4-general-page .plv4-region-mode select{width:100%;min-width:0;height:34px;border:1px solid var(--line);padding:5px 8px;font-size:14px;line-height:normal}
 :scope .block[data-pending-toggle]>.block-content{pointer-events:none}
 .plv4-quad{position:relative;height:20px;min-width:0;margin:4px 0}
 .plv4-quad .plv4-quad-track,.plv4-quad .plv4-quad-plain,.plv4-quad .plv4-quad-split{position:absolute;top:8px;height:4px;border-radius:2px;pointer-events:none}
@@ -476,3 +480,8 @@ body.pane-resizing,body.pane-resizing *{cursor:col-resize!important;user-select:
 .plv4-quad input[type=range]::-moz-range-thumb{pointer-events:auto;cursor:grab;width:13px;height:13px;border-radius:50%;background:var(--text);border:2px solid var(--bg)}
 .plv4-quad.disabled{opacity:.45}
 .plv4-quad-label{font:11px var(--mono);color:var(--muted)}
+
+/* Unsupported subtrees remain editable and recover when the mode changes. */
+::highlight(plv4-selected-prompt){background:#93d9c120;color:#b9ead9}
+:scope .moss-unavailable { opacity: .5; }
+:scope .plv4-field textarea { width: 100%; min-height: 5em; box-sizing: border-box; }

@@ -6,6 +6,7 @@ import { blockPlacement, nearestBlockBoundary, dropLocation, DropPreview, isEntr
 import { inlineText, inlineOffset, inlinePoint, renderInlineEnd } from './text_input.js';
 import { promptDisplay, displayRun, scheduleSource, separatorDisplay, normalizePromptInput, runEnd } from './prompt_text.js';
 import { draftCompletions } from './text_draft.js';
+import { insertForms, plainAllowed, FORM_LABELS, isMoss } from './output_mode.js';
 
 // A focused TextRun is only a view into the parent session. Its IDs and history
 // still belong to that document; this adapter never creates an AST container.
@@ -115,7 +116,7 @@ export class BlockView {
       const field = event.target.closest?.('[data-run-input],[data-empty]');
       if (!field || field.contentEditable !== 'plaintext-only') return;
       event.preventDefault(); event.stopPropagation();
-      const id = event.target.closest?.('[data-prompt-id]')?.dataset.promptId || field.dataset.runParent || field.dataset.empty;
+      const id = this.promptAt(field, event)?.id || field.dataset.runParent || field.dataset.empty;
       this.host.run(() => this.host.textContextMenu(event, this.map.get(id)));
     }, true);
     container.addEventListener('keydown', event => {
@@ -177,7 +178,7 @@ export class BlockView {
       const children = row.children.map(stamp);
       // AST source offsets change when an unrelated sibling moves. They are
       // deliberately excluded from the DOM identity so unchanged rows survive.
-      const signature = JSON.stringify([row.parent_id, row.form, row.enabled, row.effective, row.source, row.meta, context.folded.has(row.id), children]);
+      const signature = JSON.stringify([row.parent_id, row.form, row.enabled, row.effective, row.mode_disabled, row.source, row.meta, context.folded.has(row.id), children]);
       // Children contribute stable tokens, never recursively escaped JSON strings.
       // This keeps deep trees linear in their source size instead of exponential.
       const old = previous.get(row.id);
@@ -216,31 +217,67 @@ export class BlockView {
     // collapse during that detach even when every character stays unchanged.
     if (range && this.container.contains(range[0]) && this.container.contains(range[2])) selection.setBaseAndExtent(...range);
     for (const id of this.cache.keys()) if (!map.has(id)) this.cache.delete(id);
+    this.highlightSelection();
+  }
+  // Large prose runs have many comma/sentence leaves. Chromium deletes their
+  // individual spans one by one, forcing layout for each. Keep their text in one
+  // native node and resolve prompt identities from the existing source mapping.
+  compactOffset(field, sourceOffset) {
+    const compact = field._xyzCompact, offsets = compact.display.offsets;
+    const base = this.map.get(compact.rows[0].id)?.span?.[0] ?? offsets[0];
+    const at = offsets.findIndex(value => value >= sourceOffset - base + offsets[0]);
+    return at < 0 ? offsets.length - 1 : at;
+  }
+  promptAt(field, event) {
+    const id = event.target.closest?.('[data-prompt-id]')?.dataset.promptId;
+    if (id) return this.map.get(id);
+    const compact = field._xyzCompact;
+    if (!compact || inlineText(field) !== compact.display.text) return null;
+    const caret = document.caretRangeFromPoint(event.clientX, event.clientY);
+    if (!caret || !field.contains(caret.startContainer)) return null;
+    const rows = compact.rows.map(row => this.map.get(row.id)).filter(row => row?.span);
+    const at = compact.display.offsets[inlineOffset(field, caret.startContainer, caret.startOffset)] - compact.display.offsets[0] + rows[0]?.span[0];
+    return rows.find(row => row.span[1] > at) || rows.at(-1);
+  }
+  highlightSelection() {
+    if (!globalThis.CSS?.highlights || !globalThis.Highlight) return;
+    const id = this.context?.session.state.selection.node_id, ranges = [];
+    for (const field of this.container.querySelectorAll('[data-run-input]')) {
+      const row = field._xyzCompact?.rows.some(row => row.id === id) && this.map.get(id);
+      if (!row || inlineText(field) !== field._xyzCompact.display.text) continue;
+      const range = document.createRange();
+      range.setStart(...inlinePoint(field, this.compactOffset(field, row.span[0])));
+      range.setEnd(...inlinePoint(field, this.compactOffset(field, row.span[1])));
+      ranges.push(range);
+    }
+    const highlight = new Highlight(...ranges); highlight.priority = -1;
+    CSS.highlights.set('plv4-selected-prompt', highlight);
   }
   // Make the container's children exactly `nodes`, leaving every node that is
   // already in position attached. Cached cards then keep their style and layout.
-  place(nodes) {
+  place(nodes, container = this.container) {
     const keep = new Set(nodes);
-    let at = this.container.firstChild;
+    let at = container.firstChild;
     const drop = () => { while (at && !keep.has(at)) { const next = at.nextSibling; at.remove(); at = next; } };
     for (const node of nodes) {
       drop();
       if (node === at) { at = at.nextSibling; continue; }
-      this.container.insertBefore(node, at);
+      container.insertBefore(node, at);
     }
     while (at) { const next = at.nextSibling; at.remove(); at = next; }
   }
   addFooter(target) {
     const footer = element('div', 'block-add-footer');
-    const entry = isContainer(target);
-    footer.append(button(entry ? '＋ 添加 entry' : '＋ 添加 block', entry ? '添加 entry' : '添加普通 block',
-      () => this.host.addBlock(target.id, true), 'small-add'));
-    const forms = ['region', 'schedule', 'avg'].filter(form => canInsertContainer(target, form, this.map));
-    if (forms.length) {
-      const labels = { region: 'Region 容器', schedule: 'Schedule 容器', avg: 'AVG 容器' };
+    const entry = isContainer(target), plain = entry || plainAllowed(this.host, target);
+    const forms = insertForms(this.host, target, this.map, canInsertContainer);
+    if (!plain && !forms.length) return footer;  // MOSS: a palette / text block holds no blocks
+    footer.append(plain
+      ? button(entry ? '＋ 添加 entry' : '＋ 添加 block', entry ? '添加 entry' : '添加普通 block', () => this.host.addBlock(target.id, true), 'small-add')
+      : button('＋ ' + FORM_LABELS[forms[0]], '添加 ' + FORM_LABELS[forms[0]], () => this.host.addBlock(target.id, true, forms[0]), 'small-add'));
+    if (forms.length > (plain ? 0 : 1)) {
       const toggle = button('▾', '选择添加 block 的类型', () => menu(toggle,
-        [['普通 block', () => this.host.addBlock(target.id, true)],
-          ...forms.map(form => [labels[form], () => this.host.addBlock(target.id, true, form)])]), 'small-add block-add-types');
+        [...(plain ? [['普通 block', () => this.host.addBlock(target.id, true)]] : []),
+          ...forms.map(form => [FORM_LABELS[form], () => this.host.addBlock(target.id, true, form)])]), 'small-add block-add-types');
       toggle.setAttribute('aria-haspopup', 'menu');
       toggle.setAttribute('aria-label', '选择添加 block 的类型');
       footer.append(toggle);
@@ -250,7 +287,8 @@ export class BlockView {
   }
   retainInlineFocus(event) { if (event.button === 0 && this.inline?.element === document.activeElement) event.preventDefault(); }
   contents(row, container, depth) {
-    const children = row.children.filter(child => !child.meta?.lora_invocation);
+    // The [@moss] line exists only for MOSS: Prompt Control never shows it.
+    const children = row.children.filter(child => !child.meta?.lora_invocation && (child.form !== 'moss' || isMoss(this.host)));
     let run = [];
     const flush = next => { if (!run.length) return; container.append(this.textRun(run, depth, next)); run = []; };
     for (const [index, child] of children.entries()) {
@@ -262,8 +300,19 @@ export class BlockView {
       else run.push(child);
     }
     flush();
+    if (row.form === 'moss') { container.append(this.mossSettings(row)); return; }
     if (!['schedule', 'region', 'avg'].includes(row.form) && !children.length) container.append(this.emptyInput(row));
     container.append(this.boundary(row.id));
+  }
+  // `[@moss]` is configuration, not prompt text: the canvas choice itself.
+  mossSettings(row) {
+    const box = element('div', 'plv4-field setting-row moss-settings-summary'), select = element('select');
+    select.setAttribute('aria-label', 'MOSS canvas');
+    for (const value of ['', 'single', 'multi_panel', 'collage']) { const option = element('option', '', value || '—'); option.value = value; select.append(option); }
+    select.value = row.moss_config?.canvas || '';
+    select.onchange = () => this.host.run(() => this.host.command({ type: 'SetMossSettings', id: row.id, canvas: select.value || null }));
+    box.append(element('label', '', 'canvas'), select);
+    return box;
   }
   block(row, depth) {
     const key = this.signatures.get(row.id);
@@ -279,7 +328,24 @@ export class BlockView {
     }
     const folded = this.context.folded.has(row.id);
     const libraryRoot = this.context.asset && row.parent_id === this.context.session.projection.tree.id;
-    const box = blockFrame(row, depth, folded, this.context.session.state.selection.block_id, libraryRoot, libraryPath, folder);
+    // Descendant text changes do not change the enclosing frame. Keep its DOM
+    // (and unrelated child cards) mounted while reconciling only its body.
+    const frameKey = JSON.stringify([depth, row.kind, row.form, row.enabled, row.effective, row.mode_disabled,
+      row.settings, row.meta, row.ast?.header, folded, folded ? row.source : null, !!libraryRoot, libraryPath, poolLabel]);
+    const structureKey = JSON.stringify([depth, row.kind, row.form, row.enabled, row.effective, row.mode_disabled, folded, !!libraryRoot]);
+    const headerChanged = cached?.frameKey !== frameKey;
+    let box = cached?.box;
+    if (headerChanged) {
+      const fresh = blockFrame(row, depth, folded, this.context.session.state.selection.block_id, libraryRoot, libraryPath, folder);
+      if (box && !folded && cached.structureKey === structureKey) box.querySelector('.block-head').replaceWith(fresh.querySelector('.block-head'));
+      else box = fresh;
+    }
+    box.classList.toggle('selected', this.context.session.state.selection.block_id === row.id);
+    if (row.mode_disabled && headerChanged) {
+      box.classList.add('moss-unavailable');
+      box.title = row.mode_disabled + '. Preserved for Prompt Control mode.';
+      box.querySelector('[data-detail]')?.append(element('small', 'plv4-badge', 'MOSS · unavailable'));
+    }
     for (const link of box.querySelectorAll('[data-open-folder]')) link.onclick = event => {
       event.stopPropagation(); this.host.run(() => this.host.openFolder(link.dataset.openFolder));
     };
@@ -298,6 +364,7 @@ export class BlockView {
     }
     const child = box.querySelector('[data-child]');
     child.title = child.ariaLabel = isContainer(row) ? ({ schedule: '添加阶段', region: '添加区域', avg: '添加 AVG entry' }[row.form]) : '添加子 block';
+    if (!isContainer(row) && !plainAllowed(this.host, row) && !insertForms(this.host, row, this.map, canInsertContainer).length) child.hidden = true;
     child.onclick = () => this.host.run(() => this.host.addBlock(row.id, true));
     child.onpointerdown = event => this.retainInlineFocus(event);
     const more = box.querySelector('[data-block-menu]');
@@ -308,19 +375,23 @@ export class BlockView {
       menu(e.currentTarget, this.menuItems(row, libraryRoot));
       this.inline?.element.blur();
     };
+    if (row.form === 'moss') for (const control of box.querySelectorAll('[data-block-menu],[data-child],[data-header-toggle],.plv4-handle')) control.hidden = true;
     const handle = box.querySelector('.plv4-handle'); handle.dataset.dragId = row.id;
-    if (!libraryRoot && row.form !== 'avg_entry') handle.onpointerdown = e => this.startDrag(e, row, handle);
+    if (!libraryRoot && !['avg_entry', 'moss'].includes(row.form)) handle.onpointerdown = e => this.startDrag(e, row, handle);
     if (row.form === 'avg_entry') { handle.disabled = true; handle.hidden = true; }
     const body = box.querySelector('.block-body');
-    if (body) {
-      this.contents(row, body, depth + 1);
+    const bodyKey = JSON.stringify([row.effective, row.form, row.moss_config, isMoss(this.host), row.children.map(child => this.signatures.get(child.id))]);
+    if (body && (cached?.box !== box || cached.bodyKey !== bodyKey)) {
+      const sink = { nodes: [], append(...nodes) { this.nodes.push(...nodes); } };
+      this.contents(row, sink, depth + 1);
+      this.place(sink.nodes, body);
     }
     box.onclick = e => { e.stopPropagation(); if (!e.target.closest('button,input,[contenteditable],.plv4-handle')) this.host.run(() => this.selectBlock(row.id)); };
     box.oncontextmenu = e => {
-      if (e.target.closest('.plv4-block') !== box || e.target.closest('.plv4-prompt')) return;
+      if (row.form === 'moss' || e.target.closest('.plv4-block') !== box || e.target.closest('.plv4-prompt')) return;
       e.preventDefault(); e.stopPropagation(); this.contextMenu(e, row);
     };
-    this.cache.set(row.id, { key, depth, libraryPath, poolLabel, box }); return box;
+    this.cache.set(row.id, { key, frameKey, structureKey, bodyKey, depth, libraryPath, poolLabel, box }); return box;
   }
   toggleFeedback(box, row) {
     const pending = this.pendingToggles.get(this.context)?.get(row.id), active = !!pending;
@@ -352,11 +423,13 @@ export class BlockView {
   menuItems(row, libraryRoot = false) {
     const items = [], parent = this.map.get(row.parent_id);
     for (const [label, child, target] of [['添加同级 Block', false, libraryRoot ? null : parent], ['添加子 Block', true, row]]) {
-      const options = ['schedule', 'region', 'avg'].filter(form => canInsertContainer(target, form, this.map));
+      if (!target) continue;
+      const options = insertForms(this.host, target, this.map, canInsertContainer);
+      const plain = isContainer(target) || plainAllowed(this.host, target);
       if (!options.length) continue;
       items.push([label, [
-        ['普通 Block', () => this.host.addBlock(row.id, child)],
-        ...options.map(form => [{ schedule: 'Schedule 容器', region: 'Region 容器', avg: 'AVG 容器' }[form], () => this.host.addBlock(row.id, child, form)]),
+        ...(plain ? [['普通 Block', () => this.host.addBlock(row.id, child)]] : []),
+        ...options.map(form => [FORM_LABELS[form], () => this.host.addBlock(row.id, child, form)]),
       ]]);
     }
     if (items.length) items.push(['', null]);
@@ -382,7 +455,7 @@ export class BlockView {
     if (!hit || !this.container.contains(hit)) return null;
     const box = hit.closest('[data-block-id]');
     const owner = box ? this.map.get(box.dataset.blockId) : null;
-    let parent, command, placement, highlight;
+    let parent, command, placement, highlight, caret;
     let slot = hit.closest('.boundary[data-parent]');
     const prompt = hit.closest('[data-prompt-id]');
     const edge = box ? blockPlacement(box.getBoundingClientRect(), y) : null;
@@ -400,6 +473,18 @@ export class BlockView {
       parent = this.map.get(owner.parent_id);
       command = { [edge === 'before' ? 'before_id' : 'after_id']: owner.id };
       placement = edge;
+    } else if (!prompt && hit.closest('[data-run-input]')?._xyzCompact) {
+      const run = hit.closest('[data-run-input]'), item = this.promptAt(run, { target: hit, clientX: x, clientY: y });
+      if (!item) return null;
+      const start = this.compactOffset(run, item.span[0]), end = this.compactOffset(run, item.span[1]);
+      const range = document.caretRangeFromPoint(x, y);
+      const before = inlineOffset(run, range.startContainer, range.startOffset) < (start + end) / 2;
+      const mark = document.createRange();
+      mark.setStart(...inlinePoint(run, before ? start : end)); mark.collapse(true);
+      const rect = mark.getBoundingClientRect();
+      parent = this.map.get(item.parent_id);
+      command = { [before ? 'before_id' : 'after_id']: item.id };
+      placement = 'inline'; caret = { x: rect.x, y: rect.y, height: rect.height };
     } else if (prompt) {
       const item = this.map.get(prompt.dataset.promptId), rect = prompt.getBoundingClientRect();
       parent = this.map.get(item.parent_id);
@@ -421,11 +506,11 @@ export class BlockView {
       highlight = [...this.container.querySelectorAll('[data-block-id]')].find(n => n.dataset.blockId === parent.id);
     }
     if (!parent || excluded.has(parent.id) || excluded.has(command.before_id) || excluded.has(command.after_id)) return null;
-    if (!canDropBlock(parent, moving)) return null;
+    if (!canDropBlock(parent, moving, isMoss(this.host))) return null;
     if (placement === 'inside' && !highlight && box) highlight = box;
     const names = []; for (let row = parent; row; row = this.map.get(row.parent_id)) names.unshift(nameOf(row) || (row.form === 'root' ? 'Document' : 'Block'));
     const anchor = this.map.get(command.before_id || command.after_id);
-    return { parent, owner, command: { parent_id: parent.id, ...command }, placement, highlight, path: names.join(' / '), anchorName: anchor && (nameOf(anchor) || 'Block') };
+    return { parent, owner, command: { parent_id: parent.id, ...command }, placement, highlight, caret, path: names.join(' / '), anchorName: anchor && (nameOf(anchor) || 'Block') };
   }
   textRun(rows, depth, next = '') {
     const run = element('div', 'plv4-run'); run.dataset.runIds = rows.map(n => n.id).join(','); run.dataset.depth = depth;
@@ -468,10 +553,22 @@ export class BlockView {
     const last = live.at(-1), tail = runEnd(rows, this.map.get(rows[0].parent_id), this.context.session.text);
     if (last && tail > last.span[1]) run.append(document.createTextNode(this.context.session.text.slice(last.span[1], tail)));
     run.append(this.boundary(rows[0].parent_id, next, true));
+    if (live.length > 16 && globalThis.CSS?.highlights && globalThis.Highlight) {
+      const display = displayRun(rows, this.context.session.text, live[0].span[0], tail);
+      run._xyzCompact = { rows: live, display };
+      const nodes = []; let text = '';
+      const flush = () => { if (text) nodes.push(document.createTextNode(text)); text = ''; };
+      for (const node of run.childNodes) {
+        if (node.matches?.('[data-editor-decoration]')) continue;
+        if (node.matches?.('[data-parked]')) { flush(); nodes.push(node); }
+        else text += node.textContent;
+      }
+      flush(); run.replaceChildren(...nodes);
+    }
     renderInlineEnd(run);
     run.onclick = e => {
       e.stopPropagation();
-      const id = e.target.closest?.('[data-prompt-id]')?.dataset.promptId || run.dataset.runParent;
+      const id = this.promptAt(run, e)?.id || run.dataset.runParent;
       this.host.run(() => this.host.locate(id));
     };
     run.oncontextmenu = e => { e.preventDefault(); e.stopPropagation(); this.contextMenu(e, this.map.get(run.dataset.runParent)); };
@@ -560,7 +657,7 @@ export class BlockView {
         if (!content) throw new Error('请先启用该 block');
         const last = row.children.filter(n => n.effective).at(-1);
         const gap = context.session.text.slice(last?.span?.[1] ?? content[0], content[1]);
-        insertion = { at: content[1], owner: row.id, prefix: last && !gap.includes(',') ? (last.source.trimEnd().endsWith('.') ? ' ' : ', ') : '' };
+        insertion = { at: content[1], owner: row.id, prefix: last && !gap.includes(',') ? (last.source.trimEnd().endsWith('.') ? ' ' : ', ') : '', anchor: { parent_id: row.id, edge: 'end' } };
         if (element.dataset.textSlot || element.hasAttribute('data-run-input')) {
           const before = element.dataset.beforeBlock;
           if (before) {
@@ -588,13 +685,17 @@ export class BlockView {
     const text = normalizePromptInput(inlineText(element)), completion = element._xyzTagCompletion; active.changed = true;
     active.completions = draftCompletions(active.draft, text, active.completions, completion);
     active.draft = text;
+    if (element._xyzCompact) this.highlightSelection();
     // Persist the raw workflow draft without reconciling the Document or
     // refreshing Settings. Blur/navigation commits the whole field once.
+    if (active.persistScheduled) return;
+    active.persistScheduled = true;
     active.ready.then(run => {
+      active.persistScheduled = false;
       if (active.closed || !run || run.disposed || !active.context.node) return;
       const decoded = scheduleSource(active.draft, run.display.originals, run.display);
       this.host.sessions.persist(active.context, run.replacement(decoded.source));
-    }).catch(report);
+    }).catch(error => { active.persistScheduled = false; report(error); });
   }
   commitInline(active) {
     active.pending = active.pending.catch(() => {}).then(async () => {
@@ -771,9 +872,17 @@ export class BlockView {
     }
   }
   closeEditor() {
-    for (const active of this.inlineEditors) { active.closed = true; active.off?.(); active.run?.dispose(); }
+    globalThis.CSS?.highlights?.delete('plv4-selected-prompt');
+    for (const active of this.inlineEditors) {
+      // Native editing changed the field without changing its old cache key.
+      // Invalidate only this body and its ancestors; every other card survives.
+      if (active.changed) for (let row = this.map?.get(active.run?.owner || active.element?.dataset?.empty || active.element?.dataset?.runParent); row; row = this.map.get(row.parent_id)) {
+        const cached = this.cache.get(row.id); if (cached) { cached.key = null; cached.bodyKey = null; }
+      }
+      active.closed = true; active.off?.(); active.run?.dispose();
+    }
     this.inlineEditors.clear();
-    if (this.inline) this.cache.clear(); this.inline = null;
+    this.inline = null;
   }
   startDrag(e, row, handle) {
     if (e.button !== 0 || !this.context.session.valid) return;

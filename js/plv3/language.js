@@ -28,7 +28,13 @@ const REGION_FIELDS = [
   ['include_in_base', 'boolean', 'Also copy this content into the base segment'],
 ];
 
-const ALL_FIELD_NAMES = [...SET_FIELDS, ...REGION_FIELDS].map(([n]) => n);
+// MOSS (PLv4): `[@region mask: …, type: …]` heads and the `[@moss]` settings line.
+const MOSS_FIELDS = [
+  ['type', 'object | character | text  ·  caption | meta | palette | tag | text', 'MOSS region type / block type'],
+  ['canvas', 'single | multi_panel | collage', 'MOSS canvas structure'],
+];
+
+const ALL_FIELD_NAMES = [...SET_FIELDS, ...REGION_FIELDS, ...MOSS_FIELDS].map(([n]) => n);
 
 // --- Monarch ---------------------------------------------------------------
 
@@ -41,7 +47,10 @@ const MONARCH = {
   tokenizer: {
     root: [
       [/\\./, 'escape'],
-      [/\[@(schedule|region|avg)\]/, 'keyword.block'],
+      [/\[@(schedule|region|avg|moss)\]/, 'keyword.block'],
+      // a MOSS region block keeps its head in the brackets: `[@region mask: […]]`.
+      // `@(?:` not `@region`: Monarch reads `@name` in a regex as an attribute.
+      [/\[@(?:region)(?=\s)/, { token: 'keyword.block', next: '@bracket' }],
       [/\b\d+(?:\.\d+)?(?=\s*:\s*\{)/, 'number.weight'],
       // a `[@schedule]` entry head: `0 - 0.2:`
       [/-?[\d.]+\s*-\s*-?[\d.]+(?=\s*:)/, 'number.weight'],
@@ -80,7 +89,7 @@ const MONARCH = {
       [/\]/, { token: 'delimiter', next: '@pop' }],
       [/\[/, { token: 'delimiter', next: '@bracket' }],
       [/@fields(?=\s*:)/, 'attribute.name'],
-      [/\b(true|false|base|fill)\b/, 'keyword'],
+      [/\b(true|false|base|fill|object|character|text)\b/, 'keyword'],
       [/-?[\d.]+/, 'number'],
       [/[,:]/, 'delimiter'],
       [/[^\][,:\\]+/, 'path'],

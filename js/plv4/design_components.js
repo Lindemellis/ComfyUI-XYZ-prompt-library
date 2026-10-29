@@ -14,7 +14,6 @@ function bindInlineInput(container,{capture,input,commit}){
   const focusin=e=>{const t=target(e);if(t)capture(t)};
   const change=e=>{const t=target(e);if(t)input?.(t,e)};
   const focusout=e=>{const t=target(e);if(t)commit(t)};
-  const paste=e=>{const t=target(e);if(!t?.matches('[data-run-input],[data-empty]')||t.contentEditable!=='plaintext-only'||!e.clipboardData)return;e.preventDefault();document.execCommand('insertText',false,e.clipboardData.getData('text/plain'))};
   const pointerdown=e=>{
     const selection=getSelection();
     if(e.button===2&&selection&&!selection.isCollapsed&&container.contains(selection.anchorNode)&&container.contains(selection.focusNode)){e.preventDefault();return}
@@ -33,8 +32,9 @@ function bindInlineInput(container,{capture,input,commit}){
   };
   container.addEventListener('focusin',focusin);container.addEventListener('input',change);container.addEventListener('focusout',focusout);
   container.addEventListener('pointerdown',pointerdown);
-  container.addEventListener('paste',paste);
-  return ()=>{container.removeEventListener('focusin',focusin);container.removeEventListener('input',change);container.removeEventListener('focusout',focusout);container.removeEventListener('pointerdown',pointerdown);container.removeEventListener('paste',paste)};
+  // plaintext-only already pastes plain text atomically. execCommand(insertText)
+  // splits multiline pastes into many input events and repeats draft persistence.
+  return ()=>{container.removeEventListener('focusin',focusin);container.removeEventListener('input',change);container.removeEventListener('focusout',focusout);container.removeEventListener('pointerdown',pointerdown)};
 }
 function blockHTML(b,depth=0,parentOff=false,env){
   const {state,root,isLibraryBlockView,childrenHTML,join,leaves,text,esc}=env;
@@ -46,8 +46,12 @@ function blockHTML(b,depth=0,parentOff=false,env){
   if(b.type==='lora')types.push(`<button type="button" class="block-type" data-kind="lora" data-open-lora="${esc(b.meta?.lora?.id||'')}" title="打开此 LoRA 的详情" aria-label="打开 ${esc(name||'LoRA')} 的 LoRA 详情">LoRA</button>`);
   if(b.type==='schedule')types.push('<span class="block-type" data-kind="schedule">Schedule</span>');
   else if(b.schedule)properties.push(`<span class="block-type" data-kind="schedule" title="Schedule · ${b.start}–${b.end}">Schedule · ${b.start}–${b.end}</span>`);
+  if(b.form==='moss_region')types.push(`<span class="block-type" data-kind="region" title="MOSS region · ${esc(b.moss_type||'object')}">Region · ${esc(b.moss_type||'object')}</span>`);
+  if(b.form==='moss')types.push('<span class="block-type" data-kind="moss">MOSS</span>');
+  const field=b.settings?.type;
+  if(field)types.push(`<span class="block-type" data-kind="${esc(field)}">${esc(field[0].toUpperCase()+field.slice(1))}</span>`);
   if(b.type==='region')types.push('<span class="block-type" data-kind="region">Region</span>');
-  else if(b.region)properties.push(`<span class="block-type" data-kind="region" title="Region · ${esc(b.regionKind)}${b.regionKind==='imask'?' '+b.mask:''}">Region · ${esc(b.regionKind)}${b.regionKind==='imask'?' '+b.mask:''}</span>`);
+  else if(b.region&&b.form!=='moss_region')properties.push(`<span class="block-type" data-kind="region" title="Region · ${esc(b.regionKind)}${b.regionKind==='imask'?' '+b.mask:''}">Region · ${esc(b.regionKind)}${b.regionKind==='imask'?' '+b.mask:''}</span>`);
   const controls=`<button data-header-toggle="${b.id}" data-header-prop="enabled" aria-label="Enable ${esc(name||'block')}" aria-pressed="${b.enabled}" title="Enable" ${parentOff?'disabled':''}>⏻</button>
     <button data-detail="${b.id}" aria-label="详细设置 ${esc(name||'block')}" title="详细设置">⚙</button>
     ${isLibraryBlockView()&&b.id===root().id?'':`<button data-sibling="${b.id}" aria-label="在下方添加同级 block" title="在下方添加同级 block">＋</button>`}

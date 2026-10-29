@@ -20,6 +20,7 @@ import { createRegionModeControl } from './region_mode.js';
 import { MaskLibraryPanel, maskStyles, MASK_EVENT, maskRequest } from './mask_library.js';
 import { closeMaskSelector } from './mask_region.js';
 import { maskIconButton } from './mask_ui.js';
+import { isMoss, containerForms, insertForms, mossAllows } from './output_mode.js';
 
 export class PLv4Window {
   constructor(app) { this.app = app; this.sessions = new NodeSessions(app); this.generation = 0; this.visible = false; this.context = null; this.seedNode = null; this.libraryTabs = new Map(); this.closedNodes = new Set(); window.xyzPLv4OpenFolder = id => this.run(() => this.openFolder(id)); }
@@ -167,6 +168,11 @@ export class PLv4Window {
     const initialLibrary = refreshLibrary && !this.library.data;
     if (initialLibrary) await this.library.reload();
     this.renderTabs(); this.renderView(true); this.details.render(context.session); this.pane.scheduleLint();
+    // The shared Monaco native-input adapter takes a noticeable cold start.
+    // Prepare it while idle after opening, before the first typed character.
+    globalThis.requestIdleCallback?.(() => {
+      if (this.visible && this.pane?.model()) this.nativeEditorInput ||= new NativeEditorInput(this.pane);
+    }, { timeout: 1000 });
     if (refreshLibrary && !initialLibrary) this.library.reload();
   }
   async detach() {
@@ -205,6 +211,7 @@ export class PLv4Window {
     else for (const node of this.blocks.querySelectorAll('[data-block-id],[data-prompt-id]')) {
       const id = node.dataset.blockId || node.dataset.promptId; node.classList.toggle('selected', id === this.context.session.state.selection.node_id || (node.dataset.blockId && id === this.context.session.state.selection.block_id));
     }
+    if (reason === 'LocateDetails') this.blockView.highlightSelection();
     if (reason !== 'View' && !this.shell.details.hidden) this.details.render(this.context.session, {
       keepOwner: !['LocateDetails', 'InsertBlock', 'InsertEntry', 'InsertLora', 'InsertLibraryBlock', 'InsertLibraryPrompts', 'WrapSelection', 'CreateAsBlock', 'MoveBlock', 'LoadDocument', 'SaveLibrary'].includes(reason),
     });
@@ -388,8 +395,10 @@ export class PLv4Window {
       const result = await context.session.compile(inputs);
       if (this.context !== context || token !== this.previewToken || revision !== context.session.revision || context.session.view !== 'preview') return;
       this.output.replaceChildren();
+      if (result.preview_notice) this.output.append(element('p', 'setting-help', result.preview_notice));
       for (const key of ['prompt', 'plain']) this.output.append(element('div', 'plv4-output-label', key), element('pre', 'plv4-output', result[key]));
-      this.status.textContent = `节点 seed: ${inputs.seed} · ${inputs.region_mode}`;
+      for (const diagnostic of result.diagnostics || []) this.output.append(element('p', 'setting-help', `${diagnostic.id}: ${diagnostic.message}`));
+      this.status.textContent = `节点 seed: ${inputs.seed} · ${result.output_mode || inputs.region_mode}${result.preview_only ? ' · 坐标待换算' : ''}`;
     } catch (error) { if (context === this.context && token === this.previewToken) this.output.replaceChildren(element('div', 'plv4-empty plv4-error', error.message)); }
   }
   async inputs() { if (!this.seedNode) throw new Error('请选择工作流节点，以使用其 seed 输入'); return this.sessions.inputs(this.seedNode); }
@@ -685,7 +694,11 @@ export class PLv4Window {
     const context = this.context, selectionEpoch = context.session.selectionEpoch;
     const map = indexTree(this.context.session.projection.tree); const row = map.get(id);
     const parent = child ? row : map.get(row.parent_id); const target = { parent_id: parent.id, ...(child ? { edge: 'end' } : { after_id: row.id }) };
-    if (form && !canInsertContainer(parent, form, map)) throw new Error('此处不能创建该类型的容器');
+    if (isMoss(this)) {
+      // A tag block's subblock is a tag block: default to the one kind allowed here.
+      if (!form && !mossAllows(parent, 'brace')) form = insertForms(this, parent, map, canInsertContainer)[0] || null;
+      if (!mossAllows(parent, form || 'brace')) throw new Error('MOSS：这里不能添加该类型的 block');
+    } else if (form && (!containerForms(this).includes(form) || !canInsertContainer(parent, form, map))) throw new Error('此处不能创建该类型的容器');
     const entry = isContainer(parent) ? await this.entryTarget(parent, target, true) : null; if (entry === false) return;
     const result = await this.command({ type: entry ? 'InsertEntry' : 'InsertBlock', ...target,
       ...(entry ? { entry } : form ? { form } : { text: '{ }' }) });
@@ -699,9 +712,10 @@ export class PLv4Window {
     if (isContainer(parent) && !create) return false;
     if (parent.form === 'avg') return { avg_weight: 1 };
     if (parent.form === 'region') {
-      const result = await showForm('Region entry', [{ key: 'kind', label: 'Kind', value: 'base', options: ['base', 'mask', 'imask', 'fill'].map(value => ({ value, label: value })) }]);
+      const kinds = isMoss(this) ? ['mask'] : ['base', 'mask', 'imask', 'fill'];
+      const result = await showForm('Region entry', [{ key: 'kind', label: 'Kind', value: kinds[0], options: kinds.map(value => ({ value, label: value })) }]);
       if (!result) return false;
-      return { region: { kind: result.kind, ...(result.kind === 'mask' ? { mask: [0, 0, 1, 1] } : result.kind === 'imask' ? { imask: 0 } : {}) } };
+      return { region: { kind: result.kind, ...(result.kind === 'mask' ? { mask: [0, 1, 0, 1] } : result.kind === 'imask' ? { imask: 0 } : {}) } };
     }
     if (parent.form === 'schedule') {
       const map = indexTree(this.context.session.projection.tree); const after = map.get(target.after_id);
@@ -838,7 +852,7 @@ export class PLv4Window {
     if (this.context.asset && parent.form === 'root') {
       parent = session.projection.tree.children[0]; command = { parent_id: parent.id, edge: 'end' }; at = parent.ast.spans.content[1];
     }
-    if (!canDropBlock(parent)) return null;
+    if (!canDropBlock(parent, null, isMoss(this))) return null;
     const position = model.getPositionAt(at), coords = this.pane.editor.getScrolledVisiblePosition(position);
     if (!coords) return null;
     const rect = this.pane.editor.getDomNode().getBoundingClientRect();

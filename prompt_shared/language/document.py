@@ -212,7 +212,9 @@ class _Builder:
         if kind != "group":
             return doc
 
-        if node.spans.avg_form == "block":
+        if node.block_type:
+            doc.form = node.block_type  # moss / moss_region
+        elif node.spans.avg_form == "block":
             doc.form = "avg_entry"
         elif node.average:
             doc.form = "avg"
@@ -403,7 +405,7 @@ def _render_node(node: DocNode, top: bool = False, everything: bool = False, mem
 # --- text edits -------------------------------------------------------------
 
 
-def reconcile(doc: Document, new_text: str, recover: bool = True) -> Document:
+def reconcile(doc: Document, new_text: str, recover: bool = True, *, edit_path: tuple[int, ...] | None = None) -> Document:
     """Fold a hand-edited text back into the document.
 
     The text only ever showed the enabled nodes, so a fresh parse of it cannot see
@@ -424,10 +426,14 @@ def reconcile(doc: Document, new_text: str, recover: bool = True) -> Document:
     node is dropped rather than resurrected somewhere arbitrary. Losing an
     invisible off-switch is recoverable (the item is simply gone, like the text
     says); silently re-inserting content into someone's prompt is not.
+
+    `edit_path` optionally pins the enabled-child ordinals down to the parent of
+    a scoped native body edit. The caller verifies that source outside that
+    body is unchanged. Unscoped Source/V3 edits retain the matching above.
     """
     fresh = from_text(new_text, recover=recover)
     counter = _Counter(max(doc.next_id, _max_id(doc.root) + 1))
-    merged = _merge(doc.root, fresh.root, counter)
+    merged = _merge(doc.root, fresh.root, counter, edit_path)
     merged.sep = ""
     merged.enabled = True
     return Document(root=merged, next_id=counter.value)
@@ -451,7 +457,7 @@ def _max_id(node: DocNode) -> int:
     return best
 
 
-def _merge(old: DocNode, new: DocNode, counter: _Counter) -> DocNode:
+def _merge(old: DocNode, new: DocNode, counter: _Counter, edit_path: tuple[int, ...] | None = None) -> DocNode:
     """`new` is freshly parsed (all enabled, fresh ids); `old` holds ids + state."""
     new.id = old.id
     new.meta = deepcopy(old.meta)
@@ -465,11 +471,26 @@ def _merge(old: DocNode, new: DocNode, counter: _Counter) -> DocNode:
     matched: dict[int, DocNode] = {}
     used: set[int] = set()
 
+    # A native Blocks field edits one known parent's body. Its ancestors did
+    # not move, even when identical empty siblings make source matching
+    # ambiguous. Source/V3 callers omit this path and keep normal reconciliation.
+    pinned = edit_path[0] if edit_path else None
+    if pinned is not None:
+        if pinned >= len(old_enabled) or pinned >= len(new.children):
+            raise ValueError('text edit changed its ancestor path')
+        before, after = old_enabled[pinned], new.children[pinned]
+        if (before.kind, before.form) != (after.kind, after.form):
+            raise ValueError('text edit changed its ancestor kind')
+        matched[pinned] = before
+        used.add(pinned)
+
     # Pass 1 — identical source.
     by_raw: dict[tuple[str, str], list[int]] = {}
     for i, child in enumerate(old_enabled):
         by_raw.setdefault((child.kind, render(child)), []).append(i)
     for j, child in enumerate(new.children):
+        if j in matched:
+            continue
         bucket = by_raw.get((child.kind, child.raw))
         while bucket:
             i = bucket.pop(0)
@@ -498,7 +519,7 @@ def _merge(old: DocNode, new: DocNode, counter: _Counter) -> DocNode:
             _renumber(child, counter)
             children.append(child)
         else:
-            children.append(_merge(old_child, child, counter))
+            children.append(_merge(old_child, child, counter, edit_path[1:] if j == pinned else None))
 
     # Pass 3 — the disabled nodes, back at the index they were remembered at.
     for index, node in disabled:

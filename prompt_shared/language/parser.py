@@ -106,6 +106,9 @@ class Settings:
     # [@region] blocks only: inside `schedule` but outside this window the block
     # stops splitting and its entries merge into ordinary prompt text.
     region_window: tuple[float, float] | None = None
+    # MOSS: what a top-level / region-level block fills (caption, meta, palette,
+    # tag or text). Subblocks inherit it and carry none of their own.
+    moss_field: str | None = None
 
 
 @dataclass
@@ -136,6 +139,8 @@ class Spans:
     region_form: str | None = None
     schedule_form: str | None = None
     avg_form: str | None = None
+    # `[@moss]` / `[@region …]`: the bracket head in front of a MOSS block.
+    block_head: Span | None = None
 
 
 @dataclass
@@ -156,7 +161,16 @@ class Group:
     spans: Spans = field(default_factory=Spans)
     average: bool = False
     region_block: bool = False  # came from `[@region]: { ... }`
+    # MOSS: "moss" (the `[@moss]` settings line) / "moss_region" (`[@region mask:
+    # …, type: …]: { … }`, a region block with its head in the brackets).
+    block_type: str | None = None
+    moss_type: str | None = None  # object / character / text, on a moss_region only
+    moss_config: dict | None = None  # parsed `[@moss]: { canvas }`
 
+
+MOSS_FIELDS = ("caption", "meta", "palette", "tag", "text")
+MOSS_TYPES = ("object", "character", "text")
+MOSS_CANVASES = ("single", "multi_panel", "collage")
 
 _KNOWN_FIELDS = {
     "weight",
@@ -168,6 +182,7 @@ _KNOWN_FIELDS = {
     "schedule",
     "region",
     "region_window",
+    "type",
 }
 #: Where `parse_config_seq` keeps the entries that were written WITHOUT a `key:`.
 #: A sentinel object rather than a string, so it can never collide with something
@@ -397,6 +412,10 @@ class Parser:
                     return self.parse_region_block()
                 if kind == "avg":
                     return self.parse_avg_block()
+                if kind == "moss":
+                    return self.parse_moss_block()
+                if kind == "moss_region":
+                    return self.parse_moss_region_block()
                 return self.parse_ref_block()
 
             if t.kind == lx.LPAREN:
@@ -648,6 +667,10 @@ class Parser:
             return "region"
         if head == "@avg":
             return "avg"
+        if head == "@moss":
+            return "moss"
+        if inner and inner[0].kind == lx.TEXT and re.match(r"@region\s", inner[0].raw.lstrip()):
+            return "moss_region"
         # `[path]: {` — a library ref block.  A `[` that is followed by `:` but
         # not by a group is not a block at all.
         j = after + 1
@@ -701,6 +724,92 @@ class Parser:
         group.pos = open_tok.pos
         group.spans.header = (open_tok.pos, close.pos + 1)
         group.spans.node = (open_tok.pos, group.end)
+        return group
+
+    def _block_head(self) -> tuple[lx.Tok, lx.Tok]:
+        """`[@name]` + `:` in front of a typed block; returns the brackets."""
+        open_tok = self.expect(lx.LBRACKET)
+        self.advance()  # @name
+        close = self.expect(lx.RBRACKET)
+        self._skip_ws()
+        self.expect(lx.COLON)
+        self._skip_ws()
+        return open_tok, close
+
+    def parse_moss_block(self) -> Group:
+        """`[@moss]: { canvas: single }` — MOSS document settings.
+
+        A config body, not prompt text: the group has no children, so the document
+        keeps it as one opaque node and Settings rewrites its field spans."""
+        open_tok, close = self._block_head()
+        brace = self.expect(lx.LBRACE)
+        raw, field_spans = self.parse_config_seq(lx.RBRACE)
+        body = (brace.pos + 1, self.peek().pos)
+        self.expect(lx.RBRACE)
+        config: dict = {}
+        if not isinstance(raw, dict):
+            if raw:
+                self.diags.warn(W07, "[@moss] expects key: value pairs", open_tok.pos)
+            raw, field_spans = {}, {}
+        for key, value in raw.items():
+            if key is POSITIONAL:
+                self.diags.warn(W07, "[@moss] expects key: value pairs", open_tok.pos)
+            elif key == "canvas":
+                canvas = str(value).strip().lower() if isinstance(value, str) else ""
+                if canvas in MOSS_CANVASES:
+                    config["canvas"] = canvas
+                else:
+                    self.diags.warn(W08, f"canvas must be one of {', '.join(MOSS_CANVASES)}", open_tok.pos)
+            else:
+                self.diags.warn(W07, f"unknown [@moss] field {key!r}; ignored", open_tok.pos)
+        group = Group(children=[], pos=open_tok.pos, end=self.prev_end(),
+                      block_type="moss", moss_config=config)
+        group.spans = Spans(node=(open_tok.pos, self.prev_end()), set_body=body,
+                            fields={k: v for k, v in field_spans.items() if k is not POSITIONAL},
+                            block_head=(open_tok.pos, close.pos + 1))
+        return group
+
+    def parse_moss_region_block(self) -> Group:
+        """`[@region mask: [x0, x1, y0, y1], type: character]: { … }` — one MOSS
+        region, its head inside the brackets (no container around it)."""
+        open_tok = self.expect(lx.LBRACKET)
+        first = self.peek()
+        cut = first.raw.index("@region") + len("@region")
+        # The head shares its TEXT run with `@region`; parse the rest of it as the
+        # region's config sequence, exactly like a `[@region]` entry header.
+        self.toks[self.i] = lx.Tok(lx.TEXT, first.raw[cut:], first.pos + cut)
+        params, field_spans = self.parse_config_seq(lx.RBRACKET)
+        body_span = (first.pos + cut, self.peek().pos)
+        close = self.expect(lx.RBRACKET)
+        if not isinstance(params, dict):
+            params = {POSITIONAL: params} if params else {}
+        params = dict(params)
+        moss_type = None
+        if "type" in params:
+            value = params.pop("type")
+            moss_type = str(value).strip().lower() if isinstance(value, str) else ""
+            if moss_type not in MOSS_TYPES:
+                self.diags.warn(W08, f"type must be one of {', '.join(MOSS_TYPES)}", open_tok.pos)
+                moss_type = None
+        region = self.region_from(params, open_tok.pos)
+        self._skip_ws()
+        self.expect(lx.COLON)
+        self._skip_ws()
+        group = self.parse_group()
+        if group.settings.region is not None:
+            self.diags.warn(W04, pos=group.pos)
+            group.spans.fields.pop("region", None)
+        group.settings.region = region
+        group.block_type = "moss_region"
+        group.moss_type = moss_type
+        group.pos = open_tok.pos
+        spans = group.spans
+        spans.node = (open_tok.pos, group.end)
+        spans.block_head = (open_tok.pos, close.pos + 1)
+        spans.region_form = "moss"
+        spans.region_decl = (open_tok.pos, close.pos + 1)
+        spans.region_body = body_span
+        spans.region_fields = field_spans
         return group
 
     def parse_schedule_block(self) -> Group:
@@ -1015,6 +1124,12 @@ class Parser:
                 s.schedule = _clamp_interval(iv) if iv else None
                 if spans is not None and s.schedule is not None:
                     spans.schedule_form = "set"
+            elif key == "type":
+                field = str(value).strip().lower() if isinstance(value, str) else ""
+                if field in MOSS_FIELDS:
+                    s.moss_field = field
+                else:
+                    self.diags.warn(W08, f"type must be one of {', '.join(MOSS_FIELDS)}", pos)
             elif key == "region_window":
                 iv = _pair(value, self.diags, pos)
                 s.region_window = _clamp_interval(iv) if iv else None

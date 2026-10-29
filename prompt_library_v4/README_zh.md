@@ -2,7 +2,7 @@
 
 [English](README.md) | **中文**
 
-用嵌套 Block 编辑提示词，保存常用组合，并把新标签收录进 Class 池。V4 沿用 [PLv3 语言](../prompt_library_v3/README.md)，最终编译为 [comfyui-prompt-control](https://github.com/asagi4/comfyui-prompt-control) 语法。
+用嵌套 Block 编辑提示词，保存常用组合，并把新标签收录进 Class 池。V4 沿用 [PLv3 语言](../prompt_library_v3/README.md)，可输出 [comfyui-prompt-control](https://github.com/asagi4/comfyui-prompt-control) 语法或 MOSS Image 提示词。
 
 ## 开始使用
 
@@ -30,11 +30,73 @@ V3 独立 Editor／Library 已退役，旧 Library 不再自动打开或写入�
 - Region 容器的 **Timing** 滑条有四个滑块，不区分身份：每次拖动后按位置排序，最外两个是容器的 schedule（外侧之外整个容器不生效），里面两个是 **region window**（外侧与内侧之间不分区，所有条目合并成普通提示词，与 `plain` 输出相同）。内外重合表示一直分区。Source 写法：`.set{schedule: {0, 0.8}, region_window: {0, 0.4}}`。Region 开关关闭时滑条不可用。
 - 有 region 但 Base、Fill 都没有文字时，没被 region 覆盖的区域由共同文字来画：COUPLE 以 `FILL() <共同文字>` 开头（否则 prompt-control 会生成一个空的全图 base，平分每个 region 的一半）；AND 会加一段"全图减去所有 region"，除非矩形能证明铺满整张图（否则那块的正面预测是 0）。
 
+## MOSS Image
+
+在窗口中间栏的齿轮打开 **General Settings → Output mode → MOSS Image**。沿用同一个 PLV4 节点，支持 Node 1.0。
+
+- 节点新增 **width / height** 可选连接输入。只有实际输出矩形 Region 的 MOSS 节点，执行时才要求提供生成宽高（正整数、16 的倍数）。没有 region、或 Region 开关关闭时不要求宽高。
+- 只有 caption（没有 region、meta、canvas、palette，例如负向提示词）时输出纯文本，保留手写的转义；其余情况输出 Layout JSON，没有 region 时只有 `{"summary": {...}}`，某个字段没有内容就不写。bbox 按当前宽高转换为中心原点像素 `yxyx`（向外取整）。
+
+MOSS 的结构比 Prompt Control 严格：
+
+```text
+[@moss]: { canvas: single }
+{ poster, anime illustration }.set{type: meta}
+{ cream, navy blue }.set{type: palette}
+a shop interior, warm light.
+[@region mask: [0, 0.5, 0, 1], type: character]: {
+    a girl, school uniform.
+    { saber \(fate\), 1girl, { solo } }.set{type: tag}
+    { red, white }.set{type: palette}
+}
+[@region mask: [0.5, 1, 0, 0.3], type: text]: {
+    bold red sign.
+    { OPEN
+NOW }.set{type: text}
+}
+```
+
+- **顶层**只能放普通 block、`[@region …]` block，以及最上面那一行 `[@moss]`。顶层普通 block 在 Details 的 **Type** 里选 caption / meta / palette（默认 caption），写成 `.set{type: …}`。
+- **region 里**只能放普通 block，Type 可选 caption / tag / palette；`type: text` 的 region 还可以选 text。
+- **subblock 不能选 type**，继承它所在 block 的 type，层数不限。
+- Library 里保存的 Class / Block 可以直接导入，再在 Details 里设 Type；Library block 的 `[路径]` 头和 `.set{format}` 都保留。
+- 汇总：caption 按顺序连成 `caption`；meta / tag / palette 每个条目是数组的一项（顶层 meta → `summary.meta`，palette → `summary.palette`，region 内进 `items[]`），多个 block 按顺序拼接并去重；text 取原文、保留换行（`\n` 也算），只在 type=text 时输出到 `text`。Sentence case 只影响 caption。
+- **MOSS block**：MOSS 模式下 Blocks 顶部固定一个 `[@moss]` block，只有 canvas 下拉框（single / multi_panel / collage，留空不输出）。切到 MOSS 自动出现，不能删除、关闭或移动，只有一个；Prompt Control 下隐藏。General Settings 里也能改 canvas。
+- 新建菜单只提供当前位置允许的内容，拖放也不能放进不允许的位置；手写 Source 写出的不合法结构灰显并说明原因，不进输出。
+- 没有 Region 容器：节点本身就是 region 容器。General Settings 的 **Region** 开关和 region 列表就是原来容器的界面；关闭后各 region 的 caption、tag、palette 合并进 summary，text 不输出。旧文档里的 `[@region]` 容器在 MOSS 下灰显，Details 里点 **转换为 Region blocks** 一键转换（保留类型、可见文字和扩写开关）。
+- Region 使用矩形 **mask**，可手动设置或绑定 Mask Library 的矩形画布。比例坐标不会被改写；旧像素矩形按输出画布校验，越界、反向或零面积报错。
+- 每个 region 的 **Upsample caption** 和 General Settings 的 **Summary upsample** 默认关闭，只控制后面的扩写节点，存在 Document metadata 里，不进语法。
+- **Sentence case** 默认关闭，只改变输出 caption 的句首，不修改 Source / Document / Library，也不修改 tag 和 text。逗号不作为句首；保留其余大小写，并保护常见缩写、URL、带下划线标签和 iPhone 一类混合大小写词。它是保守的字符规则，不是完整语言理解。
+- JSON 里的 `\(` 写成裸括号：编码器读的是 JSON 原文，`\(` 会被序列化成 `\(`，ComfyUI 的转义只吃掉一个反斜杠。MOSS 不解析权重，裸括号本来就是普通字符。`plain` 输出保留原样。
+- Prompt Control 模式下，`[@region …]` 等价于带 region 设置的 block，`[@moss]` 和 meta / palette 类型的 block 不输出，其余 type 当普通 block。
+
+扩写连接：
+
+```text
+PLV4 metadata ──→ XYZ PLV4 MOSS Upsample ←── CLIP（MOSS 的 Qwen3.5 编码器）
+                              ├─ prompt ──→ 原生 CLIP Text Encode
+                              └─ metadata ──→ XYZ PLV4 Image Metadata
+```
+
+不扩写时，直接把 PLV4 的 `prompt` 接原生 CLIP Text Encode。不要再用官方模板的整段 prompt upsampler 重写 Layout。
+
+扩写选择通过 metadata 传递，最终 JSON 不包含临时控制字段。扩写节点逐个修改选中的 caption，保留 label / bbox / text / tags / palette / 顺序，并输出与最终提示词对应的新 metadata；图片保存应使用这份新 metadata。扩写复用现有编码器，不额外下载模型；每个区域使用稳定 ID 派生种子，有界缓存不保留编码器对象。`plain` 是展开后的描述文本，不携带区域 JSON。
+
+此节点以原生 **TextGenerate（Generate Text）** 为生成后端，增加 Layout 拆分与组装。支持相同的 sampling on/off、temperature、top_k、top_p、min_p、repetition_penalty、presence_penalty、seed、max_length（1–32768，每次 caption 调用）、thinking、use_default_template、MTP 和可编辑 system_prompt；支持编码器允许的 image / video / audio 输入。在 Nodes 1.0 中采样参数平铺显示，sampling_mode=off 时忽略这些参数。关闭 use_default_template 时，system_prompt 按原生规则忽略。
+
+也可只接 `prompt` + CLIP，不接 metadata：普通文本调用一次 TextGenerate，Layout JSON 默认扩写 summary 和所有 item.caption；如只接 metadata，prompt 留空即可。两者都接时必须来自同一输出，否则报错以避免区域开关错配。默认 system_prompt 是视觉描述扩写指令，可自行替换或清空；同一 system_prompt 用于每个选中的 caption。普通文本使用原始 seed，JSON 的区域使用派生 seed。第四个 `thinking` 输出单独返回推理内容（Layout 时为按 summary / 区域 ID 区分的 JSON），不会混入绘图提示词。无 metadata 时不会生成 PLV4 保存快照；需要保存快照仍应连接 metadata。Layout 输入不启用前端动态提示词，防止 JSON 花括号被当成随机选项。
+
+MOSS 不提供 Schedule / AVG 容器、Region 容器、时间设置、IMASK、Base / Fill 和 CAT / AVG / AND / COUPLE 格式操作。这些已有结构在 MOSS 中灰显，整个对应子树不输出，切回 Prompt Control 恢复，原 enabled 不变。普通 Block、Pool、Library、shuffle、随机选择、dropout 保留。
+
+feather、mask_weight、cond_weight、include_in_base 不参与 Layout。普通权重默认不输出；开启 **NegPip weights** 后保留权重语法，需要在工作流外接兼容 MOSS 的 CLIP NegPip。LoRA 触发词可保留，但原生 CLIP Text Encode 不会根据 `<lora:...>` 加载模型；LoRA 需由外部加载节点提供，不能仅凭 metadata 判断模型已经应用。
+
+MOSS **Preview 始终可用**：宽高能在前端求值时显示最终中心像素坐标；未接宽高，或已接 Resolution Selector 等后端节点但尚不能求值时，仍显示完整 caption / Layout，bbox 暂用比例坐标并标明“坐标待换算”。预览保留 `yxyx` 顺序，旧像素矩形会明确区分单位；临时坐标不作为执行结果或图片 metadata。实际运行时再按宽高换算、校验。有 Region 却缺宽高仍会在执行时提醒。加载 Library 文档不会重置当前节点的输出模式和句首大写设置。
+
 ## Mask Library
 
 主窗口左侧标题行的 **Library / Mask Library** 图标切换同一面板；也可以通过 **XYZ Tools → Prompt Library V4 — Mask Library** 单独打开。Mask Library 独立存放在 `prompt_library_v4_data/masks.db`，不会转换提示词库。
 
-- **矩形画布**：新建画布后在空白处拖动绘制；上方 **添加 mask** 创建中心矩形。列表与画板双向选中，重叠时优先命中最上层。选中后可移动或用八个 handle resize，只有列表拖动柄用于排序。名称、颜色和连接跟随稳定 ID；松开一次提交一次，画布自有 Undo/Redo。版本冲突保留草稿并显示错误。
+- **矩形画布**：新建画布后在空白处拖动绘制；上方 **添加 mask** 创建中心矩形。列表与画板双向选中；选中的 mask 临时显示在最上层，重叠处优先拖动它，可用八个 handle resize。选中不改变保存顺序或输出槽位，只有列表拖动柄用于排序。名称、颜色和连接跟随稳定 ID；松开一次提交一次，画布自有 Undo/Redo。版本冲突保留草稿并显示错误。
 - **图片画布**：Refresh images 只读扫描 `input/xyz_masks/`；画布列表项直接提供 View masks、Rename canvas、Extraction settings、Relocate image、Delete canvas，面板顶部可更改 input 相对子目录。PNG/WebP/JPEG/BMP 使用静态第一帧。Alpha 默认 `1-alpha`，可反转；无 Alpha 时不提供该项。RGB 默认取面积前 4 色（最多 32），并列按 RGB 升序，黑白和不连通同色块均参与；默认容差 0.05。透明度保留，预览颜色独立于分割目标。修改或删除库条目不会改原图片。
 - **Region mask**：四个数依次为 x1/x2/y1/y2。独立矩形可以直接输入，或用 **编辑** 打开单矩形窗口；选库矩形后坐标只读，编辑打开所属画布。库修改共享刷新；解除保留当前坐标。删除矩形或画布后，旧 workflow 使用最后坐标转成独立副本。
 - **Region imask**：可以继续输入非负、0 基手动编号；也可从二级缩略图菜单选择图片 Alpha 或确切 RGB。绑定后显示路径、提取项和预览，解除恢复之前的手动编号。文件或已引用颜色消失时明确报错，不自动替换。

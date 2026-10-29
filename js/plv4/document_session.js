@@ -130,8 +130,19 @@ export class DocumentSession {
   // same undo history as typing and structural commands.
   loadDocument(body) {
     return this._enqueue(async () => {
-      const opened = await this.request('open', clone(body));
+      let opened = await this.request('open', clone(body));
       if (this._disposed) throw new SessionError('disposed', 'editing session has been disposed');
+      // Output choices belong to this workflow node, not the loaded content.
+      const previousMeta = this.state.doc.root.meta || {}, prepared = clone(opened.state.doc);
+      prepared.root.meta ??= {};
+      for (const key of ['output_mode', 'sentence_case', 'moss_weights', 'moss']) {
+        if (Object.hasOwn(previousMeta, key)) prepared.root.meta[key] = clone(previousMeta[key]);
+        else delete prepared.root.meta[key];
+      }
+      if (JSON.stringify(prepared) !== JSON.stringify(opened.state.doc)) {
+        opened = await this.request('open', { doc: prepared, scope: opened.state.scope || 'document' });
+        if (this._disposed) throw new SessionError('disposed', 'editing session has been disposed');
+      }
       const revision = this.revision + 1;
       this.past.push(this._snapshot());
       if (this.past.length > this.historyLimit) this.past.shift();
@@ -212,11 +223,11 @@ export class DocumentSession {
   }
 
   compile(nodeInputs) {
-    const { seed, region_mode } = nodeInputs;
+    const { seed, region_mode, width, height } = nodeInputs;
     if (!Number.isSafeInteger(seed)) return Promise.reject(new SessionError('node_seed_only', 'read the resolved ComfyUI node seed input'));
     return this._enqueue(async () => {
       const revision = this.revision;
-      const result = await this.request('compile', { state: clone(this.state), seed, region_mode });
+      const result = await this.request('compile', { state: clone(this.state), seed, region_mode, preview: true, ...(width != null ? { width } : {}), ...(height != null ? { height } : {}) });
       if (result.revision !== revision) throw new SessionError('stale_response', 'preview belongs to an old revision');
       return result;
     });

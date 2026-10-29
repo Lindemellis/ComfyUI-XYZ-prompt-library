@@ -567,6 +567,52 @@ def test_enable_prompt_candidate_retains_occurrence_identity():
     assert state.doc.find(item.id).enabled
 
 
+@pytest.mark.parametrize('ending', ['', '.', ','])
+@pytest.mark.parametrize('user_breaks', [0, 1, 2])
+def test_pool_prompt_append_keeps_closing_layout_out_of_body(ending, user_breaks):
+    state = EditorState.create('{\n    existing' + ending + '\n' * (user_breaks + 1) + '}')
+    parent = state.doc.root.children[0]
+    original_id = parent.children[0].id
+    for index, text in enumerate(['added', '(weighted:1.2)']):
+        state = run(state, 'EnableCandidate', parent_id=parent.id, edge='end', text=text,
+                    source={'kind': 'tag', 'id': f'tag{index}'}, occurrence=['pool', f'tag{index}'])
+        state = EditorState.from_json(state.to_json())
+    gap = '\n' * user_breaks if user_breaks else ' '
+    delimiter = '.' if ending == '.' else ','
+    assert state.text == '{\n    existing' + delimiter + gap + 'added, (weighted:1.2),\n}'
+    assert state.doc.find(parent.id).children[0].id == original_id
+
+
+@pytest.mark.parametrize('kind', ['MergeClassTags', 'MergeLibraryBlock'])
+@pytest.mark.parametrize('user_breaks', [0, 2])
+def test_pool_content_merge_shares_prompt_append_layout(kind, user_breaks):
+    state = EditorState.create('{\n    existing.\n' + '\n' * user_breaks + '}')
+    parent = state.doc.root.children[0]
+    parent.meta['pool'] = 'pool'
+    source = EditorState.create('{ added, (weighted:1.2) }').doc.root.children[0]
+    source.meta['pool'] = 'pool'
+    state = run(state, kind, parent_id=parent.id, edge='end', snapshot=source.to_json(),
+                source={'kind': 'class' if kind == 'MergeClassTags' else 'block', 'id': 'pool'},
+                occurrence=['pool'])
+    gap = '\n' * user_breaks if user_breaks else ' '
+    assert state.text == '{\n    existing.' + gap + 'added, (weighted:1.2)\n}'
+    assert state.doc.find(parent.id).meta['pool'] == 'pool'
+
+
+def test_pool_prompt_append_preserves_parked_tail_and_other_blocks():
+    prefix = '{ untouched,\n\nsource }, '
+    state = EditorState.create(prefix + '{\n    visible, off.\n}')
+    parent = state.doc.root.children[1]
+    parked = parent.children[-1]
+    state = run(state, 'SetEnabled', id=parked.id, enabled=False)
+    state = run(state, 'EnableCandidate', parent_id=parent.id, edge='end', text='added',
+                source={'kind': 'tag', 'id': 'tag'}, occurrence=['pool', 'tag'])
+    assert state.text == prefix + '{\n    visible, added,\n}'
+    assert state.doc.find(parked.id).enabled is False
+    state = run(state, 'SetEnabled', id=parked.id, enabled=True)
+    assert state.text == prefix + '{\n    visible, off. added,\n}'
+
+
 def test_special_same_parent_reorder_keeps_time_slots_and_region_heads():
     state = EditorState.create("[@schedule]: { 0 - 0.3: a, 0.3 - 0.6: b, 0.6 - 1: c }")
     container = state.doc.root.children[0]
@@ -875,3 +921,24 @@ def test_windows_line_ends_are_normalised_on_open_commands_and_typing():
     assert EditorState.from_json(payload).text == state.text
     typed = run(state, 'ReplaceText', text=state.text.replace('upper body', 'upper body,\r\ncowboy shot'))
     assert '\r' not in typed.text and 'upper body,\ncowboy shot' in typed.text
+
+
+@pytest.mark.parametrize('source', [
+    '[@avg]: { 1: { }, 1: { } }',
+    '{ { }, { } }',
+    '{ { { }, { } }, { { }, { } } }',
+])
+def test_native_body_edit_preserves_identical_empty_siblings(source):
+    state = EditorState.create(source)
+    owner = state.doc.root.children[0]
+    while owner.children:
+        owner = owner.children[0]
+    original_ids = ids(state)
+    _, index = full_index(state.doc)
+    at = index[owner.id].spans.content[1]
+    edited = run(state, 'ReplaceText', text=state.text[:at] + 'red hair' + state.text[at:],
+                 insert_anchor={'parent_id': owner.id, 'edge': 'end'})
+    assert [i for i in ids(edited) if i in original_ids] == original_ids
+    assert [child.raw for child in edited.doc.find(owner.id).children] == ['red hair']
+    assert all(not child.children for child in edited.doc.root.walk()
+               if child.id in original_ids and child.kind == 'group' and not state.doc.find(child.id).children and child.id != owner.id)

@@ -22,6 +22,8 @@ from __future__ import annotations
 
 import hashlib
 import math
+import os
+import re
 from itertools import product
 from dataclasses import dataclass, field, replace
 from random import Random
@@ -30,6 +32,19 @@ from .diagnostics import E03, W05, W11, Diagnostics, PLv3Error
 from .parser import Group, Item, Lora, Node, Region, Text
 
 FULL: tuple[float, float] = (0.0, 1.0)
+
+_LORA_NAME = re.compile(r'^(<lora(?:ctl)?:)([^:<>]+)')
+
+
+def native_lora(text: str, sep: str = os.sep) -> str:
+    """Spell a LoRA's folder separators the way this machine's `folder_paths`
+    lists them. The document keeps `/` (the browser stores posix paths so a
+    workflow is portable), but prompt-control resolves a name by comparing it
+    with `get_filename_list("loras")` verbatim, and on Windows every entry there
+    says `anima\\clothing\\x.safetensors`: `anima/clothing/x.safetensors` matched
+    nothing and the LoRA was dropped with a warning. PC reads `\\` in a filename
+    literally (`filename = [^:<>]+`), so the native form is safe to emit."""
+    return _LORA_NAME.sub(lambda m: m[1] + m[2].replace('/', sep).replace('\\', sep), text, count=1)
 
 
 @dataclass
@@ -260,9 +275,10 @@ def render(node: Node, ctx: RenderCtx) -> Part | None:
         return Part(text, origin=id(node)) if text else None
 
     if isinstance(node, Lora):
-        if ctx.centralize_loras and node.text.startswith('<lora:'):
-            return Part('', loras=[(id(node), node.text, ctx.interval)], origin=id(node))
-        return Part(node.text, origin=id(node))
+        text = native_lora(node.text)
+        if ctx.centralize_loras and text.startswith('<lora:'):
+            return Part('', loras=[(id(node), text, ctx.interval)], origin=id(node))
+        return Part(text, origin=id(node))
 
     if isinstance(node, Item):
         chunks = []
@@ -287,6 +303,8 @@ def render(node: Node, ctx: RenderCtx) -> Part | None:
 
 
 def _render_group(group: Group, ctx: RenderCtx) -> Part | None:
+    if group.block_type == "moss" or group.settings.moss_field in ("meta", "palette"):
+        return None  # MOSS-only data: no prompt-control text
     if (group.settings.region is not None and id(group) not in ctx.plain_regions
             and not _belongs(group, ctx.segment, ctx.included_in_base)):
         return None

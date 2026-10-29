@@ -69,7 +69,7 @@ export class MaskEditor {
     this.list.scrollTop=scrollTop;this.properties=element('div','mask-editor-properties');this.side.append(this.properties);this.renderCoordinates();
     const oldError=this.error?.textContent;this.error=element('div','mask-error',oldError || '');this.side.append(this.error);
     const retry=button('Retry save','Retry the current draft',()=>this.commit(this.failedBefore));retry.hidden=!this.failedBefore;this.side.append(retry);
-    const footer=element('div','mask-editor-footer',this.pending?'Saving…':this.single?'Independent rectangle':`${this.canvas.masks.length} masks · First row is on top`);this.side.append(footer);this.draw();
+    const footer=element('div','mask-editor-footer',this.pending?'Saving…':this.single?'Independent rectangle':`${this.canvas.masks.length} masks · Selected mask is shown on top`);this.side.append(footer);this.draw();
   }
   select(id){this.selected=id;this.side.querySelectorAll('.mask-rect-row').forEach(row=>row.classList.toggle('selected',row.dataset.maskId===id));this.renderCoordinates();this.draw();}
   renderCoordinates(){
@@ -79,13 +79,16 @@ export class MaskEditor {
   }
   thumbnail(mask){const c=document.createElement('canvas');c.width=c.height=64;const ctx=c.getContext('2d');ctx.fillStyle='white';ctx.fillRect(0,0,64,64);const [x1,x2,y1,y2]=mask.coordinates;ctx.fillStyle=mask.color;ctx.fillRect(x1*64,y1*64,(x2-x1)*64,(y2-y1)*64);return c.toDataURL();}
   handles(mask){const [a,b,c,d]=mask.coordinates,x=(a+b)/2,y=(c+d)/2;return [[a,c,'nw'],[x,c,'n'],[b,c,'ne'],[b,y,'e'],[b,d,'se'],[x,d,'s'],[a,d,'sw'],[a,y,'w']];}
-  draw(){if(!this.board)return;const ctx=this.board.getContext('2d');ctx.clearRect(0,0,512,512);ctx.fillStyle='white';ctx.fillRect(0,0,512,512);for(const mask of [...this.canvas.masks].reverse()){const [a,b,c,d]=mask.coordinates;ctx.fillStyle=mask.color;ctx.fillRect(a*512,c*512,(b-a)*512,(d-c)*512);}
-    const selected=this.canvas.masks.find(m=>m.id===this.selected);if(selected){const [a,b,c,d]=selected.coordinates;ctx.strokeStyle='#111';ctx.lineWidth=1;ctx.strokeRect(a*512,c*512,(b-a)*512,(d-c)*512);for(const [x,y]of this.handles(selected)){ctx.fillStyle='white';ctx.fillRect(x*512-4,y*512-4,8,8);ctx.strokeRect(x*512-4,y*512-4,8,8);}}}
+  draw(){if(!this.board)return;const ctx=this.board.getContext('2d');ctx.clearRect(0,0,512,512);ctx.fillStyle='white';ctx.fillRect(0,0,512,512);
+    const selected=this.canvas.masks.find(m=>m.id===this.selected);
+    const layers=this.canvas.masks.filter(m=>m!==selected).reverse();if(selected)layers.push(selected);
+    for(const mask of layers){const [a,b,c,d]=mask.coordinates;ctx.fillStyle=mask.color;ctx.fillRect(a*512,c*512,(b-a)*512,(d-c)*512);}
+    if(selected){const [a,b,c,d]=selected.coordinates;ctx.strokeStyle='#111';ctx.lineWidth=1;ctx.strokeRect(a*512,c*512,(b-a)*512,(d-c)*512);for(const [x,y]of this.handles(selected)){ctx.fillStyle='white';ctx.fillRect(x*512-4,y*512-4,8,8);ctx.strokeRect(x*512-4,y*512-4,8,8);}}}
   point(e){const r=this.board.getBoundingClientRect();return [clamp((e.clientX-r.left)/r.width),clamp((e.clientY-r.top)/r.height)];}
   begin(e){if(e.button!==0||this.pending)return;e.preventDefault();this.board.focus();const point=this.point(e),before=copy(this.canvas);let target=this.canvas.masks.find(m=>m.id===this.selected),mode=null;
     const tolerance=9/this.board.getBoundingClientRect().width;
     if(target)mode=this.handles(target).find(([x,y])=>Math.abs(x-point[0])<tolerance&&Math.abs(y-point[1])<tolerance)?.[2];
-    if(!mode){target=this.canvas.masks.find(m=>{const[a,b,c,d]=m.coordinates;return point[0]>=a&&point[0]<=b&&point[1]>=c&&point[1]<=d;});mode=target?'move':'create';}
+    if(!mode){const contains=m=>{const[a,b,c,d]=m.coordinates;return point[0]>=a&&point[0]<=b&&point[1]>=c&&point[1]<=d;};if(!target||!contains(target))target=this.canvas.masks.find(contains);mode=target?'move':'create';}
     if(!target){if(this.single)return;this.add(normaliseRect([point[0],point[0],point[1],point[1]]));target=this.canvas.masks.at(-1);}
     this.selected=target.id;this.gesture={point,before,mode,id:target.id,rect:[...target.coordinates],pointer:e.pointerId};this.board.setPointerCapture(e.pointerId);this.render();}
   move(e){const g=this.gesture;if(!g||g.pointer!==e.pointerId)return;e.preventDefault();const p=this.point(e),m=this.canvas.masks.find(m=>m.id===g.id),[a,b,c,d]=g.rect;let next=[a,b,c,d];

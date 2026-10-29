@@ -29,6 +29,11 @@ export function createRegionModeControl(host) {
 
 export function hideRegionModeWidget(node) {
   if (!node.comfyClass?.includes('Library V4')) return;
+  // Older workflow records restore their old inputs after node creation.
+  // Append new optional sockets without shifting any existing link indices.
+  for (const name of ['width', 'height']) {
+    if (!node.inputs?.some(input => input.name === name)) node.addInput(name, 'INT');
+  }
   // An older workflow may restore only its original two output descriptions.
   if (node.outputs?.length === 2) node.addOutput('metadata', 'PLV4_METADATA');
   if (node.outputs?.length === 3) node.addOutput('mask_bundle', 'PLV4_MASK_BUNDLE');

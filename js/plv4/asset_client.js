@@ -24,6 +24,14 @@ export async function libraryDocumentRequest(operation, body) {
   // already included in the baseline. Keep them off the Library writer.
   if (['LocateDetails', 'SetEnabled', 'SetContentEnabled', 'Delete'].includes(body.command.type)) return documentRequest(operation, body);
   const command = body.command;
+  // Block controls change the group's header, never its atomic pool tags.
+  // Attention parentheses are themselves tags, so their weights still collect
+  // through the Library path (as do SetPromptSettings and all content edits).
+  const find = node => node.id === command.id ? node : node.children?.map(find).find(Boolean);
+  const target = command.type === 'SetSettings' ? find(body.state.doc.root) : null;
+  const blockSettings = target?.kind === 'group' && !target.opaque && target.form !== 'paren' &&
+    Object.keys(command.patch || {}).every(key => ['weight', 'schedule', 'region_window', 'region', 'format', 'shuffle', 'random_select', 'dropout'].includes(key));
+  if (blockSettings || ['SetAvgWeight', 'SetScheduleBoundary', 'SetRegionEnabled'].includes(command.type)) return documentRequest(operation, body);
   const emptyBlock = command.type === 'InsertBlock' && !command.snapshot &&
     (command.form ? ['schedule', 'region', 'avg'].includes(command.form) : !command.text || /^\s*\{\s*\}\s*$/.test(command.text));
   const emptyEntry = command.type === 'InsertEntry' && !command.snapshot && !command.text && !command.form;
